@@ -21,6 +21,7 @@
 //! M1 adds `vec`, `input`, `world_query`, `movement`, `pad`, `recipe` and
 //! `combat`; `buddy`, `base` and `match_rules` follow in the same milestone.
 
+pub mod base;
 pub mod buddy;
 pub mod combat;
 pub mod fixed;
@@ -37,6 +38,7 @@ pub mod tuning;
 pub mod vec;
 pub mod world_query;
 
+pub use base::{Base, Core, Elimination, PlayerLife, PlayerSlot};
 pub use buddy::{
     Buddy, BuddyAction, BuddyContext, BuddyIntent, BuddyKind, BuddyState, BuddyStats, Stance,
     Target,

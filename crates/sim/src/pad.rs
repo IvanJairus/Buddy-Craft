@@ -65,6 +65,10 @@ pub enum PlaceError {
     Protected,
     /// Horizontally inside a pad but above its build height.
     TooHigh,
+    /// The pad's team has been eliminated (D-02). The volume is dead ground:
+    /// crates are gone, nothing can be built there again, and the losing
+    /// players are on a defeat screen rather than placing blocks.
+    Eliminated,
 }
 
 impl core::fmt::Display for PlaceError {
@@ -74,6 +78,7 @@ impl core::fmt::Display for PlaceError {
             PlaceError::NotYours => "inside another team's pad",
             PlaceError::Protected => "inside the core's protected volume",
             PlaceError::TooHigh => "above the pad's build height",
+            PlaceError::Eliminated => "that team has been eliminated",
         };
         f.write_str(s)
     }
@@ -86,6 +91,8 @@ pub struct Pad {
     blocked: [bool; PAD_CELLS],
     stable_since: Tick,
     last_hash: u64,
+    /// Set once the team is eliminated (D-02). Irreversible.
+    sealed: bool,
     /// World position of pad-local `(0, 0, 0)`.
     origin: [i32; 3],
 }
@@ -108,6 +115,7 @@ impl Pad {
             blocked: [false; PAD_CELLS],
             stable_since: Tick::ZERO,
             last_hash: 0,
+            sealed: false,
             origin,
         };
         pad.last_hash = pad.hash();
@@ -194,6 +202,9 @@ impl Pad {
         let Some(i) = Pad::index_of(local) else {
             return false;
         };
+        if self.sealed {
+            return false;
+        }
         if self.cells[i] == occupied {
             return false;
         }
@@ -245,6 +256,24 @@ impl Pad {
     /// after the pad has been swept.
     pub fn clear(&mut self) {
         self.cells = [false; PAD_CELLS];
+    }
+
+    /// Destroy the pad's contents and close it for good (D-02).
+    ///
+    /// Irreversible and idempotent. An eliminated team's pad is dead ground:
+    /// sealing is a flag rather than "block all 256 cells" because the blocked
+    /// mask means something specific — the core's protected volume — and
+    /// overloading it would make a swept pad indistinguishable from a core that
+    /// grew to fill its own pad.
+    pub fn seal(&mut self) {
+        self.cells = [false; PAD_CELLS];
+        self.sealed = true;
+    }
+
+    /// True once the pad has been sealed by an elimination.
+    #[inline]
+    pub fn is_sealed(&self) -> bool {
+        self.sealed
     }
 
     /// Remove a set of crates. Returns how many were actually present.
@@ -392,6 +421,9 @@ impl Pads {
         let Some(pad) = self.pads.get_mut(team.0 as usize) else {
             return Err(PlaceError::Outside);
         };
+        if pad.is_sealed() {
+            return Err(PlaceError::Eliminated);
+        }
         let local = pad.to_local(world);
         if local[1] < 0 {
             return Err(PlaceError::Outside);

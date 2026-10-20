@@ -87,8 +87,8 @@ the matcher runs at most six times per tick — 0.06 % of the 50 ms tick budget.
 
 ```
 crates/
-  sim/          rules: fixed point, ids, rng, tuning, movement,
-                pads, recipes                                  (compiled twice)
+  sim/          rules: fixed point, ids, rng, tuning, movement, pads,
+                recipes, combat, buddies, base, match rules    (compiled twice)
   world/        voxel storage, worldgen, mesher, chunk diffs
   protocol/     wire messages                          (M2)
   room/         pure room state machine, runtime-agnostic (M2)
@@ -111,7 +111,7 @@ we use" from an architectural decision into a configuration change.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 223 tests
+cargo test --workspace --all-targets              # 239 tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
@@ -148,9 +148,10 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-010 | crate-recipe matcher, pad placement rules, 14-recipe table | done |
 | T-011 | melee cones, swept projectiles, area damage, damage events | done |
 | T-012 | buddy AI: 4-state machine, budgeted A*, leash, stance toggle | done |
+| T-013 | core HP, damage multiplier, instant elimination (D-02) | done |
 | T-016 | `data/tuning.ron` validated against the plan | done |
 
-Three plan acceptance criteria were changed deliberately, all recorded here
+Four plan acceptance criteria were changed deliberately, all recorded here
 rather than quietly skipped:
 
 - **`proptest` was removed.** The version that satisfies the workspace requires
@@ -172,6 +173,15 @@ rather than quietly skipped:
   would need it). `R13_WARD` — whose `(1,1,1)` crate floats over the ring's hole
   — is the witness that the rule is scoped to the lowest layer and not to every
   crate.
+- **T-016's "no numeric literal > 1" grep test is not implemented.** The other
+  two T-016 criteria are: tuning parses at compile time and `tuning_matches_docs`
+  pins it to the plan. The third is deferred because a blanket "no literal above
+  1" is the wrong shape for it — `CORE_FOOTPRINT = 2`, a 3v3 team count and a
+  6-player cap are *structure*, not tuning, and a lint that flags them would
+  train people to add `#[allow]`. What the criterion is reaching for is "no
+  designer-facing number is hardcoded", which needs a rule that can tell a named
+  constant from an inline magic number. That is a source-scanning tool, and it
+  belongs next to T-015's harness rather than bolted onto the rules crate.
 
 ## Combat: events, not side effects
 
@@ -232,6 +242,40 @@ with zero HP and dies on its first tick. Missing rows, duplicate rows, zeroed
 fields and caps above §4.7's team total are all load errors with the offending
 role named.
 
+## The base: one number does all the pacing work
+
+10,000 HP behind a 0.35 multiplier is the whole time budget of a match. A
+bare-handed player needs about 28 minutes of uninterrupted hitting; four players
+with swords and a ram need 80 seconds. That gap is the game — chip damage is
+real but never decisive, so the win condition is *presence at the core*, which
+is what makes the airdrop schedule and the delivery trip matter at all.
+
+Measured against §4.8's table, by simulating the damage pipeline rather than
+multiplying DPS:
+
+| Composition | Measured | §4.8 |
+| --- | --- | --- |
+| 1 player, fists | 27.8 min (core survives 25) | 29.8 min |
+| 4 players + ram | 80.1 s | 83 s |
+| 4 players + ram + 4 tier-2 buddies | 66.7 s | 67 s |
+
+The fists row is 2 minutes faster than the table because the multiplier is
+applied **per hit**: 8 damage × 0.35 is 2.8, which rounds to 3, so a fist does
+2.9 effective DPS rather than 2.8. Accumulating the fraction instead would make
+the core's HP depend on the order hits arrive within a tick, which is precisely
+the kind of thing two clients can disagree about. The property the AC actually
+needs — "fists cannot win in 25 minutes" — holds with 1,000 HP to spare, so a
+rounding change that broke it would fail loudly.
+
+**Elimination (D-02) is one function, not a sequence.** `Base::eliminate` takes
+the whole team and kills every living player in a single loop, so "all on the
+same tick" is a property of the call graph rather than a promise the match loop
+has to keep. `PlayerLife` has exactly two variants and the test asserting that
+is written as an exhaustive match — adding `Spectator` breaks the build. A
+spectator mode was the alternative: it keeps losers in the room, but it costs a
+spectator camera, a spectator HUD, a separate snapshot stream, and an
+information-leak question about enemy positions. Dropping it removed all four.
+
 ## Content discrepancies, resolved rather than guessed
 
 `R06_MAGE` in §4.5.3 is sketched as `###/###/###` plus `.#.` on top — 10 blocks
@@ -258,6 +302,15 @@ follows ("Sniper > Tower/Ram, Berserker > Healer"), so both weights are negative
 in `sim::buddy` and the formula is written in its intended form:
 `priority − distance + low_hp_bonus`. The weights are `ROLE_PRIORITY`, which is
 the first thing to tune if buddies feel like they are shooting the wrong thing.
+
+The T-013 acceptance criterion asks for "4 players + ram + 4 buddies,
+uncontested, destroys in the 70–90 s window", but §4.8's own table gives 67 s
+for exactly that composition — and adding attackers to the ram-only push cannot
+make it *slower*. The table has the arithmetic behind it, so both are asserted
+at their own values: 80 s for the ram push (the AC's window) and 67 s with four
+buddies. If the pacing is wrong in playtest, §4.8 says to move `core.hp` or
+`core.damage_mult` and nothing else; both tests recompute from tuning, so they
+will follow.
 
 ## Non-goals for v1
 
