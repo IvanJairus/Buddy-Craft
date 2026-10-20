@@ -119,7 +119,7 @@ we use" from an architectural decision into a configuration change.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 308 tests
+cargo test --workspace --all-targets              # 326 tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
@@ -165,6 +165,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-016 | `data/tuning.ron` validated against the plan | done |
 | T-017 | wire contract: 20 messages, tag byte + postcard, size budgets | done |
 | T-018 | `decode_checked`, name/chat sanitisers, token buckets, fuzz target | done |
+| T-019 | room lifecycle: six edges, one terminal state, no clock | done |
 
 Six plan acceptance criteria were changed deliberately, all recorded here
 rather than quietly skipped:
@@ -510,6 +511,62 @@ by design and a wrapped tick is not 6.8 years of credit.
 is §6.6's 8/s with a burst of 8, so a player cannot bank a minute of edits and
 spend them in one tick. The tests assert the bucket buys *exactly* its configured
 rate over a second, and that 15 messages/s for ten seconds drops nothing.
+
+## The room: six edges and one terminal state
+
+§6.10 is a diagram of five phases and six arrows. It is implemented as exactly
+that — a `can_enter` table, not a set of `if`s:
+
+```
+Lobby     → Countdown      everyone ready, ≥2 players
+Lobby     → Cleanup        empty for 60 s
+Countdown → Lobby          someone unreadied, or dropped below 2
+Countdown → Live           after 60 ticks
+Live      → Ended          the match rules report an outcome
+Ended     → Cleanup        after 200 ticks
+```
+
+`illegal_transitions_are_rejected` walks all 25 ordered pairs, including
+self-transitions, and asserts that exactly six succeed — and a second test spells
+the six out independently, so adding an edge to the implementation without
+deciding to is a test failure rather than a quiet behaviour change. Every
+transition is funnelled through one method, so "is this legal" has one answer,
+and a caller that assigns the phase directly does not compile.
+
+**The host makes zero decisions.** `update(now, conditions)` returns an `Effect`:
+`BeginCountdown`, `CancelCountdown`, `BeginMatch`, `EndMatch`, `Cleanup`. The
+host shows a timer, emits `S_START`, steps the simulation — it never decides
+*when*. That is what lets the same state machine run inside a Durable Object and
+inside a `tokio` task, and it is why the whole lifecycle is tested in
+microseconds with no mocking: time is a `sim::Tick` parameter.
+
+Three things are worth recording.
+
+**`Cleanup` fires exactly once, and the test proves it by running three times
+long.** A Durable Object that persisted on every tick after cleanup would write
+the same row twenty times a second forever. `Cleanup` is emitted once because
+`Cleanup` has no outgoing edges and `update` returns `None` in a terminal phase —
+the property is structural, not a flag someone has to remember to check.
+
+**§6.10 draws an "empty 60 s" arrow out of `Ended` that can never fire.** The
+results window is 10 s and the empty-room window is 60 s, so the results timer
+always wins. The empty timer is still tracked (it costs one `Option<Tick>`), but
+the redundant edge is recorded as a `const _: () = assert!(ENDED_TICKS <
+EMPTY_TICKS)` rather than as a test that would fail if someone *fixed* the
+diagram.
+
+**There is no `Live → Cleanup` edge, and that is correct.** A live room with
+nobody in it still has a match, and the match ends it — `check_outcome` returns
+`NoHumans` (D-05) — before the empty-room rule could apply. If that ever stops
+being true, the match rules have a bug that a cleanup timeout would paper over,
+so the missing edge is a guard rather than an omission. `a_live_room_is_never_cleaned_up_directly`
+runs 2,400 ticks of an empty live room and asserts nothing happens.
+
+`tests/no_clock.rs` reads this crate's own source and fails the build if
+`std::time`, `Instant`, `async fn`, `.await` or `tokio` appears in it — comments
+and the test module stripped first, because a doc link is not a dependency. The
+guard was verified by adding `std::time::Instant::now()` to `lib.rs`, watching it
+fail on both tokens, and reverting.
 
 ## Content discrepancies, resolved rather than guessed
 
