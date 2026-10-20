@@ -76,10 +76,13 @@ we use" from an architectural decision into a configuration change.
 ## Quick start
 
 ```bash
-cargo test --workspace          # 91 tests
-cargo bench -p world --bench gen  # asserts the worldgen and mesh budgets
+cargo test --workspace --all-targets              # 93 tests
+cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
+
+# Look at the world. Property tests say a map is legal; this says it is a place.
+cargo run -p world --example ascii_map -- 0xC0FFEE 4
 ```
 
 Budgets are **asserted, not printed**: worldgen must stay under 1.5 ms per
@@ -89,8 +92,8 @@ column and meshing under 1.2 ms, or the benchmark exits non-zero. Set
 Current numbers on an M-series laptop (release):
 
 ```
-gen    0.142 ms/column   budget 1.5 ms
-mesh   0.598 ms/column   budget 1.2 ms
+gen    0.221 ms/column   budget 1.5 ms
+mesh   0.636 ms/column   budget 1.2 ms
 ```
 
 ## What M0 actually covers
