@@ -119,7 +119,7 @@ we use" from an architectural decision into a configuration change.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 326 tests
+cargo test --workspace --all-targets              # 349 tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
@@ -166,6 +166,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-017 | wire contract: 20 messages, tag byte + postcard, size budgets | done |
 | T-018 | `decode_checked`, name/chat sanitisers, token buckets, fuzz target | done |
 | T-019 | room lifecycle: six edges, one terminal state, no clock | done |
+| T-020 | tick loop, per-player input queue, 200 ms AFK timeout | done |
 
 Six plan acceptance criteria were changed deliberately, all recorded here
 rather than quietly skipped:
@@ -567,6 +568,65 @@ runs 2,400 ticks of an empty live room and asserts nothing happens.
 and the test module stripped first, because a doc link is not a dependency. The
 guard was verified by adding `std::time::Instant::now()` to `lib.rs`, watching it
 fail on both tokens, and reverting.
+
+## The tick loop: 15 Hz in, 20 Hz out
+
+A client sends **three consecutive frames, fifteen times a second**, against a
+**20 Hz** simulation (§6.2). Those numbers are chosen so that one lost packet
+costs nothing — the next packet re-sends the frames that were in the lost one —
+and the queue's job is to turn that stream into exactly one frame per player per
+tick. Three questions, three answers:
+
+| Question | Answer | Why not the obvious alternative |
+| --- | --- | --- |
+| Which frame applies to this tick? | the newest one whose tick is **not in the future** | "newest received" would let an early packet skip a tick |
+| Nothing arrived this tick? | reuse the last frame | 15 Hz into 20 Hz leaves ticks with no packet; letting go every one of them makes a 15 Hz client stutter |
+| Nothing for 200 ms? | hold **nothing** | "still holding forward" runs a disconnected player into a wall and gives a lagging one free movement |
+
+A frame for a tick the simulation has already passed is **dropped on arrival**,
+not applied. That is what stops a resent packet from rewinding, and it is why
+`stale_input_is_dropped` pushes a packet for ticks 9–11 after the clock has
+reached 12 and asserts the resolved input is unchanged.
+
+The queue is a fixed 6 × 12 array of `Option<Queued>`: no allocation, no
+`HashMap`, no iteration-order dependency. Twelve frames per player is about nine
+packets of lookahead, far more than the ~200 ms a client can legitimately run
+ahead, and when it overflows the *oldest* frame is dropped rather than the newest.
+
+### Two things this found
+
+**`TickOutput.outcome` was `None` on the tick the match ended.** The first version
+reported the outcome only while `Phase::Live`, so the tick that transitioned to
+`Ended` — the one where the host builds `S_END` — carried nothing. A host that
+stops ticking on `EndMatch` would never have seen the winner. It now reports the
+outcome in both `Live` and `Ended`.
+
+**A three-frame packet covers two future ticks, not three.** The frame for the
+current tick is dropped as stale, because the room has already simulated it. The
+AFK test asserted "three frames then four ticks of grace" and failed on the sixth
+tick; the correct answer is two frames plus four. The test now asserts the
+property rather than the arithmetic — the player stops within one packet plus
+200 ms — and pins the exact count separately.
+
+### A known gap, recorded rather than papered over
+
+`Room::tick` resolves input, reports it, and steps `MatchState` — but **nothing
+applies the frame to a player's position**, because `MatchState` has no player
+entities. Players are `PlayerSlot { id, team, life, bot }`: a seat, not a body.
+Buddies have positions (`TeamState.buddies`); players do not.
+
+This is a hole in the plan rather than a shortcut here. §6.4 calls
+`sim::step_local(state, input)` but no task creates it, and T-021 (snapshots),
+T-022 (reach checks "using its own player position"), T-023 (bots that fight and
+push a core) and T-024 (a full match) all need it. The reentrancy test says so
+out loud: it diverges two rooms by damaging a core, not by moving a player,
+because a test that relied on movement would pass whether or not the rooms shared
+state.
+
+The next unit of work is that entity layer: a `MoveState` per player, spawning at
+the pad, `apply_input` calling `sim::movement::step` against a `VoxelQuery`, and
+HP/death/respawn. It has to land before snapshots, because a snapshot of players
+who cannot move is a snapshot of nothing.
 
 ## Content discrepancies, resolved rather than guessed
 
