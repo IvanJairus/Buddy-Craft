@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/sim",
+  "crates/world",
+  "crates/protocol",
+  "crates/room",
+  "crates/client-wasm",
+  "crates/host-worker",
+  "crates/host-axum",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+license = "MIT"
+repository = "https://github.com/IvanJairus/Buddy-Craft"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+ron = "0.8"
+
+sim = { path = "crates/sim" }
+world = { path = "crates/world" }
+protocol = { path = "crates/protocol" }
+room = { path = "crates/room" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+# Release builds of the wasm client must stay inside the §8.10 size gate.
+[profile.release.package.sim]
+opt-level = "z"

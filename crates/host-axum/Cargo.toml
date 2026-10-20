@@ -1,0 +1,11 @@
+[package]
+name = "host-axum"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+sim.workspace = true
+world.workspace = true
+protocol.workspace = true

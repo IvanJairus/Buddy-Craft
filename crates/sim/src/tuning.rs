@@ -1,0 +1,536 @@
+//! Tunable constants, loaded from `data/tuning.ron`.
+//!
+//! Every number a designer would want to change lives in one file. This module
+//! is the **authoring boundary**: the RON file uses decimal floats for
+//! readability, and they are converted to [`Fixed`] exactly once, at load. That
+//! is why `tests/no_float.rs` exempts this file alongside `fixed.rs` — nowhere
+//! else in `sim` may touch an `f32`.
+//!
+//! Validation is strict on purpose. A negative `carry_cap` or a `pad.size` of
+//! zero would produce a game that is subtly broken in ways no test would
+//! describe, so bad data fails loudly at load with the offending field named.
+
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use serde::Deserialize;
+
+use crate::fixed::Fixed;
+
+/// Validation failure while loading tuning data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuningError {
+    /// Dotted path of the offending field, e.g. `airdrop.carry_cap`.
+    pub field: &'static str,
+    /// Why it was rejected.
+    pub reason: &'static str,
+}
+
+impl core::fmt::Display for TuningError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "invalid tuning at `{}`: {}", self.field, self.reason)
+    }
+}
+
+impl std::error::Error for TuningError {}
+
+// ---------------------------------------------------------------------------
+// Raw (deserialised) shape — decimal floats live only here.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+struct TuningFile {
+    #[serde(rename = "match")]
+    match_cfg: MatchFile,
+    player: PlayerFile,
+    core: CoreFile,
+    airdrop: AirdropFile,
+    pad: PadFile,
+    terrain: TerrainFile,
+    world: WorldFile,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MatchFile {
+    target_minutes: u32,
+    overtime_start_s: u32,
+    decay_per_30s: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PlayerFile {
+    hp: i32,
+    respawn_s: u32,
+    spawn_protect_s: u32,
+    speed: f32,
+    radius: f32,
+    height: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CoreFile {
+    hp: i32,
+    damage_mult: f32,
+    regen: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AirdropFile {
+    first_drop_s: u32,
+    interval_early_s: u32,
+    interval_late_s: u32,
+    late_after_s: u32,
+    crates_per_player: u32,
+    heavy_every: u32,
+    heavy_mult: f32,
+    telegraph_s: u32,
+    fall_speed: f32,
+    pickup_radius: f32,
+    carry_cap: u32,
+    drop_loss: f32,
+    pickup_ttl_s: u32,
+    max_pickups: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PadFile {
+    size: u32,
+    max_height: u32,
+    deposit_rate: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TerrainFile {
+    breakable: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorldFile {
+    size_x: u32,
+    size_z: u32,
+    height: u32,
+    sea_level: u32,
+    chunk: u32,
+    base_radius: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Typed, fixed-point tuning
+// ---------------------------------------------------------------------------
+
+/// Match-level rules (plan §4.2).
+#[derive(Debug, Clone)]
+pub struct MatchTuning {
+    /// Nominal match length in minutes; overtime decay starts before this.
+    pub target_minutes: u32,
+    /// Seconds at which overtime decay begins.
+    pub overtime_start_s: u32,
+    /// Fraction of max core HP removed every 30 s during overtime.
+    pub decay_per_30s: Fixed,
+}
+
+/// Player movement and survival (plan §4.8).
+#[derive(Debug, Clone)]
+pub struct PlayerTuning {
+    /// Maximum HP.
+    pub hp: i32,
+    /// Respawn delay in seconds.
+    pub respawn_s: u32,
+    /// Invulnerability window after respawn, in seconds.
+    pub spawn_protect_s: u32,
+    /// Maximum horizontal speed, metres per second.
+    pub speed: Fixed,
+    /// Collision AABB half-width.
+    pub radius: Fixed,
+    /// Collision AABB height.
+    pub height: Fixed,
+}
+
+/// Base core (plan §4.8).
+#[derive(Debug, Clone)]
+pub struct CoreTuning {
+    /// Maximum HP.
+    pub hp: i32,
+    /// Damage multiplier applied to all incoming damage.
+    pub damage_mult: Fixed,
+    /// HP regenerated per second (zero by design).
+    pub regen: Fixed,
+}
+
+/// Airdrop economy (plan §4.4).
+#[derive(Debug, Clone)]
+pub struct AirdropTuning {
+    /// Seconds until the first drop.
+    pub first_drop_s: u32,
+    /// Interval before `late_after_s`.
+    pub interval_early_s: u32,
+    /// Interval after `late_after_s`.
+    pub interval_late_s: u32,
+    /// Seconds after which the schedule tightens.
+    pub late_after_s: u32,
+    /// Crates per drop, per player in the room.
+    pub crates_per_player: u32,
+    /// Every Nth drop is a heavy drop.
+    pub heavy_every: u32,
+    /// Multiplier applied to a heavy drop's crate count.
+    pub heavy_mult: Fixed,
+    /// Seconds of warning before impact.
+    pub telegraph_s: u32,
+    /// Descent speed, metres per second.
+    pub fall_speed: Fixed,
+    /// Auto-pickup radius, metres.
+    pub pickup_radius: Fixed,
+    /// Maximum crates carried.
+    pub carry_cap: u32,
+    /// Fraction of carried crates destroyed when the carrier dies.
+    pub drop_loss: Fixed,
+    /// Seconds a landed crate persists before despawning.
+    pub pickup_ttl_s: u32,
+    /// Maximum simultaneous crate pickups.
+    pub max_pickups: u32,
+}
+
+/// Stacking pad (plan §4.3).
+#[derive(Debug, Clone)]
+pub struct PadTuning {
+    /// Edge length in blocks.
+    pub size: u32,
+    /// Maximum build height in blocks.
+    pub max_height: u32,
+    /// Crates deposited per second while holding the place button.
+    pub deposit_rate: u32,
+}
+
+/// Terrain rules (plan §4.4.4).
+#[derive(Debug, Clone)]
+pub struct TerrainTuning {
+    /// Whether terrain blocks can be broken. False in v1; flipping this
+    /// re-opens the tunnelling exploit class and the diff budget.
+    pub breakable: bool,
+}
+
+/// World dimensions (plan §4.3).
+#[derive(Debug, Clone)]
+pub struct WorldTuning {
+    /// Extent along X in blocks.
+    pub size_x: u32,
+    /// Extent along Z in blocks.
+    pub size_z: u32,
+    /// Extent along Y in blocks.
+    pub height: u32,
+    /// Sea level Y.
+    pub sea_level: u32,
+    /// Chunk column edge length.
+    pub chunk: u32,
+    /// Radius of the circle bases are placed on.
+    pub base_radius: u32,
+}
+
+/// The complete tuning set.
+#[derive(Debug, Clone)]
+pub struct Tuning {
+    /// Match rules.
+    pub match_cfg: MatchTuning,
+    /// Player rules.
+    pub player: PlayerTuning,
+    /// Core rules.
+    pub core: CoreTuning,
+    /// Airdrop rules.
+    pub airdrop: AirdropTuning,
+    /// Pad rules.
+    pub pad: PadTuning,
+    /// Terrain rules.
+    pub terrain: TerrainTuning,
+    /// World dimensions.
+    pub world: WorldTuning,
+}
+
+impl Tuning {
+    /// Parse and validate a RON document.
+    pub fn parse(src: &str) -> Result<Tuning, TuningError> {
+        let file: TuningFile = ron::from_str(src).map_err(|_| TuningError {
+            field: "<document>",
+            reason: "not valid RON for the tuning schema",
+        })?;
+        Tuning::from_file(file)
+    }
+
+    fn from_file(f: TuningFile) -> Result<Tuning, TuningError> {
+        // --- ranges -----------------------------------------------------
+        if f.player.hp <= 0 {
+            return Err(TuningError {
+                field: "player.hp",
+                reason: "must be positive",
+            });
+        }
+        if f.player.speed <= 0.0 {
+            return Err(TuningError {
+                field: "player.speed",
+                reason: "must be positive",
+            });
+        }
+        if f.core.hp <= 0 {
+            return Err(TuningError {
+                field: "core.hp",
+                reason: "must be positive",
+            });
+        }
+        if !(0.0..=1.0).contains(&f.core.damage_mult) {
+            return Err(TuningError {
+                field: "core.damage_mult",
+                reason: "must be within [0, 1]",
+            });
+        }
+        if f.airdrop.carry_cap == 0 {
+            return Err(TuningError {
+                field: "airdrop.carry_cap",
+                reason: "must be > 0",
+            });
+        }
+        if f.airdrop.interval_late_s == 0 || f.airdrop.interval_early_s == 0 {
+            return Err(TuningError {
+                field: "airdrop.interval_*_s",
+                reason: "must be > 0",
+            });
+        }
+        if f.airdrop.heavy_every == 0 {
+            return Err(TuningError {
+                field: "airdrop.heavy_every",
+                reason: "must be > 0",
+            });
+        }
+        if !(0.0..=1.0).contains(&f.airdrop.drop_loss) {
+            return Err(TuningError {
+                field: "airdrop.drop_loss",
+                reason: "must be within [0, 1]",
+            });
+        }
+        if f.pad.size == 0 || f.pad.size % 2 != 0 {
+            return Err(TuningError {
+                field: "pad.size",
+                reason: "must be a positive even number (the pad is centred on a base)",
+            });
+        }
+        if f.pad.max_height == 0 {
+            return Err(TuningError {
+                field: "pad.max_height",
+                reason: "must be > 0",
+            });
+        }
+        if f.world.chunk == 0 || f.world.height % f.world.chunk != 0 {
+            return Err(TuningError {
+                field: "world.height",
+                reason: "must be a multiple of world.chunk",
+            });
+        }
+        if f.world.sea_level >= f.world.height {
+            return Err(TuningError {
+                field: "world.sea_level",
+                reason: "must be below world.height",
+            });
+        }
+
+        Ok(Tuning {
+            match_cfg: MatchTuning {
+                target_minutes: f.match_cfg.target_minutes,
+                overtime_start_s: f.match_cfg.overtime_start_s,
+                decay_per_30s: Fixed::from_f32(f.match_cfg.decay_per_30s),
+            },
+            player: PlayerTuning {
+                hp: f.player.hp,
+                respawn_s: f.player.respawn_s,
+                spawn_protect_s: f.player.spawn_protect_s,
+                speed: Fixed::from_f32(f.player.speed),
+                radius: Fixed::from_f32(f.player.radius),
+                height: Fixed::from_f32(f.player.height),
+            },
+            core: CoreTuning {
+                hp: f.core.hp,
+                damage_mult: Fixed::from_f32(f.core.damage_mult),
+                regen: Fixed::from_f32(f.core.regen),
+            },
+            airdrop: AirdropTuning {
+                first_drop_s: f.airdrop.first_drop_s,
+                interval_early_s: f.airdrop.interval_early_s,
+                interval_late_s: f.airdrop.interval_late_s,
+                late_after_s: f.airdrop.late_after_s,
+                crates_per_player: f.airdrop.crates_per_player,
+                heavy_every: f.airdrop.heavy_every,
+                heavy_mult: Fixed::from_f32(f.airdrop.heavy_mult),
+                telegraph_s: f.airdrop.telegraph_s,
+                fall_speed: Fixed::from_f32(f.airdrop.fall_speed),
+                pickup_radius: Fixed::from_f32(f.airdrop.pickup_radius),
+                carry_cap: f.airdrop.carry_cap,
+                drop_loss: Fixed::from_f32(f.airdrop.drop_loss),
+                pickup_ttl_s: f.airdrop.pickup_ttl_s,
+                max_pickups: f.airdrop.max_pickups,
+            },
+            pad: PadTuning {
+                size: f.pad.size,
+                max_height: f.pad.max_height,
+                deposit_rate: f.pad.deposit_rate,
+            },
+            terrain: TerrainTuning {
+                breakable: f.terrain.breakable,
+            },
+            world: WorldTuning {
+                size_x: f.world.size_x,
+                size_z: f.world.size_z,
+                height: f.world.height,
+                sea_level: f.world.sea_level,
+                chunk: f.world.chunk,
+                base_radius: f.world.base_radius,
+            },
+        })
+    }
+}
+
+impl AirdropTuning {
+    /// Interval between drops at `elapsed_s` seconds into the match (plan §4.4.1).
+    ///
+    /// The schedule tightens once, at `late_after_s`. It is a step function
+    /// rather than a curve because a designer can reason about two numbers,
+    /// and this is the knob §18.4 says to turn first when pacing is wrong.
+    pub fn interval_at(&self, elapsed_s: u32) -> u32 {
+        if elapsed_s < self.late_after_s {
+            self.interval_early_s
+        } else {
+            self.interval_late_s
+        }
+    }
+
+    /// Crate count for the drop with the given 1-based index.
+    pub fn crates_for_drop(&self, drop_index: u32, player_count: u32) -> u32 {
+        let base = self.crates_per_player.saturating_mul(player_count.max(1));
+        if self.heavy_every > 0 && drop_index % self.heavy_every == 0 {
+            self.heavy_mult
+                .saturating_mul(Fixed::from_int(base as i32))
+                .round_int()
+                .max(0) as u32
+        } else {
+            base
+        }
+    }
+}
+
+/// The tuning embedded in the binary at compile time.
+pub fn embedded() -> &'static Tuning {
+    static CELL: std::sync::OnceLock<&'static Tuning> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| {
+        let parsed = Tuning::parse(EMBEDDED_RON).expect("embedded data/tuning.ron is invalid");
+        // Leak once at startup: tuning lives for the process lifetime and is
+        // shared by every room, so a single allocation is the right trade.
+        Box::leak(Box::new(parsed))
+    })
+}
+
+/// Raw embedded RON, exposed so tests can re-parse and diff it.
+pub const EMBEDDED_RON: &str = include_str!("../../../data/tuning.ron");
+
+/// A process-wide generation counter, useful for cache invalidation when
+/// tuning is reloaded in a dev build.
+static TUNING_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Current tuning generation.
+pub fn generation() -> u64 {
+    TUNING_GENERATION.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_tuning_parses() {
+        let t = Tuning::parse(EMBEDDED_RON).expect("embedded tuning must parse");
+        assert_eq!(t.player.hp, 100);
+    }
+
+    /// Guards against doc/code drift: the values asserted here are the ones
+    /// written down in plan §4.8, §4.4 and §4.7. If someone changes the RON
+    /// without updating the plan, this fails.
+    /// Fixed-point round-trips are exact for dyadic decimals (4.5, 0.0) but
+    /// not for values like 0.35, so decimal comparisons use this tolerance.
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn tuning_matches_docs() {
+        let t = embedded();
+
+        // §4.8 combat and base math
+        assert_eq!(t.player.hp, 100);
+        assert_eq!(t.player.respawn_s, 8);
+        assert_eq!(t.player.spawn_protect_s, 2);
+        assert!(close(t.player.speed.to_f32(), 4.5));
+        assert_eq!(t.core.hp, 10_000);
+        assert!(close(t.core.damage_mult.to_f32(), 0.35));
+        assert!(close(t.core.regen.to_f32(), 0.0));
+
+        // §4.4 airdrop economy
+        assert_eq!(t.airdrop.first_drop_s, 10);
+        assert_eq!(t.airdrop.interval_early_s, 25);
+        assert_eq!(t.airdrop.interval_late_s, 15);
+        assert_eq!(t.airdrop.late_after_s, 300);
+        assert_eq!(t.airdrop.crates_per_player, 3);
+        assert_eq!(t.airdrop.heavy_every, 5);
+        assert_eq!(t.airdrop.telegraph_s, 5);
+        assert_eq!(t.airdrop.carry_cap, 12);
+        assert_eq!(t.airdrop.max_pickups, 120);
+
+        // §4.3 map and pad
+        assert_eq!(t.pad.size, 8);
+        assert_eq!(t.pad.max_height, 4);
+        assert_eq!(t.world.size_x, 256);
+        assert_eq!(t.world.height, 96);
+        assert_eq!(t.world.sea_level, 40);
+        assert_eq!(t.world.chunk, 16);
+        assert_eq!(t.world.base_radius, 96);
+
+        // §4.4.4 terrain is indestructible in v1
+        assert!(!t.terrain.breakable);
+    }
+
+    #[test]
+    fn drop_interval_switches_once() {
+        let t = embedded();
+        assert_eq!(t.airdrop.interval_at(0), 25);
+        assert_eq!(t.airdrop.interval_at(299), 25);
+        assert_eq!(t.airdrop.interval_at(300), 15);
+        assert_eq!(t.airdrop.interval_at(1199), 15);
+    }
+
+    #[test]
+    fn drop_size_scales_with_players() {
+        let t = embedded();
+        // Plan §4.4.1: 3 x player_count, x1.75 on every 5th drop.
+        assert_eq!(t.airdrop.crates_for_drop(1, 2), 6);
+        assert_eq!(t.airdrop.crates_for_drop(1, 6), 18);
+        assert_eq!(t.airdrop.crates_for_drop(5, 2), 11); // 6 * 1.75 = 10.5, rounded half away from zero
+        assert_eq!(t.airdrop.crates_for_drop(5, 6), 32); // 18 * 1.75 = 31.5 -> 32
+        assert_eq!(t.airdrop.crates_for_drop(10, 4), 21); // heavy again
+        assert_eq!(t.airdrop.crates_for_drop(11, 4), 12);
+    }
+
+    #[test]
+    fn invalid_data_is_rejected_with_field_name() {
+        let bad = EMBEDDED_RON.replace("carry_cap: 12", "carry_cap: 0");
+        let err = Tuning::parse(&bad).unwrap_err();
+        assert_eq!(err.field, "airdrop.carry_cap");
+
+        let bad = EMBEDDED_RON.replace("damage_mult: 0.35", "damage_mult: 1.5");
+        let err = Tuning::parse(&bad).unwrap_err();
+        assert_eq!(err.field, "core.damage_mult");
+
+        let bad = EMBEDDED_RON.replace("size: 8", "size: 7");
+        let err = Tuning::parse(&bad).unwrap_err();
+        assert_eq!(err.field, "pad.size");
+
+        assert!(Tuning::parse("not ron at all (").is_err());
+    }
+
+    #[test]
+    fn generation_is_positive() {
+        assert!(generation() >= 1);
+    }
+}

@@ -1,0 +1,116 @@
+name: CI
+
+# Plan T-002. Two things here are non-negotiable and were deliberately placed in
+# the very first commit rather than "added later":
+#
+#   1. The pipeline fails the build on any test failure. A determinism bug that
+#      is caught on day 5 costs minutes; the same bug caught after the netcode
+#      lands costs a weekend.
+#   2. `test-arm` runs the full suite on aarch64. Risk R-07 is "the simulation
+#      is bit-identical on x86_64 and wasm32 but not on aarch64", which would
+#      only ever show up on a player's phone. A second architecture in CI is the
+#      cheapest possible guard, and it is worthless if it is added after the
+#      first divergence.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Keep the benchmark honest but tolerant of a noisy shared runner.
+  WORLD_BENCH_SLACK: "3"
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.87.0"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+          # R-07: the ARM determinism guard. Same suite, different ISA.
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.87.0"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-${{ matrix.arch }}
+      - name: cargo test
+        run: cargo test --workspace --all-targets
+      - name: cargo build (wasm32)
+        # The client's prediction crate must compile to wasm; if this breaks,
+        # the whole "one implementation of the rules" premise (A-07) breaks.
+        run: cargo build --target wasm32-unknown-unknown -p sim
+
+  bench:
+    name: budget (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.87.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-${{ matrix.arch }}
+      - name: worldgen and mesh budgets (T-006, T-007)
+        run: cargo bench -p world --bench gen
+
+  web:
+    name: web (pnpm)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        if: hashFiles('pnpm-lock.yaml') != ''
+      - uses: actions/setup-node@v4
+        if: hashFiles('pnpm-lock.yaml') != ''
+        with:
+          node-version: 22
+          cache: pnpm
+      # `apps/web` does not exist yet (M0 is Rust-only), so these steps no-op
+      # until the client lands in M3. They are wired up now so that the first
+      # client PR does not also have to debug CI plumbing.
+      - if: hashFiles('pnpm-lock.yaml') != ''
+        run: pnpm install --frozen-lockfile
+      - if: hashFiles('pnpm-lock.yaml') != ''
+        run: pnpm -r build

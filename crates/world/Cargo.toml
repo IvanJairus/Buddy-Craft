@@ -1,0 +1,18 @@
+[package]
+name = "world"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+sim.workspace = true
+serde.workspace = true
+postcard.workspace = true
+ron.workspace = true
+
+# Dependency-free benchmarks: they assert the plan's budgets instead of just
+# printing numbers. See `benches/gen.rs`.
+[[bench]]
+name = "gen"
+harness = false

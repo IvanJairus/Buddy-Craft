@@ -1,0 +1,70 @@
+// Cratebound tuning data.
+//
+// This file is the single source of truth for every number a designer would
+// want to change. `crates/sim/src/tuning.rs` validates it at load and the test
+// `tuning_matches_docs` asserts it still matches plan §4.3, §4.4 and §4.8.
+//
+// Editing rules:
+//   * decimal values are converted to Q16.16 fixed-point exactly once, at load;
+//   * the game never reads a float at runtime;
+//   * a change here invalidates golden state hashes (T-015) if it affects rules.
+(
+  match: (
+    target_minutes: 20,
+    overtime_start_s: 1320,   // 22:00 — plan §4.2
+    decay_per_30s: 0.02,      // +2% max HP per 30 s of overtime
+  ),
+
+  player: (
+    hp: 100,
+    respawn_s: 8,
+    spawn_protect_s: 2,
+    speed: 4.5,               // m/s
+    radius: 0.3,              // AABB half-width
+    height: 1.8,
+  ),
+
+  core: (
+    hp: 10000,
+    damage_mult: 0.35,
+    regen: 0.0,
+  ),
+
+  airdrop: (
+    first_drop_s: 10,
+    interval_early_s: 25,
+    interval_late_s: 15,
+    late_after_s: 300,
+    crates_per_player: 3,
+    heavy_every: 5,
+    heavy_mult: 1.75,
+    telegraph_s: 5,
+    fall_speed: 12.0,
+    pickup_radius: 1.2,
+    carry_cap: 12,
+    drop_loss: 0.5,
+    pickup_ttl_s: 180,
+    max_pickups: 120,
+  ),
+
+  pad: (
+    size: 8,
+    max_height: 4,
+    deposit_rate: 6,
+  ),
+
+  terrain: (
+    // v1: terrain is indestructible; crates are the only placeable block.
+    // Flipping this re-opens tunnelling and the full chunk-diff budget (§4.4.4).
+    breakable: false,
+  ),
+
+  world: (
+    size_x: 256,
+    size_z: 256,
+    height: 96,
+    sea_level: 40,
+    chunk: 16,
+    base_radius: 96,
+  ),
+)

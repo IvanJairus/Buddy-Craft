@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+node_modules/
+.pnpm-store/
+dist/
+*.wasm
+*.wasm.map
+.DS_Store
+.env
+.env.local

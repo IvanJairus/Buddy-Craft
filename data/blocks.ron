@@ -1,0 +1,35 @@
+// Block registry.
+//
+// Order is significant: the index in this array *is* the BlockId. Appending is
+// safe; reordering invalidates every saved chunk and every golden hash.
+//
+// Flags:
+//   solid      — blocks movement and cannot be walked through
+//   opaque     — hides the neighbouring face (drives meshing)
+//   placeable  — a player may place this block. Exactly ONE block may be true:
+//                the crate (plan §4.4.4).
+//   breakable  — a player may remove it. False for all terrain in v1.
+//   crate      — counts as a crate for the recipe matcher
+//   tile       — index into the 256x256 texture atlas (16x16 tiles)
+[
+  (name: "air",       solid: false, opaque: false, placeable: false, breakable: false, crate: false, tile: 0),
+  (name: "stone",     solid: true,  opaque: true,  placeable: false, breakable: false, crate: false, tile: 1),
+  (name: "dirt",      solid: true,  opaque: true,  placeable: false, breakable: false, crate: false, tile: 2),
+  (name: "grass",     solid: true,  opaque: true,  placeable: false, breakable: false, crate: false, tile: 3),
+  (name: "sand",      solid: true,  opaque: true,  placeable: false, breakable: false, crate: false, tile: 4),
+  (name: "gravel",    solid: true,  opaque: true,  placeable: false, breakable: false, crate: false, tile: 5),
+  (name: "water",     solid: false, opaque: false, placeable: false, breakable: false, crate: false, tile: 6),
+  (name: "log",       solid: true,  opaque: true,  placeable: false, breakable: false, crate: false, tile: 7),
+  (name: "leaves",    solid: true,  opaque: false, placeable: false, breakable: false, crate: false, tile: 8),
+  (name: "bedrock",   solid: true,  opaque: true,  placeable: false, breakable: false, crate: false, tile: 9),
+  (name: "pad_floor", solid: true,  opaque: true,  placeable: false, breakable: false, crate: false, tile: 10),
+  (name: "crate",     solid: true,  opaque: true,  placeable: true,  breakable: true,  crate: true,  tile: 11),
+  (name: "core",      solid: true,  opaque: true,  placeable: false, breakable: false, crate: false, tile: 12),
+  (name: "clay",      solid: true,  opaque: true,  placeable: false, breakable: false, crate: false, tile: 13),
+  (name: "snow",      solid: true,  opaque: true,  placeable: false, breakable: false, crate: false, tile: 14),
+  (name: "moss",      solid: true,  opaque: true,  placeable: false, breakable: false, crate: false, tile: 15),
+  (name: "basalt",    solid: true,  opaque: true,  placeable: false, breakable: false, crate: false, tile: 16),
+  (name: "sandstone", solid: true,  opaque: true,  placeable: false, breakable: false, crate: false, tile: 17),
+  (name: "cobble",    solid: true,  opaque: true,  placeable: false, breakable: false, crate: false, tile: 18),
+  (name: "marker",    solid: false, opaque: false, placeable: false, breakable: false, crate: false, tile: 19),
+]
