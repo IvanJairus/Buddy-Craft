@@ -111,7 +111,7 @@ we use" from an architectural decision into a configuration change.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 239 tests
+cargo test --workspace --all-targets              # 263 tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
@@ -149,6 +149,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-011 | melee cones, swept projectiles, area damage, damage events | done |
 | T-012 | buddy AI: 4-state machine, budgeted A*, leash, stance toggle | done |
 | T-013 | core HP, damage multiplier, instant elimination (D-02) | done |
+| T-014 | cap matrix, FFA/Teams seating, win conditions, overtime decay | done |
 | T-016 | `data/tuning.ron` validated against the plan | done |
 
 Four plan acceptance criteria were changed deliberately, all recorded here
@@ -276,6 +277,39 @@ spectator mode was the alternative: it keeps losers in the room, but it costs a
 spectator camera, a spectator HUD, a separate snapshot stream, and an
 information-leak question about enemy positions. Dropping it removed all four.
 
+## Match rules: three conditions that can be true at once
+
+The win check is ordered, and the order is the design. When every core falls on
+the same tick all three conditions hold, so which one is evaluated first decides
+what the results screen says:
+
+```
+no cores standing        → Draw,        winner None   (mutual destruction)
+no humans alive          → NoHumans,    winner None   (D-05)
+exactly one core standing → LastTeamStanding, that team
+```
+
+Draw comes first because it is reachable in normal play, not just in theory:
+overtime decay hits every core at once, so two turtle teams die together.
+`NoHumans` comes before "last team standing" because otherwise a bot team that
+outlives the humans would be declared the winner — which is the exact thing D-05
+forbids. The consequence is that `winner` is `Some(_)` only when a team with a
+living human is the last one holding a core.
+
+The cap matrix is a table, not a formula. A formula would reproduce all nine rows
+of §4.7 — FFA caps at 3 up to three players and 2 beyond, Teams at 5 unless there
+are three teams — but it would also silently accept a tenth combination nobody
+designed. An unlisted `(mode, players, teams)` is an error, and `cap_matrix()`
+walks all nine rows asserting the per-team size, the cap, the total buddies and
+the total entities, because those four numbers are what the server was sized
+against.
+
+`state_hash()` covers every field that can affect play, and the test walks each
+one rather than sampling: elapsed, decay applied, layout, outcome, core HP,
+destruction and elimination ticks, pad contents, pad seal, player life, bot
+flags, and each buddy's id, role, HP, state, stance and position. A field that
+affects play but not the hash is a desync no other test would catch.
+
 ## Content discrepancies, resolved rather than guessed
 
 `R06_MAGE` in §4.5.3 is sketched as `###/###/###` plus `.#.` on top — 10 blocks
@@ -311,6 +345,22 @@ at their own values: 80 s for the ram push (the AC's window) and 67 s with four
 buddies. If the pacing is wrong in playtest, §4.8 says to move `core.hp` or
 `core.damage_mult` and nothing else; both tests recompute from tuning, so they
 will follow.
+
+**Overtime decay cannot terminate a stalemate inside 25 minutes.** §12.4 asks
+for "100 random bot matches all end ≤ 25 simulated minutes" and §4.2 calls decay
+the thing that "guarantees termination". The shipped rate is 2% of max HP per
+30 s starting at 22:00, which needs 50 steps — 25 minutes of overtime — so a
+full-health stalemate ends at **47:00**, not 25:00. Getting a stalemate to end
+at 25:00 would need either ~16.7% per 30 s or overtime from the first tick.
+
+The tests assert what the rules actually guarantee rather than the number in the
+criterion. `match_always_terminates` runs 100 seeded matches with random room
+shapes and damage rates and asserts two things: every match ends within the
+decay bound, and every match that *can* be decided by combat ends within 25
+minutes (measured: 23.0 min worst case). Matches with two or more unkillable
+teams are counted separately — 14 of the 100 — and asserted to end as a draw on
+the 47-minute bound. If the 25-minute ceiling is meant to be hard, the knob is
+`match.decay_per_30s`, and both tests recompute from it.
 
 ## Non-goals for v1
 

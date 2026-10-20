@@ -73,6 +73,12 @@ impl PlayerLife {
 /// mid-jump or mid-air dies on the same tick as one standing still — the AC
 /// asks for that explicitly, and the way to guarantee it is for the function to
 /// have nothing else to look at.
+///
+/// `bot` is the one field here that elimination does not consult. It exists
+/// because D-05's "bots cannot win" rule needs to know, at match level, which
+/// players are human — and duplicating the player list into a second struct
+/// just to carry one bool would give the match two places to disagree about who
+/// is alive.
 #[derive(Clone, Copy, Debug)]
 pub struct PlayerSlot {
     /// Stable handle.
@@ -81,16 +87,34 @@ pub struct PlayerSlot {
     pub team: TeamId,
     /// Whether they are still in the match.
     pub life: PlayerLife,
+    /// True when this slot is filled by a bot (D-05).
+    pub bot: bool,
 }
 
 impl PlayerSlot {
-    /// A living player on `team`.
+    /// A living human on `team`.
     pub fn alive(id: PlayerId, team: TeamId) -> PlayerSlot {
         PlayerSlot {
             id,
             team,
             life: PlayerLife::Alive,
+            bot: false,
         }
+    }
+
+    /// A living bot on `team`.
+    pub fn bot(id: PlayerId, team: TeamId) -> PlayerSlot {
+        PlayerSlot {
+            id,
+            team,
+            life: PlayerLife::Alive,
+            bot: true,
+        }
+    }
+
+    /// True for a human still in the match.
+    pub fn is_live_human(&self) -> bool {
+        !self.bot && self.life.is_alive()
     }
 }
 
@@ -198,6 +222,12 @@ impl Core {
         removed
     }
 
+    /// Remove HP directly, with no multiplier. The only caller is overtime
+    /// decay, via [`Base::decay`].
+    pub(crate) fn remove_hp(&mut self, hp: i32) {
+        self.hp = (self.hp - hp.max(0)).max(0);
+    }
+
     /// The cells this core occupies, in world coordinates.
     ///
     /// Used to stamp the pad's blocked mask (§4.5.1 rule 5) and to test whether
@@ -257,10 +287,28 @@ impl Base {
     ///
     /// Returns the HP actually removed. Overtime decay (T-014) does **not** go
     /// through here: decay is not incoming damage, so it bypasses the 0.35
-    /// multiplier by design.
+    /// multiplier by design. See [`Base::decay`].
     pub fn damage(&mut self, raw: i32, now: Tick) -> i32 {
         let removed = self.core.damage(raw);
         if removed > 0 && !self.core.is_alive() && self.destroyed_at.is_none() {
+            self.destroyed_at = Some(now);
+        }
+        removed
+    }
+
+    /// Remove HP directly, bypassing the damage multiplier.
+    ///
+    /// This exists for exactly one caller: overtime decay (§4.2), which is a
+    /// property of the clock rather than of an attacker. Routing it through
+    /// [`Base::damage`] would make a 2%-per-30 s rule mean 0.7% per 30 s, which
+    /// is a different — and much slower — guarantee of termination.
+    pub fn decay(&mut self, hp: i32, now: Tick) -> i32 {
+        if hp <= 0 || !self.core.is_alive() {
+            return 0;
+        }
+        let removed = hp.min(self.core.hp());
+        self.core.remove_hp(removed);
+        if !self.core.is_alive() && self.destroyed_at.is_none() {
             self.destroyed_at = Some(now);
         }
         removed

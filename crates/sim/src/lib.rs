@@ -27,12 +27,14 @@ pub mod combat;
 pub mod fixed;
 pub mod ids;
 pub mod input;
+pub mod match_rules;
 pub mod movement;
 pub mod pad;
 pub mod pathfind;
 pub mod recipe;
 pub mod rng;
 pub mod sin_table;
+pub mod state;
 pub mod time;
 pub mod tuning;
 pub mod vec;
@@ -47,10 +49,15 @@ pub use combat::{Combatant, DamageEvent, DamageKind, Projectile, WeaponStats};
 pub use fixed::{cos, cos_yaw, sin, sin_yaw, Fixed, ONE, ZERO};
 pub use ids::{EntityId, PlayerId, TeamId};
 pub use input::InputFrame;
+pub use match_rules::{
+    cap_row, check_outcome, CapRow, EndReason, Layout, MatchRules, Mode, Outcome, TeamStatus,
+    CAP_MATRIX, MAX_ENTITIES,
+};
 pub use movement::{MoveConfig, MoveFlags, MoveIntent, MoveState};
 pub use pad::{Pad, Pads, PlaceError};
 pub use recipe::{BlockPos, Craft, CraftOutcome, RecipeBook, RecipeId, RecipeOutput};
 pub use rng::{RngStreams, Xoshiro256};
+pub use state::{ring_pad_origins, BuddyCapReached, MatchState, RoomSetup, SetupError, TeamState};
 pub use time::Tick;
 pub use vec::Vec3;
 pub use world_query::VoxelQuery;
