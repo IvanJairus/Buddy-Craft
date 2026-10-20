@@ -42,6 +42,7 @@ struct TuningFile {
     #[serde(rename = "match")]
     match_cfg: MatchFile,
     player: PlayerFile,
+    physics: PhysicsFile,
     core: CoreFile,
     airdrop: AirdropFile,
     pad: PadFile,
@@ -64,6 +65,17 @@ struct PlayerFile {
     speed: f32,
     radius: f32,
     height: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PhysicsFile {
+    gravity: f32,
+    terminal_velocity: f32,
+    jump_height: f32,
+    step_up: f32,
+    swim_speed: f32,
+    swim_gravity_mult: f32,
+    max_substep: f32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,6 +155,40 @@ pub struct PlayerTuning {
     pub radius: Fixed,
     /// Collision AABB height.
     pub height: Fixed,
+}
+
+/// Movement physics (plan T-009, §4.8).
+#[derive(Debug, Clone)]
+pub struct PhysicsTuning {
+    /// Downward acceleration, metres per second squared.
+    pub gravity: Fixed,
+    /// Maximum fall speed, metres per second.
+    pub terminal_velocity: Fixed,
+    /// Apex of a standing jump, in blocks. Jump velocity is derived from this.
+    pub jump_height: Fixed,
+    /// Tallest ledge that can be walked up without jumping.
+    pub step_up: Fixed,
+    /// Upward speed while holding jump in water.
+    pub swim_speed: Fixed,
+    /// Fraction of gravity that applies while submerged.
+    pub swim_gravity_mult: Fixed,
+    /// Largest single collision-sweep increment.
+    pub max_substep: Fixed,
+}
+
+impl PhysicsTuning {
+    /// Take-off speed for a jump of `jump_height`: `sqrt(2 g h)`.
+    ///
+    /// Derived rather than stored so the designer-facing number is the apex,
+    /// which is what a player can see and what the plan specifies.
+    pub fn jump_speed(&self) -> Fixed {
+        (Fixed::from_int(2) * self.gravity * self.jump_height).sqrt()
+    }
+
+    /// Gravity while submerged.
+    pub fn swim_gravity(&self) -> Fixed {
+        self.gravity * self.swim_gravity_mult
+    }
 }
 
 /// Base core (plan §4.8).
@@ -232,6 +278,8 @@ pub struct Tuning {
     pub match_cfg: MatchTuning,
     /// Player rules.
     pub player: PlayerTuning,
+    /// Movement physics.
+    pub physics: PhysicsTuning,
     /// Core rules.
     pub core: CoreTuning,
     /// Airdrop rules.
@@ -266,6 +314,48 @@ impl Tuning {
             return Err(TuningError {
                 field: "player.speed",
                 reason: "must be positive",
+            });
+        }
+        if f.physics.gravity <= 0.0 {
+            return Err(TuningError {
+                field: "physics.gravity",
+                reason: "must be positive",
+            });
+        }
+        if f.physics.terminal_velocity <= 0.0 {
+            return Err(TuningError {
+                field: "physics.terminal_velocity",
+                reason: "must be positive",
+            });
+        }
+        if f.physics.jump_height <= 0.0 {
+            return Err(TuningError {
+                field: "physics.jump_height",
+                reason: "must be positive",
+            });
+        }
+        if f.physics.step_up < 0.0 {
+            return Err(TuningError {
+                field: "physics.step_up",
+                reason: "must be non-negative",
+            });
+        }
+        if f.physics.swim_speed <= 0.0 {
+            return Err(TuningError {
+                field: "physics.swim_speed",
+                reason: "must be positive",
+            });
+        }
+        if !(0.0..=1.0).contains(&f.physics.swim_gravity_mult) {
+            return Err(TuningError {
+                field: "physics.swim_gravity_mult",
+                reason: "must be within [0, 1]",
+            });
+        }
+        if !(0.01..=0.5).contains(&f.physics.max_substep) {
+            return Err(TuningError {
+                field: "physics.max_substep",
+                reason: "must be within [0.01, 0.5]: larger tunnels walls, smaller is wasted work",
             });
         }
         if f.core.hp <= 0 {
@@ -342,6 +432,15 @@ impl Tuning {
                 speed: Fixed::from_f32(f.player.speed),
                 radius: Fixed::from_f32(f.player.radius),
                 height: Fixed::from_f32(f.player.height),
+            },
+            physics: PhysicsTuning {
+                gravity: Fixed::from_f32(f.physics.gravity),
+                terminal_velocity: Fixed::from_f32(f.physics.terminal_velocity),
+                jump_height: Fixed::from_f32(f.physics.jump_height),
+                step_up: Fixed::from_f32(f.physics.step_up),
+                swim_speed: Fixed::from_f32(f.physics.swim_speed),
+                swim_gravity_mult: Fixed::from_f32(f.physics.swim_gravity_mult),
+                max_substep: Fixed::from_f32(f.physics.max_substep),
             },
             core: CoreTuning {
                 hp: f.core.hp,
@@ -466,6 +565,15 @@ mod tests {
         assert_eq!(t.core.hp, 10_000);
         assert!(close(t.core.damage_mult.to_f32(), 0.35));
         assert!(close(t.core.regen.to_f32(), 0.0));
+
+        // §4.8 / T-009 physics
+        assert!(close(t.physics.gravity.to_f32(), 24.0));
+        assert!(close(t.physics.terminal_velocity.to_f32(), 50.0));
+        assert!(close(t.physics.jump_height.to_f32(), 1.25));
+        assert!(close(t.physics.step_up.to_f32(), 1.0));
+        assert!(close(t.physics.swim_speed.to_f32(), 2.0));
+        // Apex is 1.25 blocks, so take-off speed is sqrt(2 * 24 * 1.25) = 7.746.
+        assert!(close(t.physics.jump_speed().to_f32(), 7.746));
 
         // §4.4 airdrop economy
         assert_eq!(t.airdrop.first_drop_s, 10);

@@ -24,6 +24,21 @@
     height: 1.8,
   ),
 
+  physics: (
+    // Plan T-009 / §4.8. `jump_height` is the apex, and jump velocity is
+    // derived from it as sqrt(2 * gravity * jump_height) so a designer tunes
+    // the thing they can see rather than the thing the integrator consumes.
+    gravity: 24.0,
+    terminal_velocity: 50.0,
+    jump_height: 1.25,
+    step_up: 1.0,
+    swim_speed: 2.0,
+    swim_gravity_mult: 0.35,
+    // Largest distance the collision sweep moves in one go. Must stay below
+    // half the player's AABB width or a fast entity can tunnel a wall.
+    max_substep: 0.2,
+  ),
+
   core: (
     hp: 10000,
     damage_mult: 0.35,
