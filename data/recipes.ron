@@ -1,0 +1,207 @@
+// Cratebound recipe table.
+//
+// Shapes are pad-local coordinates `[x, y, z]` with y as the layer, y = 0
+// resting on the pad floor. The recipe's *cost* is its block count, so the two
+// can never disagree — there is no separate `cost` field to drift.
+//
+// Rules enforced at load (see crates/sim/src/recipe.rs):
+//   * every recipe's lowest layer must be y = 0 (ground support, §4.5.1 rule 3)
+//   * every block must fit inside the 8 x 4 x 8 pad
+//   * no two recipes may share a canonical form, because matching is exact
+//     equality of that form and a collision would make one recipe unreachable
+//
+// `unlock_s` is match time in seconds: tier 1 from the start, tier 2 at 3:00,
+// tier 3 at 8:00 (§4.5.3). `cooldown_s` is per team.
+[
+  // --- Tier 1 -------------------------------------------------------------
+  (
+    id: "R01_SWORD",
+    output: Sword,
+    unlock_s: 0,
+    cooldown_s: 20,
+    // ###
+    // ###   (3 x 2 slab)
+    blocks: [
+      [0,0,0],[1,0,0],[2,0,0],
+      [0,0,1],[1,0,1],[2,0,1],
+    ],
+  ),
+  (
+    id: "R02_BOW",
+    output: Bow,
+    unlock_s: 0,
+    cooldown_s: 20,
+    // #..
+    // #..
+    // ###
+    blocks: [
+      [0,0,0],[0,0,1],[0,0,2],
+      [1,0,2],[2,0,2],
+    ],
+  ),
+  (
+    id: "R03_BANDAGE",
+    output: Bandage,
+    unlock_s: 0,
+    cooldown_s: 15,
+    // ##
+    // ##   (2 x 2)
+    blocks: [
+      [0,0,0],[1,0,0],
+      [0,0,1],[1,0,1],
+    ],
+  ),
+  (
+    id: "R04_SWORDSMAN",
+    output: Buddy(Swordsman),
+    unlock_s: 0,
+    cooldown_s: 40,
+    // ###
+    // ###
+    // ###   (3 x 3)
+    blocks: [
+      [0,0,0],[1,0,0],[2,0,0],
+      [0,0,1],[1,0,1],[2,0,1],
+      [0,0,2],[1,0,2],[2,0,2],
+    ],
+  ),
+
+  // --- Tier 2 (3:00) ------------------------------------------------------
+  (
+    id: "R05_ARCHER",
+    output: Buddy(Archer),
+    unlock_s: 180,
+    cooldown_s: 45,
+    // 2 x 2 x 2 cube.
+    blocks: [
+      [0,0,0],[1,0,0],[0,0,1],[1,0,1],
+      [0,1,0],[1,1,0],[0,1,1],[1,1,1],
+    ],
+  ),
+  (
+    id: "R06_MAGE",
+    output: Buddy(Mage),
+    unlock_s: 180,
+    cooldown_s: 60,
+    // 3 x 3 base with a 3-long ridge on top: 9 + 3 = 12.
+    //
+    // §4.5.3 sketches this as "###/###/### + .#. on top (12)". The sketch
+    // contains 10 blocks and the cost says 12; the count is stated twice (shape
+    // and cost) against once (sketch), so the ridge is 3 long. Flagged in the
+    // commit message rather than silently picking one.
+    blocks: [
+      [0,0,0],[1,0,0],[2,0,0],
+      [0,0,1],[1,0,1],[2,0,1],
+      [0,0,2],[1,0,2],[2,0,2],
+      [0,1,1],[1,1,1],[2,1,1],
+    ],
+  ),
+  (
+    id: "R07_HEALER",
+    output: Buddy(Healer),
+    unlock_s: 180,
+    cooldown_s: 60,
+    // Two stacked plus signs: 5 + 5 = 10.
+    blocks: [
+      [1,0,1],[0,0,1],[2,0,1],[1,0,0],[1,0,2],
+      [1,1,1],[0,1,1],[2,1,1],[1,1,0],[1,1,2],
+    ],
+  ),
+  (
+    id: "R08_SPEAR",
+    output: Spear,
+    unlock_s: 180,
+    cooldown_s: 30,
+    // 1 x 7 line.
+    blocks: [
+      [0,0,0],[1,0,0],[2,0,0],[3,0,0],[4,0,0],[5,0,0],[6,0,0],
+    ],
+  ),
+  (
+    id: "R09_TOWER",
+    output: Tower,
+    unlock_s: 180,
+    cooldown_s: 90,
+    // 2 x 2 footprint, 4 layers = 16.
+    blocks: [
+      [0,0,0],[1,0,0],[0,0,1],[1,0,1],
+      [0,1,0],[1,1,0],[0,1,1],[1,1,1],
+      [0,2,0],[1,2,0],[0,2,1],[1,2,1],
+      [0,3,0],[1,3,0],[0,3,1],[1,3,1],
+    ],
+  ),
+
+  // --- Tier 3 (8:00) ------------------------------------------------------
+  (
+    id: "R10_RAM",
+    output: Ram,
+    unlock_s: 480,
+    cooldown_s: 120,
+    // 4 x 2 footprint, 3 layers = 24.
+    blocks: [
+      [0,0,0],[1,0,0],[2,0,0],[3,0,0],
+      [0,0,1],[1,0,1],[2,0,1],[3,0,1],
+      [0,1,0],[1,1,0],[2,1,0],[3,1,0],
+      [0,1,1],[1,1,1],[2,1,1],[3,1,1],
+      [0,2,0],[1,2,0],[2,2,0],[3,2,0],
+      [0,2,1],[1,2,1],[2,2,1],[3,2,1],
+    ],
+  ),
+  (
+    id: "R11_CATAPULT",
+    output: Catapult,
+    unlock_s: 480,
+    cooldown_s: 120,
+    // 4 x 4 base plus a centred 2 x 2 top = 20.
+    blocks: [
+      [0,0,0],[1,0,0],[2,0,0],[3,0,0],
+      [0,0,1],[1,0,1],[2,0,1],[3,0,1],
+      [0,0,2],[1,0,2],[2,0,2],[3,0,2],
+      [0,0,3],[1,0,3],[2,0,3],[3,0,3],
+      [1,1,1],[2,1,1],[1,1,2],[2,1,2],
+    ],
+  ),
+  (
+    id: "R12_BERSERKER",
+    output: Buddy(Berserker),
+    unlock_s: 480,
+    cooldown_s: 90,
+    // Two stacked 3 x 3 layers = 18.
+    blocks: [
+      [0,0,0],[1,0,0],[2,0,0],
+      [0,0,1],[1,0,1],[2,0,1],
+      [0,0,2],[1,0,2],[2,0,2],
+      [0,1,0],[1,1,0],[2,1,0],
+      [0,1,1],[1,1,1],[2,1,1],
+      [0,1,2],[1,1,2],[2,1,2],
+    ],
+  ),
+  (
+    id: "R13_WARD",
+    output: Ward,
+    unlock_s: 480,
+    cooldown_s: 120,
+    // 3 x 3 ring (8) plus 6 on top = 14.
+    blocks: [
+      [0,0,0],[1,0,0],[2,0,0],
+      [0,0,1],[2,0,1],
+      [0,0,2],[1,0,2],[2,0,2],
+      [0,1,0],[1,1,0],[2,1,0],
+      [0,1,1],[1,1,1],[2,1,1],
+    ],
+  ),
+  (
+    id: "R14_SNIPER",
+    output: Buddy(Sniper),
+    unlock_s: 480,
+    cooldown_s: 90,
+    // 3 x 5 slab = 15.
+    blocks: [
+      [0,0,0],[1,0,0],[2,0,0],
+      [0,0,1],[1,0,1],[2,0,1],
+      [0,0,2],[1,0,2],[2,0,2],
+      [0,0,3],[1,0,3],[2,0,3],
+      [0,0,4],[1,0,4],[2,0,4],
+    ],
+  ),
+]

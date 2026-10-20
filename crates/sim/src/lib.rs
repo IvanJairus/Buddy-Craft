@@ -18,13 +18,15 @@
 //! # Module status
 //!
 //! M0 (plan §16) shipped `fixed`, `ids`, `rng`, `time` and `tuning`.
-//! M1 adds `vec`, `input`, `world_query` and `movement`; `combat`, `recipe`,
-//! `buddy`, `base` and `match_rules` follow in the same milestone.
+//! M1 adds `vec`, `input`, `world_query`, `movement`, `pad` and `recipe`;
+//! `combat`, `buddy`, `base` and `match_rules` follow in the same milestone.
 
 pub mod fixed;
 pub mod ids;
 pub mod input;
 pub mod movement;
+pub mod pad;
+pub mod recipe;
 pub mod rng;
 pub mod sin_table;
 pub mod time;
@@ -36,6 +38,8 @@ pub use fixed::{cos, cos_yaw, sin, sin_yaw, Fixed, ONE, ZERO};
 pub use ids::{EntityId, PlayerId, TeamId};
 pub use input::InputFrame;
 pub use movement::{MoveConfig, MoveFlags, MoveIntent, MoveState};
+pub use pad::{Pad, Pads, PlaceError};
+pub use recipe::{BlockPos, Craft, CraftOutcome, RecipeBook, RecipeId, RecipeOutput};
 pub use rng::{RngStreams, Xoshiro256};
 pub use time::Tick;
 pub use vec::Vec3;
