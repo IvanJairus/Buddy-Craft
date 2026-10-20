@@ -5,13 +5,13 @@ pad and arranged into recipes, recipes spawn weapons, kits and **buddies** —
 autonomous units with armed roles. Buddies die permanently, players respawn, and
 the match ends when a team's core is destroyed.
 
-> **Status: M1 (simulation rules) complete.** M0 — the simulation core, voxel
+> **Status: M2 (playable offline) in progress.** M0 — the simulation core, voxel
 > storage, deterministic worldgen, greedy mesher and chunk-diff codec — and M1 —
 > fixed-point movement (T-009), the crate-recipe matcher (T-010), combat (T-011),
 > buddy AI (T-012), base damage and elimination (T-013), match rules (T-014) and
-> the determinism harness (T-015) — are done. The network hosts and the web
-> client are M2–M6. See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task
-> backlog.
+> the determinism harness (T-015) — are done. M2 has the wire contract (T-017);
+> the room state machine, snapshots and bots are next, then the web client.
+> See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
 
@@ -93,7 +93,7 @@ crates/
                 recipes, combat, buddies, base, match rules, scenario
                                                              (compiled twice)
   world/        voxel storage, worldgen, mesher, chunk diffs
-  protocol/     wire messages                          (M2)
+  protocol/     wire messages, tags, size budgets        (M2)
   room/         pure room state machine, runtime-agnostic (M2)
   client-wasm/  wasm bridge for the browser            (M3)
   host-worker/  Cloudflare Durable Object host         (M4)
@@ -116,7 +116,7 @@ we use" from an architectural decision into a configuration change.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 270 tests
+cargo test --workspace --all-targets              # 284 tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
@@ -160,6 +160,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-014 | cap matrix, FFA/Teams seating, win conditions, overtime decay | done |
 | T-015 | scenario driver, golden hash fixtures, native + wasm parity | done |
 | T-016 | `data/tuning.ron` validated against the plan | done |
+| T-017 | wire contract: 20 messages, tag byte + postcard, size budgets | done |
 
 Five plan acceptance criteria were changed deliberately, all recorded here
 rather than quietly skipped:
@@ -389,6 +390,68 @@ one.
 `UPDATE_GOLDENS=1 cargo test -p sim --test golden` rewrites the fixtures. It is
 for a rule change that was made on purpose, never for making a red test green —
 the diff *is* the record of what changed, and reviewing it is the point.
+
+## The wire: one tag byte and no schema
+
+Twenty messages, nine up and eleven down. One message per WebSocket frame, first
+byte is the tag (`0x01`–`0x09` client→server, `0x81`–`0x8B` server→client), the
+rest is postcard. No length prefix, no compression, no field names.
+
+The high bit separates the directions, which is worth one assertion: a frame's
+direction is readable from its first byte alone, in a log, a proxy or a fuzz
+corpus, without knowing which side sent it.
+
+| Decision | Why |
+| --- | --- |
+| A tag byte in front of postcard, not a postcard enum | postcard encodes an enum variant as its *index*, so the tags would be 0, 1, 2 … and adding a variant in the middle would silently renumber the wire |
+| Derived encoding everywhere, no `#[repr(C)]` | §7 asks for hand-written `Serialize` where byte layout matters. Pinning fields to fixed widths is exactly what the snapshot budget cannot afford — see below |
+| Enumerated values are `u8` fields, not Rust enums | an unknown value from a newer peer must be *representable* so the server can answer with a reason instead of failing to decode the whole message |
+| `FixedBytes<N>` for name, room code, token, chat, error detail | serde's array impls stop at 32 elements; and a fixed array is a bound the *type* enforces, so the decoder cannot be asked for a 4 KB chat buffer before validation runs |
+
+`FixedBytes` serialises as a tuple, so there is no length prefix: 120 bytes of
+chat costs 120 bytes. Its `Deserialize` reads exactly `N` bytes and fails on a
+short frame, which is why a truncated payload is a `DecodeError::Payload` rather
+than a partially-filled struct.
+
+### The input frame is 4 bytes, not 8
+
+§7.1 budgets 30 bytes for `C_INPUT { seq, first_tick, frames: [InputFrame; 3] }`,
+which works out to 8 bytes per frame: a `u32` tick plus four `u8`s. The shipped
+frame has no tick. `first_tick` already implies every frame's tick (`frames[i]`
+applies to `first_tick + i`), so shipping both would give each frame **two
+sources of truth for the tick it applies to** — a client that sends
+`first_tick = 100` and `frames[1].tick = 105` would be describing two different
+matches, and the server would have to pick one. The measured message is 19 bytes
+at `seq = 65535`, and inputs are the only steady-state upstream traffic, so the
+saving is 270 B/s per player instead of 450.
+
+### The size column is a ceiling, not a target
+
+`sizes_match_spec` asserts every message encodes **at or below** its §7.1/§7.2
+size, measured at the largest values the protocol can carry — a roundtrip at
+`seq = 65535` proves more than one at `seq = 77`, so the same list feeds both the
+roundtrip and the size test. A ceiling rather than a ±10% band, because failing
+the build for encoding *smaller* than the table would be backwards on a metered
+free tier.
+
+Three rows cannot meet their number, and each correction comes with the
+arithmetic rather than an apology:
+
+| Tag | §7 says | Actual | Why the spec number is unreachable |
+| --- | --- | --- | --- |
+| `C_REPORT` | 7 B | 10 B | `kind u8, tick u32, hash u32` is 1 + 1 + 4 + 4 = 10 even at fixed width; 7 matches a `u16` hash. The hash stays `u32` — a 16-bit desync hash collides once per 65,536 reports, which is not enough resolution to bisect a desync with |
+| `S_START` | ~40 B | 47 B | Six teams is §4.7's maximum (FFA, six players): 1 + 3 + 1 + 6 × 7 = 47 |
+| `S_EDIT_ACK` | 5 B | 6 B | 5 B holds while `seq < 16,384`. §6.6 allows 8 edits/s and a match can run 47 minutes, so `seq` reaches 22,560 and needs a three-byte varint |
+
+`overridden_sizes_are_provably_impossible` asserts each of those three payloads
+is *larger than the spec's number by construction*. If a later change brings one
+back inside its budget — a `u16` hash, fewer teams — the test fails and tells you
+to delete the override, so the exceptions cannot outlive their reasons.
+
+Everything else has room: `S_SNAPSHOT`'s worst case (6 players, 12 buddies, 24
+projectiles, 4 structures, 16 events, all fields present, all moving) is **615 B**
+against a 2,048 B budget and a 550 B average, which is what makes a keyframe every
+three seconds cheap. `S_LOBBY` at six players is 119 B against 140.
 
 ## Content discrepancies, resolved rather than guessed
 
