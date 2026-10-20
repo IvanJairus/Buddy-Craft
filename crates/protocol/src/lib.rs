@@ -42,6 +42,8 @@ use sim::{InputFrame, Tick};
 /// never a silent disconnect.
 pub const PROTOCOL_VERSION: u16 = 1;
 
+pub mod codec;
+
 // ---------------------------------------------------------------------------
 // Limits
 // ---------------------------------------------------------------------------

@@ -147,6 +147,7 @@ dependencies = [
  "postcard",
  "serde",
  "sim",
+ "world",
 ]
 
 [[package]]

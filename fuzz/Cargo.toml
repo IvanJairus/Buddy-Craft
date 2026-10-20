@@ -1,0 +1,34 @@
+# The libFuzzer harness for the protocol decoder (plan T-018).
+#
+# Deliberately *not* a workspace member: `cargo fuzz` builds with `-Z sanitizer`
+# on nightly, and a workspace member would drag that requirement into
+# `cargo test --workspace` on the pinned 1.87 toolchain. The empty `[workspace]`
+# table below is what detaches it.
+[package]
+name = "buddy-craft-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.protocol]
+path = "../crates/protocol"
+
+# Don't fuzz the release profile of the workspace; fuzz builds want opt-level 3
+# with debug assertions off.
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

@@ -43,6 +43,12 @@ jobs:
           shared-key: lint
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The fuzz harness is a separate crate (nightly + libFuzzer), so it is not
+      # in the workspace and nothing else would notice it rotting. Building it on
+      # stable is enough to catch the common breakage — a renamed message type or
+      # a changed `decode_checked` signature — without needing nightly in CI.
+      - name: build the fuzz harness
+        run: cargo build --manifest-path fuzz/Cargo.toml
 
   test:
     name: test (${{ matrix.arch }})

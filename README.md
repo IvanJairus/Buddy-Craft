@@ -9,9 +9,10 @@ the match ends when a team's core is destroyed.
 > storage, deterministic worldgen, greedy mesher and chunk-diff codec — and M1 —
 > fixed-point movement (T-009), the crate-recipe matcher (T-010), combat (T-011),
 > buddy AI (T-012), base damage and elimination (T-013), match rules (T-014) and
-> the determinism harness (T-015) — are done. M2 has the wire contract (T-017);
-> the room state machine, snapshots and bots are next, then the web client.
-> See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
+> the determinism harness (T-015) — are done. M2 has the wire contract and its
+> validation (T-017, T-018); the room state machine, snapshots and bots are next,
+> then the web client. See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task
+> backlog.
 
 ---
 
@@ -107,6 +108,8 @@ docs/
   PLAN.md       the specification this repo implements
 tools/
   wasm-golden.mjs  runs the wasm build of the golden test under node:wasi
+fuzz/
+  fuzz_targets/decode.rs  libFuzzer harness for the decoder (not a workspace member)
 ```
 
 `room` is deliberately runtime-agnostic. The same state machine runs inside a
@@ -116,7 +119,7 @@ we use" from an architectural decision into a configuration change.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 284 tests
+cargo test --workspace --all-targets              # 308 tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
@@ -161,8 +164,9 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-015 | scenario driver, golden hash fixtures, native + wasm parity | done |
 | T-016 | `data/tuning.ron` validated against the plan | done |
 | T-017 | wire contract: 20 messages, tag byte + postcard, size budgets | done |
+| T-018 | `decode_checked`, name/chat sanitisers, token buckets, fuzz target | done |
 
-Five plan acceptance criteria were changed deliberately, all recorded here
+Six plan acceptance criteria were changed deliberately, all recorded here
 rather than quietly skipped:
 
 - **`proptest` was removed.** The version that satisfies the workspace requires
@@ -193,6 +197,18 @@ rather than quietly skipped:
   of text, and a diff is readable. If a fixture ever needs hand-authored inputs
   — a specific player doing a specific thing — that is when an input array earns
   its place, and `ScenarioConfig` already takes the seed that would feed it.
+- **T-018's `cargo fuzz` run could not be executed in the environment this was
+  built in.** The harness is committed, builds clean, and is compiled by CI on
+  stable so it cannot rot — but the fuzzing binary itself is killed by this
+  machine before it completes a single run, so "no panic and no OOM in 60
+  seconds" is unverified here. What *is* verified is the same property without
+  libFuzzer: `codec::tests` sweeps 20,000 random frames, every single-byte
+  substitution and bit flip of five valid frames, and every truncation of them,
+  asserting the decoder returns rather than panics. That sweep is deterministic,
+  runs in CI on the pinned toolchain, and is a subset of what the fuzzer would
+  explore — a fuzzer's advantage is coverage guidance, not the property. Run
+  `cargo +nightly fuzz run decode -- -max_total_time=60` before trusting the
+  decoder with a public endpoint.
 - **T-016's "no numeric literal > 1" grep test is not implemented.** The other
   two T-016 criteria are: tuning parses at compile time and `tuning_matches_docs`
   pins it to the plan. The third is deferred because a blanket "no literal above
@@ -452,6 +468,48 @@ Everything else has room: `S_SNAPSHOT`'s worst case (6 players, 12 buddies, 24
 projectiles, 4 structures, 16 events, all fields present, all moving) is **615 B**
 against a 2,048 B budget and a 550 B average, which is what makes a keyframe every
 three seconds cheap. `S_LOBBY` at six players is 119 B against 140.
+
+## Validation: four outcomes, not two
+
+`C2s::decode` answers "can these bytes be a message". `decode_checked` answers
+"will this server act on it", and the difference is a second axis: *what happens
+to the connection*.
+
+| Failure | Response | Why |
+| --- | --- | --- |
+| Frame over 4 KB | close, code 1009 | checked before the payload is touched, so a 4 MB frame is never parsed |
+| Unknown tag, or a payload that does not match it | close, code 1008 | a malformed stream is a bug or an attack; both deserve termination, and "ignore and continue" turns one desynced byte into a permanently desynced connection |
+| Token bucket empty | close, code 1008 | §7.4 rule 6 |
+| Bad name, empty chat, out-of-bounds edit | reject, connection stays open | aiming at the sky is something players do |
+
+The last row is the one worth the extra type. §7.4 rule 4 says an out-of-bounds
+edit is answered with a reason rather than a disconnect, so `Error` has a
+`close_code() -> Option<u16>` and the caller closes only when it is `Some`.
+
+**Sanitisation returns a message, not a verdict.** `decode_checked` hands back a
+`C2s` whose name and chat are already canonical. A function that only *reported*
+"this is dirty" would leave the caller holding the dirty copy, and the next
+person to add a caller would have to remember to clean it. Returning the clean
+value makes the sanitised form the only one that escapes the codec — and makes
+the property testable as "decode twice, get the same thing".
+
+`<img src=x onerror=alert(1)>` becomes `img srcx onerroralert1`: every byte that
+could open a tag, close a tag or break out of an attribute is dropped, and what
+is left renders as text in any client. Disallowed bytes are *dropped* rather than
+replaced with spaces, because a message of 120 punctuation marks becoming 120
+spaces is neither what the sender typed nor obviously nothing.
+
+**The token bucket is integer.** Millitokens, refilled per tick from the tick
+delta, because a float refill would let two connections that arrived in a
+different order get different verdicts on the same frame — which is how "the game
+kicks me on my phone" becomes a week of debugging. A tick that goes backwards
+grants nothing: `saturating_sub`, not a wrapping difference, because ticks wrap
+by design and a wrapped tick is not 6.8 years of credit.
+
+`RateLimiter::messages()` is §7.4's 30/s with a burst of 60; `RateLimiter::edits()`
+is §6.6's 8/s with a burst of 8, so a player cannot bank a minute of edits and
+spend them in one tick. The tests assert the bucket buys *exactly* its configured
+rate over a second, and that 15 messages/s for ten seconds drops nothing.
 
 ## Content discrepancies, resolved rather than guessed
 
