@@ -35,7 +35,7 @@
 
 use std::sync::OnceLock;
 
-use sim::fixed::{cos, sin, yaw_to_rad, Fixed, ONE_RAW, TAU};
+use sim::fixed::{cos, sin, yaw_to_rad, Fixed, ONE, ONE_RAW, TAU, ZERO};
 
 use crate::block::{registry, BlockId};
 use crate::chunk::{Column, CHUNK_X, CHUNK_Y, CHUNK_Z};
@@ -168,20 +168,46 @@ const fn scale(x: i32, denom: i32) -> Fixed {
     Fixed::from_raw(((x as i64) * (ONE_RAW as i64) / (denom as i64)) as i32)
 }
 
+/// Stretch a noise value away from 0.5.
+///
+/// Averaged value noise clusters hard around the middle: `fbm` of four octaves
+/// almost never leaves `0.3..0.7`, so a naive `30 + n * 34` produces a map that
+/// is technically in range and visually a billiard table. Expanding around the
+/// midpoint by `num/den` restores the tails without changing the ordering, so
+/// the terrain keeps its structure but actually reaches the extremes.
+#[inline]
+fn contrast(n: Fixed, num: i32, den: i32) -> Fixed {
+    let half = Fixed::from_raw(ONE_RAW / 2);
+    let k = Fixed::from_raw(ONE_RAW * num / den);
+    n.saturating_sub(half)
+        .saturating_mul(k)
+        .saturating_add(half)
+        .clamp(ZERO, ONE)
+}
+
 /// Natural terrain height before any base flattening.
 ///
-/// Two noise fields: a slow continental term over 96-block features and a
-/// faster hill term over 24-block features. The weighted sum lands in
-/// `[30, 64)`, which is inside the `[28, 64]` contract with margin for the
-/// rounding.
+/// Three noise fields at three scales — continental (128 blocks), hills
+/// (40 blocks) and detail (12 blocks) — each contrast-expanded and then summed.
+/// The weights are chosen so the reachable range is roughly `[30, 66)` before
+/// clamping, which fills the `[28, 64]` contract instead of huddling in the
+/// middle of it.
 pub fn raw_height(seed: u64, x: i32, z: i32) -> i32 {
     let s = seed as u32;
-    let continent = fbm(scale(x, 96), scale(z, 96), s ^ 0x1111_1111, 4);
-    let hills = fbm(scale(x, 24), scale(z, 24), s ^ 0x2222_2222, 3);
-    let h = Fixed::from_int(30)
-        .saturating_add(continent.saturating_mul(Fixed::from_int(20)))
-        .saturating_add(hills.saturating_mul(Fixed::from_int(14)));
-    h.round_int().clamp(MIN_HEIGHT, MAX_HEIGHT)
+    let continent = contrast(
+        fbm(scale(x, 128), scale(z, 128), s ^ 0x1111_1111, 3),
+        22,
+        10,
+    );
+    let hills = contrast(fbm(scale(x, 40), scale(z, 40), s ^ 0x2222_2222, 3), 18, 10);
+    let detail = fbm(scale(x, 12), scale(z, 12), s ^ 0x3333_3333, 2);
+
+    Fixed::from_int(30)
+        .saturating_add(continent.saturating_mul(Fixed::from_int(22)))
+        .saturating_add(hills.saturating_mul(Fixed::from_int(12)))
+        .saturating_add(detail.saturating_mul(Fixed::from_int(4)))
+        .round_int()
+        .clamp(MIN_HEIGHT, MAX_HEIGHT)
 }
 
 /// Place `teams` bases evenly around a circle of radius 96 at the map centre.
@@ -311,21 +337,29 @@ impl WorldGen {
         if self.on_any_pad(x, z) {
             return p.pad_floor;
         }
+        // Cliffs are bare rock regardless of altitude.
         if slope >= 3 {
-            return if h < sea + 6 { p.gravel } else { p.stone };
+            return p.stone;
         }
+        // Submerged bed: clay in the shallows, sand where it is deep.
+        if h < sea {
+            return if h + 3 >= sea { p.clay } else { p.sand };
+        }
+        // One ring of beach at the waterline.
         if h <= sea + 1 {
-            p.sand
-        } else if h >= 58 {
+            return p.sand;
+        }
+        if h >= 56 {
             p.snow
         } else if h >= 50 {
-            if slope >= 2 {
+            // Highlands go rocky, but only where the ground actually tilts.
+            if slope >= 1 {
                 p.stone
             } else {
                 p.grass
             }
-        } else if h <= sea + 4 && slope == 0 {
-            p.clay
+        } else if slope >= 2 {
+            p.gravel
         } else {
             p.grass
         }
@@ -597,6 +631,92 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn terrain_uses_its_height_budget() {
+        // The first version of `raw_height` produced 37..56 on every seed:
+        // inside the `28..64` contract and visually a billiard table, because
+        // averaged value noise clusters around 0.5. Asserting the *bounds* did
+        // not catch it; asserting that the map uses its budget does.
+        let mut global_min = i32::MAX;
+        let mut global_max = i32::MIN;
+        let mut water = 0usize;
+        let mut total = 0usize;
+
+        for seed in [0x00C0_FFEEu64, 7, 0xDEAD_BEEF] {
+            let g = WorldGen::new(seed, 4);
+            for z in (0..WORLD_Z).step_by(8) {
+                for x in (0..WORLD_X).step_by(8) {
+                    let h = g.height_at(x, z);
+                    global_min = global_min.min(h);
+                    global_max = global_max.max(h);
+                    if h < sea_level() {
+                        water += 1;
+                    }
+                    total += 1;
+                }
+            }
+        }
+
+        let span = global_max - global_min;
+        assert!(
+            span >= 24,
+            "terrain only spans {global_min}..{global_max}; the noise fields are too \
+             compressed to read as terrain"
+        );
+        assert!(global_min >= MIN_HEIGHT && global_max <= MAX_HEIGHT);
+
+        let share = water as f64 / total as f64;
+        assert!(
+            (0.02..0.35).contains(&share),
+            "water covers {:.1}% of the map; either it is a desert or an ocean",
+            share * 100.0
+        );
+    }
+
+    #[test]
+    fn no_single_material_covers_the_whole_map() {
+        // The companion failure to a flat height field: a material rule that
+        // fires almost everywhere. An early `h <= sea + 4` clay rule painted
+        // most of the map clay, which no range assertion would ever notice.
+        use std::collections::BTreeMap;
+
+        let g = WorldGen::new(0x00C0_FFEE, 4);
+        let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut total = 0usize;
+
+        for cz in 0..4 {
+            for cx in 0..4 {
+                let col = g.column(cx, cz);
+                for lz in 0..CHUNK_Z {
+                    for lx in 0..CHUNK_X {
+                        let wx = cx * CHUNK_X as i32 + lx as i32;
+                        let wz = cz * CHUNK_Z as i32 + lz as i32;
+                        let h = g.height_at(wx, wz).max(0) as usize;
+                        let name = registry().def(col.get(lx, h, lz)).name.as_str();
+                        *counts.entry(name).or_insert(0) += 1;
+                        total += 1;
+                    }
+                }
+            }
+        }
+
+        let (name, n) = counts
+            .iter()
+            .max_by_key(|(_, n)| **n)
+            .expect("the map has surface cells");
+        let share = *n as f64 / total as f64;
+        assert!(
+            share < 0.75,
+            "`{name}` covers {:.0}% of the surface — the material rules are degenerate: {counts:?}",
+            share * 100.0
+        );
+        assert!(
+            counts.len() >= 4,
+            "only {} surface materials in use: {counts:?}",
+            counts.len()
+        );
     }
 
     #[test]
