@@ -247,6 +247,25 @@ impl core::ops::SubAssign for Vec3 {
     }
 }
 
+/// `vector * scalar`. Same as [`Vec3::scale`], for readability at call sites
+/// like `dir * travel` where the scalar reads as a duration or a fraction.
+impl core::ops::Mul<Fixed> for Vec3 {
+    type Output = Vec3;
+    #[inline]
+    fn mul(self, rhs: Fixed) -> Vec3 {
+        self.scale(rhs)
+    }
+}
+
+/// `scalar * vector`, the mirrored form.
+impl core::ops::Mul<Vec3> for Fixed {
+    type Output = Vec3;
+    #[inline]
+    fn mul(self, rhs: Vec3) -> Vec3 {
+        rhs.scale(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

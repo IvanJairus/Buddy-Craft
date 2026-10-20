@@ -7,9 +7,9 @@ the match ends when a team's core is destroyed.
 
 > **Status: M1 (simulation rules) in progress.** M0 — the simulation core, voxel
 > storage, deterministic worldgen, greedy mesher and chunk-diff codec — is
-> complete. M1 has added fixed-point movement (T-009) and the crate-recipe
-> matcher (T-010); combat, buddy AI, base damage and match rules are next, then
-> the network hosts and the web client are M2–M6. See
+> complete. M1 has added fixed-point movement (T-009), the crate-recipe matcher
+> (T-010) and combat (T-011); buddy AI, base damage and match rules are next,
+> then the network hosts and the web client are M2–M6. See
 > [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
@@ -110,7 +110,7 @@ we use" from an architectural decision into a configuration change.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 179 tests
+cargo test --workspace --all-targets              # 197 tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
@@ -126,8 +126,8 @@ column and meshing under 1.2 ms, or the benchmark exits non-zero. Set
 Current numbers on an M-series laptop (release):
 
 ```
-gen    0.184 ms/column   budget 1.5 ms
-mesh   0.650 ms/column   budget 1.2 ms
+gen    0.139 ms/column   budget 1.5 ms
+mesh   0.619 ms/column   budget 1.2 ms
 ```
 
 ## What M0 and M1 cover so far
@@ -144,6 +144,7 @@ mesh   0.650 ms/column   budget 1.2 ms
 | T-008 | sparse chunk diffs with an RLE keyframe fallback | done |
 | T-009 | quantised input, swept AABB movement, 4 substeps, step-up | done |
 | T-010 | crate-recipe matcher, pad placement rules, 14-recipe table | done |
+| T-011 | melee cones, swept projectiles, area damage, damage events | done |
 | T-016 | `data/tuning.ron` validated against the plan | done |
 
 Three plan acceptance criteria were changed deliberately, all recorded here
@@ -169,13 +170,45 @@ rather than quietly skipped:
   — is the witness that the rule is scoped to the lowest layer and not to every
   crate.
 
-## A content discrepancy, resolved rather than guessed
+## Combat: events, not side effects
+
+Every hit produces a `DamageEvent` in a per-tick vector. Nothing in
+`sim::combat` applies damage or decides what happens at zero HP — that is the
+match loop's job. Three consumers need the same hit in three forms (a hit flash,
+a material-dependent thud, a death), and emitting once and applying once is what
+keeps their ordering explicit instead of inferred from a changed HP value.
+
+| Rule | Where it comes from |
+| --- | --- |
+| 45° melee cone, reach measured to the target's centre | §4.8 |
+| Projectiles are swept, not sampled at endpoints | 2 m/tick at 40 m/s would tunnel a wall |
+| Terrain is tested before entities | so cover actually works |
+| Cooldowns convert to whole ticks at load | 0.45 s → 9 ticks; two clients cannot disagree about a swing |
+| No friendly fire | not specified in §4.8; in a 3v3 with AoE it is a griefing tool |
+
+The projectile-vs-terrain test is sampled at 0.2 m rather than DDA-swept. That
+cannot miss a 1 m block except by clipping a corner by less than 0.2 m, and the
+failure mode is a hit that should have happened. DDA is the upgrade if a
+playtester ever reports an arrow passing through a wall; the interface would not
+change.
+
+## Content discrepancies, resolved rather than guessed
 
 `R06_MAGE` in §4.5.3 is sketched as `###/###/###` plus `.#.` on top — 10 blocks
 — while the same row states a cost of **12**. The count is stated twice (shape
 and cost) against once (sketch), so the shipped shape is a 3-long ridge: 9 + 3 =
 12. It is a one-line edit in `data/recipes.ron` if the sketch was the intent, and
 the note is repeated there so the next reader does not have to rediscover it.
+
+§4.8 lists a "Staff — 40 dmg AoE r=2.5" that no recipe produces and no buddy
+owns, while §4.6 gives the Mage 22 damage at the same 2.5 m radius. §4.6 is the
+table with a full stat row (HP, interval, range, speed, aggro, cost, cap) and is
+therefore the authoritative one; `weapons.mage_bolt` ships at 22. The 40 is
+unreachable, so nothing in the game can observe the difference.
+
+The bow has no cadence anywhere in the plan. It ships at 0.70 s, which keeps bow
+DPS (43) below sword DPS (56) so the sword remains the damage option and range
+is the bow's compensation. It is one number in `data/tuning.ron`.
 
 ## Non-goals for v1
 

@@ -92,6 +92,30 @@ pub fn right_from_yaw(yaw: u8) -> Vec3 {
     Vec3::new(cos_yaw(yaw), Fixed::default(), -sin_yaw(yaw))
 }
 
+/// The unit facing vector for a yaw and pitch pair.
+///
+/// Pitch is a signed byte's worth of a turn: `0` is level, `64` is straight up,
+/// `-64` (i.e. `192`) is straight down. It is read as `i8` and clamped, so a
+/// client cannot send a pitch past vertical and get a vector that points
+/// backwards — the same reason [`wish_direction`] clamps its axes.
+///
+/// Reusing the yaw table for elevation keeps combat free of `asin`, and means
+/// "straight up" is exactly `(0, 1, 0)` on every target rather than 0.9999998
+/// of it.
+#[inline]
+pub fn look_direction(yaw: u8, pitch: u8) -> Vec3 {
+    // Elevation in yaw units: +64 is a quarter turn up, -64 a quarter turn down.
+    let elevation = (pitch as i8).clamp(-64, 64) as i32;
+    let phase = if elevation >= 0 {
+        elevation as u8
+    } else {
+        (256 + elevation) as u8
+    };
+    let c = cos_yaw(phase);
+    let s = sin_yaw(phase);
+    Vec3::new(sin_yaw(yaw) * c, s, cos_yaw(yaw) * c)
+}
+
 /// `1/sqrt(2)`, used to normalise a diagonal stick input.
 ///
 /// Hard-coded rather than computed so a diagonal walk is exactly the same
@@ -240,5 +264,40 @@ mod tests {
             ..Default::default()
         };
         assert!(!f.is_idle());
+    }
+
+    #[test]
+    fn look_direction_covers_the_cardinal_axes() {
+        // Level, facing +Z.
+        let d = look_direction(0, 0);
+        assert!((d.z.to_f64() - 1.0).abs() < 1e-3, "{d:?}");
+        assert!(d.y.to_f64().abs() < 1e-3);
+        // Straight up.
+        let d = look_direction(0, 64);
+        assert!((d.y.to_f64() - 1.0).abs() < 1e-3, "{d:?}");
+        // Straight down, encoded as -64.
+        let d = look_direction(0, 192);
+        assert!((d.y.to_f64() + 1.0).abs() < 1e-3, "{d:?}");
+        // Level, facing +X.
+        let d = look_direction(64, 0);
+        assert!((d.x.to_f64() - 1.0).abs() < 1e-3, "{d:?}");
+    }
+
+    #[test]
+    fn look_direction_is_unit_length_and_clamps_past_vertical() {
+        for yaw in [0u8, 37, 64, 128, 200] {
+            for pitch in [0u8, 32, 64, 96, 128, 160, 192, 255] {
+                let d = look_direction(yaw, pitch);
+                let len = d.length().to_f64();
+                assert!(
+                    (len - 1.0).abs() < 1e-3,
+                    "yaw {yaw} pitch {pitch} gave length {len}"
+                );
+            }
+        }
+        // Anything past +64 is clamped to straight up rather than wrapping.
+        assert_eq!(look_direction(0, 100), look_direction(0, 64));
+        // 130 reads as -126 as an i8, which clamps to straight down.
+        assert_eq!(look_direction(0, 130), look_direction(0, 192));
     }
 }

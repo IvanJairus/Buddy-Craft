@@ -18,9 +18,10 @@
 //! # Module status
 //!
 //! M0 (plan §16) shipped `fixed`, `ids`, `rng`, `time` and `tuning`.
-//! M1 adds `vec`, `input`, `world_query`, `movement`, `pad` and `recipe`;
-//! `combat`, `buddy`, `base` and `match_rules` follow in the same milestone.
+//! M1 adds `vec`, `input`, `world_query`, `movement`, `pad`, `recipe` and
+//! `combat`; `buddy`, `base` and `match_rules` follow in the same milestone.
 
+pub mod combat;
 pub mod fixed;
 pub mod ids;
 pub mod input;
@@ -34,6 +35,7 @@ pub mod tuning;
 pub mod vec;
 pub mod world_query;
 
+pub use combat::{Combatant, DamageEvent, DamageKind, Projectile, WeaponStats};
 pub use fixed::{cos, cos_yaw, sin, sin_yaw, Fixed, ONE, ZERO};
 pub use ids::{EntityId, PlayerId, TeamId};
 pub use input::InputFrame;

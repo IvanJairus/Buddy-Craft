@@ -45,6 +45,28 @@
     regen: 0.0,
   ),
 
+  // Plan §4.8 (player weapons) and §4.6 (buddy weapons).
+  //
+  // `cooldown_s` is authored in seconds because that is how a designer thinks
+  // about a swing; `crates/sim/src/tuning.rs` converts it to whole ticks at
+  // load (0.45 s -> 9 ticks at 20 Hz) and combat only ever sees the integer.
+  // `reach` is melee reach, or projectile flight distance.
+  weapons: (
+    fists:     (damage: 8,  cooldown_s: 0.50, reach: 2.2, profile: Melee),
+    sword:     (damage: 25, cooldown_s: 0.45, reach: 2.6, profile: Melee),
+    spear:     (damage: 20, cooldown_s: 0.55, reach: 3.6, profile: Melee),
+    // The plan gives the bow no cadence; 0.70 s is the slowest player attack,
+    // which keeps bow DPS (43) below sword DPS (56) so the sword stays the
+    // damage option and range is the bow's compensation.
+    bow:       (damage: 30, cooldown_s: 0.70, reach: 30.0,
+                profile: Projectile(speed: 40.0)),
+    // §4.6 Mage: 22 damage, 1.80 s, 10 m, AoE radius 2.5. §4.8 lists a
+    // "Staff 40 dmg AoE r=2.5" with no owner and no cadence; the only thing
+    // that casts is the Mage, so its §4.6 row is authoritative here.
+    mage_bolt: (damage: 22, cooldown_s: 1.80, reach: 10.0,
+                profile: Burst(speed: 20.0, radius: 2.5)),
+  ),
+
   airdrop: (
     first_drop_s: 10,
     interval_early_s: 25,

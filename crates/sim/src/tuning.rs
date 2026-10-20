@@ -14,7 +14,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Deserialize;
 
+use crate::combat::{AttackProfile, WeaponStats};
 use crate::fixed::Fixed;
+use crate::time::TICK_HZ;
 
 /// Validation failure while loading tuning data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +46,7 @@ struct TuningFile {
     player: PlayerFile,
     physics: PhysicsFile,
     core: CoreFile,
+    weapons: WeaponsFile,
     airdrop: AirdropFile,
     pad: PadFile,
     terrain: TerrainFile,
@@ -83,6 +86,30 @@ struct CoreFile {
     hp: i32,
     damage_mult: f32,
     regen: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+enum AttackProfileFile {
+    Melee,
+    Projectile { speed: f32 },
+    Burst { speed: f32, radius: f32 },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WeaponFile {
+    damage: i32,
+    cooldown_s: f32,
+    reach: f32,
+    profile: AttackProfileFile,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WeaponsFile {
+    fists: WeaponFile,
+    sword: WeaponFile,
+    spear: WeaponFile,
+    bow: WeaponFile,
+    mage_bolt: WeaponFile,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -202,6 +229,91 @@ pub struct CoreTuning {
     pub regen: Fixed,
 }
 
+/// The weapon table (plan §4.8 for players, §4.6 for buddies).
+///
+/// Named fields rather than a slice so a typo in `tuning.ron` is a load error
+/// instead of a silently missing weapon.
+#[derive(Debug, Clone)]
+pub struct WeaponTuning {
+    /// Bare hands: always available, weakest, so a player without a pickup can
+    /// still contribute (§4.8).
+    pub fists: WeaponStats,
+    /// Melee pickup, `R01_SWORD`.
+    pub sword: WeaponStats,
+    /// Long-reach melee pickup, `R08_SPEAR`.
+    pub spear: WeaponStats,
+    /// Projectile pickup, `R02_BOW`.
+    pub bow: WeaponStats,
+    /// The Mage buddy's area attack (§4.6).
+    pub mage_bolt: WeaponStats,
+}
+
+/// Validate and convert one authored weapon.
+///
+/// The cooldown is the interesting conversion: a designer writes `0.45`, and
+/// this is the only place that decides it means 9 ticks. Rounding here rather
+/// than comparing seconds at runtime is what stops two clients disagreeing
+/// about whether the third swing is legal on the tick it lands.
+fn weapon(field: &'static str, f: WeaponFile) -> Result<WeaponStats, TuningError> {
+    if f.damage <= 0 {
+        return Err(TuningError {
+            field,
+            reason: "damage must be positive",
+        });
+    }
+    if f.cooldown_s <= 0.0 {
+        return Err(TuningError {
+            field,
+            reason: "cooldown_s must be positive: a zero cadence is unlimited damage",
+        });
+    }
+    if f.reach <= 0.0 {
+        return Err(TuningError {
+            field,
+            reason: "reach must be positive",
+        });
+    }
+    let cooldown_ticks = (f.cooldown_s * TICK_HZ as f32).round() as u32;
+    if cooldown_ticks == 0 {
+        return Err(TuningError {
+            field,
+            reason: "cooldown_s rounds to zero ticks, which would fire every tick",
+        });
+    }
+    let profile = match f.profile {
+        AttackProfileFile::Melee => AttackProfile::Melee,
+        AttackProfileFile::Projectile { speed } => {
+            if speed <= 0.0 {
+                return Err(TuningError {
+                    field,
+                    reason: "projectile speed must be positive",
+                });
+            }
+            AttackProfile::Projectile {
+                speed: Fixed::from_f32(speed),
+            }
+        }
+        AttackProfileFile::Burst { speed, radius } => {
+            if speed <= 0.0 || radius <= 0.0 {
+                return Err(TuningError {
+                    field,
+                    reason: "burst speed and radius must both be positive",
+                });
+            }
+            AttackProfile::Burst {
+                speed: Fixed::from_f32(speed),
+                radius: Fixed::from_f32(radius),
+            }
+        }
+    };
+    Ok(WeaponStats {
+        damage: f.damage,
+        cooldown_ticks,
+        reach: Fixed::from_f32(f.reach),
+        profile,
+    })
+}
+
 /// Airdrop economy (plan §4.4).
 #[derive(Debug, Clone)]
 pub struct AirdropTuning {
@@ -282,6 +394,8 @@ pub struct Tuning {
     pub physics: PhysicsTuning,
     /// Core rules.
     pub core: CoreTuning,
+    /// Weapon table.
+    pub weapons: WeaponTuning,
     /// Airdrop rules.
     pub airdrop: AirdropTuning,
     /// Pad rules.
@@ -446,6 +560,13 @@ impl Tuning {
                 hp: f.core.hp,
                 damage_mult: Fixed::from_f32(f.core.damage_mult),
                 regen: Fixed::from_f32(f.core.regen),
+            },
+            weapons: WeaponTuning {
+                fists: weapon("weapons.fists", f.weapons.fists)?,
+                sword: weapon("weapons.sword", f.weapons.sword)?,
+                spear: weapon("weapons.spear", f.weapons.spear)?,
+                bow: weapon("weapons.bow", f.weapons.bow)?,
+                mage_bolt: weapon("weapons.mage_bolt", f.weapons.mage_bolt)?,
             },
             airdrop: AirdropTuning {
                 first_drop_s: f.airdrop.first_drop_s,
