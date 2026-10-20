@@ -72,6 +72,34 @@ jobs:
         # the whole "one implementation of the rules" premise (A-07) breaks.
         run: cargo build --target wasm32-unknown-unknown -p sim
 
+  wasm-golden:
+    name: wasm determinism (T-015)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.87.0"
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm-golden
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The golden fixtures are generated natively and compared *again* here
+      # with the same code compiled to wasm. This is the AC's "native and wasm
+      # produce identical hash sequences", and it needs no wasm runtime beyond
+      # Node, which the runner already has.
+      - name: build the golden test for wasm
+        run: cargo test --release --target wasm32-wasip1 -p sim --test golden --no-run
+      - name: run it under node's WASI
+        run: |
+          set -euo pipefail
+          wasm=$(ls target/wasm32-wasip1/release/deps/golden-*.wasm | head -n1)
+          echo "running $wasm"
+          node tools/wasm-golden.mjs "$wasm"
+
   bench:
     name: budget (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}

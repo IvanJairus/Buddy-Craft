@@ -264,6 +264,14 @@ impl MatchState {
         self.teams.get(id.0 as usize)
     }
 
+    /// Mutable teams, for the tick loop that drives buddy AI and the bases.
+    ///
+    /// Match-level rules stay on `MatchState`; this exists so a caller does not
+    /// have to copy buddy state out and back every tick.
+    pub fn teams_mut(&mut self) -> &mut [TeamState] {
+        &mut self.teams
+    }
+
     /// The match rules in force.
     pub fn rules(&self) -> &MatchRules {
         &self.rules

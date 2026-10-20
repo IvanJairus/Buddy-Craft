@@ -5,12 +5,13 @@ pad and arranged into recipes, recipes spawn weapons, kits and **buddies** —
 autonomous units with armed roles. Buddies die permanently, players respawn, and
 the match ends when a team's core is destroyed.
 
-> **Status: M1 (simulation rules) in progress.** M0 — the simulation core, voxel
-> storage, deterministic worldgen, greedy mesher and chunk-diff codec — is
-> complete. M1 has added fixed-point movement (T-009), the crate-recipe matcher
-> (T-010), combat (T-011) and buddy AI (T-012); base damage and match rules are
-> next, then the network hosts and the web client are M2–M6. See
-> [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
+> **Status: M1 (simulation rules) complete.** M0 — the simulation core, voxel
+> storage, deterministic worldgen, greedy mesher and chunk-diff codec — and M1 —
+> fixed-point movement (T-009), the crate-recipe matcher (T-010), combat (T-011),
+> buddy AI (T-012), base damage and elimination (T-013), match rules (T-014) and
+> the determinism harness (T-015) — are done. The network hosts and the web
+> client are M2–M6. See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task
+> backlog.
 
 ---
 
@@ -32,6 +33,7 @@ Determinism is enforced, not hoped for:
 | Q16.16 fixed point (`Fixed`) | `sim::fixed` | cross-target float drift |
 | Integer-only noise (no `sin`/`exp`/`pow`) | `world::noise` | libm differences between wasm and aarch64 |
 | `no_float` source scan | `sim/tests`, `world/tests` | a stray `f32` reaching authoritative state |
+| Golden hash fixtures, native **and** wasm | `sim/tests/golden` | a rules change nobody meant to make |
 | `aarch64` CI job | `.github/workflows/ci.yml` | "works on x86, drifts on a phone" (risk R-07) |
 | Seeded `xoshiro256**`, independent streams | `sim::rng` | adding one arrow changing the terrain |
 
@@ -88,7 +90,8 @@ the matcher runs at most six times per tick — 0.06 % of the 50 ms tick budget.
 ```
 crates/
   sim/          rules: fixed point, ids, rng, tuning, movement, pads,
-                recipes, combat, buddies, base, match rules    (compiled twice)
+                recipes, combat, buddies, base, match rules, scenario
+                                                             (compiled twice)
   world/        voxel storage, worldgen, mesher, chunk diffs
   protocol/     wire messages                          (M2)
   room/         pure room state machine, runtime-agnostic (M2)
@@ -102,6 +105,8 @@ data/
   recipes.ron   the 14 crate shapes, validated at load
 docs/
   PLAN.md       the specification this repo implements
+tools/
+  wasm-golden.mjs  runs the wasm build of the golden test under node:wasi
 ```
 
 `room` is deliberately runtime-agnostic. The same state machine runs inside a
@@ -111,13 +116,16 @@ we use" from an architectural decision into a configuration change.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 263 tests
+cargo test --workspace --all-targets              # 270 tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
+
+# Print the determinism sequence for a fixture; diff it against tests/golden/.
+cargo run -p sim --example hash_trace -- --mode duel --seed 0x00C0FFEE
 ```
 
 Budgets are **asserted, not printed**: worldgen must stay under 1.5 ms per
@@ -150,9 +158,10 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-012 | buddy AI: 4-state machine, budgeted A*, leash, stance toggle | done |
 | T-013 | core HP, damage multiplier, instant elimination (D-02) | done |
 | T-014 | cap matrix, FFA/Teams seating, win conditions, overtime decay | done |
+| T-015 | scenario driver, golden hash fixtures, native + wasm parity | done |
 | T-016 | `data/tuning.ron` validated against the plan | done |
 
-Four plan acceptance criteria were changed deliberately, all recorded here
+Five plan acceptance criteria were changed deliberately, all recorded here
 rather than quietly skipped:
 
 - **`proptest` was removed.** The version that satisfies the workspace requires
@@ -174,6 +183,15 @@ rather than quietly skipped:
   would need it). `R13_WARD` — whose `(1,1,1)` crate floats over the ring's hole
   — is the witness that the rule is scoped to the lowest layer and not to every
   crate.
+- **T-015's fixtures commit a seed and a script, not 20,000 input frames.** The
+  criterion says `(seed, [InputFrame; 20_000])` → a hash every 100 ticks, which
+  implies the input array is part of the fixture. Storing 20,000 frames per
+  fixture is ~1.4 MB of committed binary per file for inputs that are, by
+  construction, derived from the seed. The fixture is the *seed plus the script
+  that turns it into frames*, so the same replay is possible, the file is 15 KB
+  of text, and a diff is readable. If a fixture ever needs hand-authored inputs
+  — a specific player doing a specific thing — that is when an input array earns
+  its place, and `ScenarioConfig` already takes the seed that would feed it.
 - **T-016's "no numeric literal > 1" grep test is not implemented.** The other
   two T-016 criteria are: tuning parses at compile time and `tuning_matches_docs`
   pins it to the plan. The third is deferred because a blanket "no literal above
@@ -309,6 +327,68 @@ one rather than sampling: elapsed, decay applied, layout, outcome, core HP,
 destruction and elimination ticks, pad contents, pad seal, player life, bot
 flags, and each buddy's id, role, HP, state, stance and position. A field that
 affects play but not the hash is a desync no other test would catch.
+
+## Determinism: five fields, not one
+
+`state_hash()` answers "did the match change". It does not answer "which part
+of the match changed", and at 20,000 ticks the difference matters. So a
+checkpoint is five fields on one line, four of them hashes:
+
+```
+tick : state : movement : buddies : combat
+```
+
+`state` is the full match hash; the other three cover only entities that moved,
+only buddy decisions, and only damage events this tick. When a fixture goes red
+the reporter prints the first diverging tick, the field that diverged, and three
+lines of context around it — which is the difference between a five-minute
+bisect and an afternoon.
+
+| Fixture | Room | Checkpoints | Covers |
+| --- | --- | --- | --- |
+| `duel` | 1v1, `0x00C0FFEE` | 201 (to tick 20,000) | no elimination ever happens |
+| `teams` | 2v2, `0x00005EED` | 201 (to tick 20,000) | chip damage that never finishes a core |
+| `brawl` | 3-way FFA, `0x0BADC0DE` | 143 (ends at 14,200) | elimination and an outcome mid-run |
+
+The brawl fixture stops at 143 checkpoints because the match *ended*: once
+`Outcome` is decided the scenario stops stepping. A golden file that kept
+recording ticks after the match was over would be asserting the behaviour of a
+dead loop.
+
+Three things about the harness are worth recording.
+
+**The seed was decorative, and a test caught it.** The first version of the
+scenario mixed the seed into the RNG but not into the scripted inputs, so two
+different seeds produced byte-identical sequences — and
+`a_different_seed_produces_a_different_sequence` failed on exactly that. The
+fix is that `script` is a method on the scenario rather than a free function: it
+now derives direction phase, yaw and jump cadence from `self.seed`. Without the
+guard test the harness would have looked fine and proved less than it claimed —
+a golden that is the same for every seed is testing the script, not the seed.
+
+**Wasm parity runs under Node, not a new runtime.** The wasm target is
+`wasm32-wasip1` and `tools/wasm-golden.mjs` runs the test binary through
+`node:wasi` with `/` preopened, so the same binary reads the same committed
+`.hash` files. That is a CI job (`wasm-golden`) with no extra dependency beyond
+the Node that `actions/setup-node` already installs — `wasm-bindgen`,
+`wasm-pack` and a headless browser were all avoidable because the test needs a
+filesystem and nothing else. Release run: 7 tests, 1.80 s, byte-identical to
+native.
+
+**The float mutation was verified twice, because the first attempt proved
+nothing.** T-015's criterion asks that a deliberate `f32` mutation in
+`movement.rs` makes the suite fail. Inserting `let _ = speed;` into the velocity
+computation left the golden green — correctly, since the value was discarded and
+nothing observable changed. The real experiment replaced the velocity with
+`Fixed::from_f32(cfg.speed.to_f32() * 0.999)`, which made **both** detectors
+fire: `no_float` rejected the source scan and the golden diverged at tick 100 in
+`movement` for all three fixtures. Reverted immediately; the lesson is that a
+mutation test has to change a value that reaches the hash, not just reference
+one.
+
+`UPDATE_GOLDENS=1 cargo test -p sim --test golden` rewrites the fixtures. It is
+for a rule change that was made on purpose, never for making a red test green —
+the diff *is* the record of what changed, and reviewing it is the point.
 
 ## Content discrepancies, resolved rather than guessed
 
