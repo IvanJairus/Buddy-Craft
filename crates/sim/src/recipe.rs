@@ -39,6 +39,7 @@
 
 use serde::Deserialize;
 
+use crate::buddy::BuddyKind;
 use crate::pad::{Pad, PAD_CELLS};
 use crate::time::Tick;
 
@@ -81,23 +82,6 @@ const NEIGHBOURS: [BlockPos; 6] = [
 /// and comparing it cannot accidentally depend on locale or case.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct RecipeId(pub u16);
-
-/// A buddy archetype (§4.6).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize)]
-pub enum BuddyKind {
-    /// Line holder.
-    Swordsman,
-    /// Sustained ranged.
-    Archer,
-    /// Anti-clump, area damage.
-    Mage,
-    /// Force multiplier.
-    Healer,
-    /// Breaks a line.
-    Berserker,
-    /// Punishes towers and rams.
-    Sniper,
-}
 
 /// What a recipe produces.
 ///

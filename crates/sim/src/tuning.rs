@@ -14,6 +14,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Deserialize;
 
+use crate::buddy::{BuddyKind, BuddyStats};
 use crate::combat::{AttackProfile, WeaponStats};
 use crate::fixed::Fixed;
 use crate::time::TICK_HZ;
@@ -110,6 +111,21 @@ struct WeaponsFile {
     spear: WeaponFile,
     bow: WeaponFile,
     mage_bolt: WeaponFile,
+    swordsman_blade: WeaponFile,
+    archer_bow: WeaponFile,
+    healer_staff: WeaponFile,
+    berserker_axe: WeaponFile,
+    sniper_rifle: WeaponFile,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BuddyFile {
+    kind: BuddyKind,
+    hp: i32,
+    speed: f32,
+    aggro: f32,
+    cost: u32,
+    cap: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -246,6 +262,33 @@ pub struct WeaponTuning {
     pub bow: WeaponStats,
     /// The Mage buddy's area attack (§4.6).
     pub mage_bolt: WeaponStats,
+    /// Swordsman melee.
+    pub swordsman_blade: WeaponStats,
+    /// Archer projectile.
+    pub archer_bow: WeaponStats,
+    /// Healer's staff: `damage` is the heal amount.
+    pub healer_staff: WeaponStats,
+    /// Berserker melee.
+    pub berserker_axe: WeaponStats,
+    /// Sniper projectile.
+    pub sniper_rifle: WeaponStats,
+}
+
+impl WeaponTuning {
+    /// The weapon a buddy of `kind` fights with.
+    ///
+    /// A `match` rather than a table so adding a role without giving it a
+    /// weapon is a compile error, not a buddy that stands still.
+    pub fn for_buddy(&self, kind: BuddyKind) -> WeaponStats {
+        match kind {
+            BuddyKind::Swordsman => self.swordsman_blade,
+            BuddyKind::Archer => self.archer_bow,
+            BuddyKind::Mage => self.mage_bolt,
+            BuddyKind::Healer => self.healer_staff,
+            BuddyKind::Berserker => self.berserker_axe,
+            BuddyKind::Sniper => self.sniper_rifle,
+        }
+    }
 }
 
 /// Validate and convert one authored weapon.
@@ -311,6 +354,115 @@ fn weapon(field: &'static str, f: WeaponFile) -> Result<WeaponStats, TuningError
         cooldown_ticks,
         reach: Fixed::from_f32(f.reach),
         profile,
+    })
+}
+
+/// The largest per-team buddy total in §4.7 (2v2 and 3v3 Teams).
+///
+/// A per-role cap above this could never be reached, because the team total
+/// binds first. That makes it a data error rather than a harmless surplus.
+pub const MAX_TEAM_BUDDIES: u32 = 5;
+
+/// Dotted field names for roster errors, indexed by [`BuddyKind`].
+const BUDDY_FIELDS: [&str; 6] = [
+    "buddies.Swordsman",
+    "buddies.Archer",
+    "buddies.Mage",
+    "buddies.Healer",
+    "buddies.Berserker",
+    "buddies.Sniper",
+];
+
+/// Parse `data/buddies.ron` into a dense table indexed by [`BuddyKind`].
+///
+/// The roster is a separate file from `tuning.ron` (plan T-012) because it is a
+/// table, not a set of knobs: adding a role is a row, not a new key in a struct
+/// literal. The cost of that split is this function, which has to prove the
+/// file is complete — a missing row would otherwise become a buddy that spawns
+/// with zero HP and silently dies on its first tick.
+fn buddy_table(src: &str, weapons: &WeaponTuning) -> Result<[BuddyStats; 6], TuningError> {
+    let rows: Vec<BuddyFile> = ron::from_str(src).map_err(|_| TuningError {
+        field: "buddies",
+        reason: "not valid RON for the buddy roster",
+    })?;
+
+    let mut slots: [Option<BuddyStats>; 6] = [None; 6];
+
+    for row in rows {
+        let field = BUDDY_FIELDS[row.kind as usize];
+        if row.hp <= 0 {
+            return Err(TuningError {
+                field,
+                reason: "hp must be positive",
+            });
+        }
+        if row.speed <= 0.0 {
+            return Err(TuningError {
+                field,
+                reason: "speed must be positive",
+            });
+        }
+        if row.aggro <= 0.0 {
+            return Err(TuningError {
+                field,
+                reason: "aggro must be positive",
+            });
+        }
+        if row.cost == 0 {
+            return Err(TuningError {
+                field,
+                reason: "cost must be > 0: a free buddy is not a crate sink",
+            });
+        }
+        if row.cap == 0 {
+            return Err(TuningError {
+                field,
+                reason: "cap must be > 0: a role that cannot be built is dead data",
+            });
+        }
+        if row.cap > MAX_TEAM_BUDDIES {
+            return Err(TuningError {
+                field,
+                reason: "cap exceeds the §4.7 per-team buddy total, so it is unreachable",
+            });
+        }
+        if slots[row.kind as usize].is_some() {
+            return Err(TuningError {
+                field,
+                reason: "duplicate roster row: which one wins would depend on file order",
+            });
+        }
+        slots[row.kind as usize] = Some(BuddyStats {
+            kind: row.kind,
+            hp: row.hp,
+            weapon: weapons.for_buddy(row.kind),
+            speed: Fixed::from_f32(row.speed),
+            aggro: Fixed::from_f32(row.aggro),
+            cost: row.cost,
+            cap: row.cap,
+        });
+    }
+
+    let mut dense = Vec::with_capacity(6);
+    for kind in BuddyKind::ALL {
+        match slots[kind as usize] {
+            Some(stats) => dense.push(stats),
+            None => {
+                return Err(TuningError {
+                    field: BUDDY_FIELDS[kind as usize],
+                    reason: "missing from data/buddies.ron",
+                })
+            }
+        }
+    }
+
+    // Six roles, each with `cap >= 1`, so the per-role caps always sum to at
+    // least 6 and can always fill §4.7's largest team budget of 5. That is why
+    // there is no "sum is too small" branch here: it would be unreachable, and
+    // an unreachable branch is a claim no test can check.
+    dense.try_into().map_err(|_| TuningError {
+        field: "buddies",
+        reason: "roster did not produce exactly six rows",
     })
 }
 
@@ -396,6 +548,8 @@ pub struct Tuning {
     pub core: CoreTuning,
     /// Weapon table.
     pub weapons: WeaponTuning,
+    /// Buddy roster, indexed by [`BuddyKind`].
+    pub buddies: [BuddyStats; 6],
     /// Airdrop rules.
     pub airdrop: AirdropTuning,
     /// Pad rules.
@@ -407,16 +561,25 @@ pub struct Tuning {
 }
 
 impl Tuning {
-    /// Parse and validate a RON document.
+    /// Parse and validate a RON document against the embedded roster.
     pub fn parse(src: &str) -> Result<Tuning, TuningError> {
+        Tuning::parse_with_roster(src, EMBEDDED_BUDDIES_RON)
+    }
+
+    /// Parse `src` against a caller-supplied roster document.
+    ///
+    /// Separate from [`Tuning::parse`] so tests can drive a bad roster through
+    /// the same validation the shipped one gets. There is no runtime roster
+    /// override: the file is compiled in, like the rest of the tuning.
+    pub fn parse_with_roster(src: &str, roster: &str) -> Result<Tuning, TuningError> {
         let file: TuningFile = ron::from_str(src).map_err(|_| TuningError {
             field: "<document>",
             reason: "not valid RON for the tuning schema",
         })?;
-        Tuning::from_file(file)
+        Tuning::from_file(file, roster)
     }
 
-    fn from_file(f: TuningFile) -> Result<Tuning, TuningError> {
+    fn from_file(f: TuningFile, roster: &str) -> Result<Tuning, TuningError> {
         // --- ranges -----------------------------------------------------
         if f.player.hp <= 0 {
             return Err(TuningError {
@@ -533,6 +696,22 @@ impl Tuning {
             });
         }
 
+        // Built as locals because the roster needs to read the weapon table
+        // before either is moved into the struct literal.
+        let weapons = WeaponTuning {
+            fists: weapon("weapons.fists", f.weapons.fists)?,
+            sword: weapon("weapons.sword", f.weapons.sword)?,
+            spear: weapon("weapons.spear", f.weapons.spear)?,
+            bow: weapon("weapons.bow", f.weapons.bow)?,
+            mage_bolt: weapon("weapons.mage_bolt", f.weapons.mage_bolt)?,
+            swordsman_blade: weapon("weapons.swordsman_blade", f.weapons.swordsman_blade)?,
+            archer_bow: weapon("weapons.archer_bow", f.weapons.archer_bow)?,
+            healer_staff: weapon("weapons.healer_staff", f.weapons.healer_staff)?,
+            berserker_axe: weapon("weapons.berserker_axe", f.weapons.berserker_axe)?,
+            sniper_rifle: weapon("weapons.sniper_rifle", f.weapons.sniper_rifle)?,
+        };
+        let buddies = buddy_table(roster, &weapons)?;
+
         Ok(Tuning {
             match_cfg: MatchTuning {
                 target_minutes: f.match_cfg.target_minutes,
@@ -561,13 +740,8 @@ impl Tuning {
                 damage_mult: Fixed::from_f32(f.core.damage_mult),
                 regen: Fixed::from_f32(f.core.regen),
             },
-            weapons: WeaponTuning {
-                fists: weapon("weapons.fists", f.weapons.fists)?,
-                sword: weapon("weapons.sword", f.weapons.sword)?,
-                spear: weapon("weapons.spear", f.weapons.spear)?,
-                bow: weapon("weapons.bow", f.weapons.bow)?,
-                mage_bolt: weapon("weapons.mage_bolt", f.weapons.mage_bolt)?,
-            },
+            weapons,
+            buddies,
             airdrop: AirdropTuning {
                 first_drop_s: f.airdrop.first_drop_s,
                 interval_early_s: f.airdrop.interval_early_s,
@@ -645,6 +819,19 @@ pub fn embedded() -> &'static Tuning {
 
 /// Raw embedded RON, exposed so tests can re-parse and diff it.
 pub const EMBEDDED_RON: &str = include_str!("../../../data/tuning.ron");
+
+/// Raw embedded buddy roster (plan T-012).
+pub const EMBEDDED_BUDDIES_RON: &str = include_str!("../../../data/buddies.ron");
+
+/// Stats for one buddy role.
+///
+/// Returns a `'static` reference into the embedded tuning so callers do not
+/// have to thread a `&Tuning` through the AI: a buddy's numbers are immutable
+/// for the process lifetime, and the alternative — copying a [`BuddyStats`]
+/// into every buddy — invites two buddies of the same role disagreeing.
+pub fn buddy(kind: BuddyKind) -> &'static BuddyStats {
+    &embedded().buddies[kind as usize]
+}
 
 /// A process-wide generation counter, useful for cache invalidation when
 /// tuning is reloaded in a dev build.
@@ -761,5 +948,85 @@ mod tests {
     #[test]
     fn generation_is_positive() {
         assert!(generation() >= 1);
+    }
+
+    /// Drop the roster line for `kind`, leaving the rest untouched.
+    fn roster_without(kind: &str) -> String {
+        let needle = format!("kind: {kind},");
+        EMBEDDED_BUDDIES_RON
+            .lines()
+            .filter(|line| !line.contains(&needle))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn roster_must_have_one_row_per_role() {
+        // Every role must be present: a missing row is a load error, not a
+        // buddy that spawns with zero HP and dies on its first tick.
+        for kind in BuddyKind::ALL {
+            let name = format!("{kind:?}");
+            let roster = roster_without(&name);
+            assert_ne!(
+                roster, EMBEDDED_BUDDIES_RON,
+                "{name} was not found to remove"
+            );
+            let err = Tuning::parse_with_roster(EMBEDDED_RON, &roster).unwrap_err();
+            assert_eq!(err.field, format!("buddies.{name}"), "removing {name}");
+        }
+    }
+
+    #[test]
+    fn roster_rejects_duplicates() {
+        // Renaming the Archer row to Swordsman leaves two swordsmen and no
+        // archer. The duplicate must be reported, because "last row wins"
+        // would make the roster depend on file order.
+        let roster = EMBEDDED_BUDDIES_RON.replace("kind: Archer,", "kind: Swordsman,");
+        let err = Tuning::parse_with_roster(EMBEDDED_RON, &roster).unwrap_err();
+        assert_eq!(err.field, "buddies.Swordsman");
+        assert!(err.reason.contains("duplicate"), "{}", err.reason);
+    }
+
+    #[test]
+    fn roster_rejects_unreachable_caps() {
+        // §4.7 caps a team at 5 buddies, so a per-role cap of 9 could never be
+        // spent. Catch it at load rather than letting a designer tune a number
+        // that does nothing.
+        let roster = EMBEDDED_BUDDIES_RON.replace("cap: 4)", "cap: 9)");
+        let err = Tuning::parse_with_roster(EMBEDDED_RON, &roster).unwrap_err();
+        assert_eq!(err.field, "buddies.Swordsman");
+        assert!(err.reason.contains("unreachable"), "{}", err.reason);
+    }
+
+    #[test]
+    fn roster_rejects_zeroed_fields() {
+        for (from, to, field) in [
+            ("hp: 120,", "hp: 0,", "buddies.Swordsman"),
+            ("speed: 3.4", "speed: 0.0", "buddies.Swordsman"),
+            ("aggro: 12.0", "aggro: 0.0", "buddies.Swordsman"),
+            ("cost: 9,", "cost: 0,", "buddies.Swordsman"),
+            ("cap: 4)", "cap: 0)", "buddies.Swordsman"),
+        ] {
+            let roster = EMBEDDED_BUDDIES_RON.replace(from, to);
+            assert_ne!(roster, EMBEDDED_BUDDIES_RON, "{from} was not found");
+            let err = Tuning::parse_with_roster(EMBEDDED_RON, &roster).unwrap_err();
+            assert_eq!(err.field, field, "for {from}");
+        }
+        assert!(Tuning::parse_with_roster(EMBEDDED_RON, "not ron (").is_err());
+    }
+
+    #[test]
+    fn the_roster_takes_its_weapons_from_the_weapon_table() {
+        // One table of damage numbers: the buddy row must not restate them.
+        let t = embedded();
+        let swordsman = t.buddies[BuddyKind::Swordsman as usize];
+        assert_eq!(swordsman.weapon.damage, t.weapons.swordsman_blade.damage);
+        assert_eq!(swordsman.weapon.cooldown_ticks, 12);
+        let healer = t.buddies[BuddyKind::Healer as usize];
+        assert!(healer.heals());
+        assert_eq!(healer.weapon.damage, t.weapons.healer_staff.damage);
+        // And the accessor agrees with the table it reads.
+        assert_eq!(buddy(BuddyKind::Sniper).hp, 60);
+        assert_eq!(buddy(BuddyKind::Sniper).weapon.damage, 40);
     }
 }

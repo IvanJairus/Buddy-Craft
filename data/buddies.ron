@@ -1,0 +1,27 @@
+// Cratebound buddy roster (plan §4.6).
+//
+// Damage, cadence and range live in `data/tuning.ron` under `weapons`, because
+// a buddy's attack is a weapon and two tables of damage numbers would drift.
+// This file holds what is specific to the unit: its health, how fast it moves,
+// how far it notices, and its economy.
+//
+// Rules enforced at load (see `buddy_table` in crates/sim/src/tuning.rs):
+//   * exactly one row per BuddyKind — a missing role is a load error, not a
+//     buddy that silently does nothing, and a duplicate is an error too, so
+//     the roster never depends on file order
+//   * hp > 0, speed > 0, aggro > 0, cost > 0, cap > 0
+//   * cap <= 5, the largest per-team buddy total in §4.7 — a role cap above
+//     that could never be spent, because the team total binds first
+//
+// The caps below sum to 17, so a team can always fill §4.7's budget of 5.
+// §4.7's team total is enforced at match level (T-014), not here: this file
+// only says how many of each role are allowed.
+[
+  // hp, speed m/s, aggro m, cost in crates, per-role cap (§4.6, §4.7)
+  (kind: Swordsman, hp: 120, speed: 3.4, aggro: 12.0, cost: 9,  cap: 4),
+  (kind: Archer,    hp: 80,  speed: 3.2, aggro: 16.0, cost: 8,  cap: 4),
+  (kind: Mage,      hp: 70,  speed: 3.0, aggro: 14.0, cost: 12, cap: 3),
+  (kind: Healer,    hp: 75,  speed: 3.2, aggro: 12.0, cost: 10, cap: 2),
+  (kind: Berserker, hp: 200, speed: 3.8, aggro: 14.0, cost: 18, cap: 2),
+  (kind: Sniper,    hp: 60,  speed: 2.8, aggro: 32.0, cost: 15, cap: 2),
+]

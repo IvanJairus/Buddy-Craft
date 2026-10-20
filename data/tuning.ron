@@ -65,6 +65,17 @@
     // that casts is the Mage, so its §4.6 row is authoritative here.
     mage_bolt: (damage: 22, cooldown_s: 1.80, reach: 10.0,
                 profile: Burst(speed: 20.0, radius: 2.5)),
+
+    // Buddy weapons (§4.6). Damage, cadence and range live here rather than in
+    // buddies.ron so there is exactly one table of damage numbers in the game.
+    // The plan does not give projectile speeds for the archer or the sniper;
+    // 30 and 60 m/s keep flight time under half a second at each role's range,
+    // which is short enough that a target cannot walk out of the shot.
+    swordsman_blade: (damage: 14, cooldown_s: 0.60, reach: 1.8,  profile: Melee),
+    archer_bow:      (damage: 12, cooldown_s: 1.10, reach: 14.0, profile: Projectile(speed: 30.0)),
+    healer_staff:    (damage: 15, cooldown_s: 1.50, reach: 8.0,  profile: Melee),
+    berserker_axe:   (damage: 20, cooldown_s: 0.50, reach: 1.8,  profile: Melee),
+    sniper_rifle:    (damage: 40, cooldown_s: 2.50, reach: 28.0, profile: Projectile(speed: 60.0)),
   ),
 
   airdrop: (

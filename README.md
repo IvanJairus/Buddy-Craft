@@ -8,8 +8,8 @@ the match ends when a team's core is destroyed.
 > **Status: M1 (simulation rules) in progress.** M0 — the simulation core, voxel
 > storage, deterministic worldgen, greedy mesher and chunk-diff codec — is
 > complete. M1 has added fixed-point movement (T-009), the crate-recipe matcher
-> (T-010) and combat (T-011); buddy AI, base damage and match rules are next,
-> then the network hosts and the web client are M2–M6. See
+> (T-010), combat (T-011) and buddy AI (T-012); base damage and match rules are
+> next, then the network hosts and the web client are M2–M6. See
 > [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
@@ -97,6 +97,7 @@ crates/
   host-axum/    tokio/axum host                        (M4)
 data/
   tuning.ron    every designer-facing number, single source of truth
+  buddies.ron   the six buddy roles, one row each, validated at load
   blocks.ron    the 20 block types; the array index *is* the BlockId
   recipes.ron   the 14 crate shapes, validated at load
 docs/
@@ -110,7 +111,7 @@ we use" from an architectural decision into a configuration change.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 197 tests
+cargo test --workspace --all-targets              # 223 tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
@@ -128,6 +129,7 @@ Current numbers on an M-series laptop (release):
 ```
 gen    0.139 ms/column   budget 1.5 ms
 mesh   0.619 ms/column   budget 1.2 ms
+ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfinding)
 ```
 
 ## What M0 and M1 cover so far
@@ -145,6 +147,7 @@ mesh   0.619 ms/column   budget 1.2 ms
 | T-009 | quantised input, swept AABB movement, 4 substeps, step-up | done |
 | T-010 | crate-recipe matcher, pad placement rules, 14-recipe table | done |
 | T-011 | melee cones, swept projectiles, area damage, damage events | done |
+| T-012 | buddy AI: 4-state machine, budgeted A*, leash, stance toggle | done |
 | T-016 | `data/tuning.ron` validated against the plan | done |
 
 Three plan acceptance criteria were changed deliberately, all recorded here
@@ -192,6 +195,43 @@ failure mode is a hit that should have happened. DDA is the upgrade if a
 playtester ever reports an arrow passing through a wall; the interface would not
 change.
 
+## Buddies: legible, not clever
+
+A buddy is not a player with worse aim. It has to be *explainable*: when it
+dies, the player must be able to say what it was doing and whether that was
+reasonable. That constraint rules out behaviour trees, utility scoring over
+time, and any memory of previous fights. What is left is a four-state machine
+with seven transitions (§4.6), a target score you can predict after seeing it
+once, and a leash.
+
+```
+IDLE ──owner alive──► FOLLOW ──enemy in aggro──► ENGAGE ──ally < 60% HP──► HEAL
+  ▲                     ▲                          │                        │
+  └─────────────────────┴──────────────────────────┴────────────────────────┘
+                              any ──HP == 0──► DEAD (terminal)
+```
+
+Three things are worth knowing before reading `sim::buddy`:
+
+| Decision | Why |
+| --- | --- |
+| The leash is a *filter*, not a branch | A target outside 24 m is removed from consideration before the state machine runs, so "engage → follow" covers both "the target died" and "the target ran" — one behaviour, tested once |
+| Target ties break on `EntityId` | Not insertion order, not "first in the slice". Buddy positions feed the state hash, so an arbitrary tie-break is a desync |
+| `Dead` has no outgoing edge | Permanent death is the whole point of the crate cost. `buddy_never_respawns` runs 10,000 ticks and asserts the id never comes back |
+
+Pathfinding is bounded three ways — a 512-expansion budget, a search box of the
+start/goal bounding box plus 4 cells, and a 56-cell distance cap. When a search
+fails the buddy steers straight and gets stuck, which is a deliberate trade: a
+stuck buddy is legible to the player, a stalled tick is not. The failed-search
+test asserts both halves — no path *and* under 20 µs.
+
+`data/buddies.ron` is a separate file from `tuning.ron` because it is a table
+rather than a set of knobs. The cost of the split is that the loader must prove
+the file is complete: a missing role would otherwise become a buddy that spawns
+with zero HP and dies on its first tick. Missing rows, duplicate rows, zeroed
+fields and caps above §4.7's team total are all load errors with the offending
+role named.
+
 ## Content discrepancies, resolved rather than guessed
 
 `R06_MAGE` in §4.5.3 is sketched as `###/###/###` plus `.#.` on top — 10 blocks
@@ -209,6 +249,15 @@ unreachable, so nothing in the game can observe the difference.
 The bow has no cadence anywhere in the plan. It ships at 0.70 s, which keeps bow
 DPS (43) below sword DPS (56) so the sword remains the damage option and range
 is the bow's compensation. It is one number in `data/tuning.ron`.
+
+§4.6 writes the target score as `distance_weight × dist − role_weight[role] −
+low_hp_bonus`, maximised. Read literally with positive weights that prefers
+*distant* targets and *low-priority* roles — a sniper across the map over a
+healer at your feet. The intent is unambiguous from the role ordering that
+follows ("Sniper > Tower/Ram, Berserker > Healer"), so both weights are negative
+in `sim::buddy` and the formula is written in its intended form:
+`priority − distance + low_hp_bonus`. The weights are `ROLE_PRIORITY`, which is
+the first thing to tune if buddies feel like they are shooting the wrong thing.
 
 ## Non-goals for v1
 
