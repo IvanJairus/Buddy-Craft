@@ -167,9 +167,10 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-018 | `decode_checked`, name/chat sanitisers, token buckets, fuzz target | done |
 | T-019 | room lifecycle: six edges, one terminal state, no clock | done |
 | T-020 | tick loop, per-player input queue, 200 ms AFK timeout | done |
+| P-01 | player bodies: spawn search, input application, death, respawn | done |
 
-Six plan acceptance criteria were changed deliberately, all recorded here
-rather than quietly skipped:
+The plan is followed except where it is wrong or silent, and every such case is
+recorded here rather than quietly skipped:
 
 - **`proptest` was removed.** The version that satisfies the workspace requires
   rustc 1.88; the pinned toolchain is 1.87. The property-style tests use a
@@ -211,6 +212,22 @@ rather than quietly skipped:
   explore — a fuzzer's advantage is coverage guidance, not the property. Run
   `cargo +nightly fuzz run decode -- -max_total_time=60` before trusting the
   decoder with a public endpoint.
+- **T-020's `TickOutput.outcome` was `None` on the tick the match ended**, and a
+  three-frame packet covers two future ticks rather than three. Both are
+  described in "The tick loop" above; they are test expectations that were
+  wrong, not rules that were changed.
+- **P-01 is not a plan task.** The plan calls `sim::step_local(state, input)` in
+  §6.4 but no task creates it, so T-021's snapshots, T-022's reach checks, T-023's
+  bots and T-024's full match all depended on something the task list never
+  scheduled. It is numbered `P-01` — prerequisite one — so the gap is visible in
+  the table instead of being smuggled into T-021.
+- **The T-015 fixture *script* changed, and that is a real rule change.** The
+  fixtures are regenerated in this commit because bodies are now hashed and
+  because the script aims at its target instead of walking in fixed compass
+  directions. The old files recorded 20,000 ticks in which no player ever hit
+  another; keeping them byte-identical would have meant keeping the blind spot.
+  The diff is the record: `state`, `movement` and `combat` all move at tick 0, and
+  the checkpoint counts (201/201/143) are unchanged, so no match got shorter.
 - **T-016's "no numeric literal > 1" grep test is not implemented.** The other
   two T-016 criteria are: tuning parses at compile time and `tuning_matches_docs`
   pins it to the plan. The third is deferred because a blanket "no literal above
@@ -608,25 +625,113 @@ tick; the correct answer is two frames plus four. The test now asserts the
 property rather than the arithmetic — the player stops within one packet plus
 200 ms — and pins the exact count separately.
 
-### A known gap, recorded rather than papered over
+### The gap this closed
 
-`Room::tick` resolves input, reports it, and steps `MatchState` — but **nothing
-applies the frame to a player's position**, because `MatchState` has no player
-entities. Players are `PlayerSlot { id, team, life, bot }`: a seat, not a body.
-Buddies have positions (`TeamState.buddies`); players do not.
+Until this commit `Room::tick` resolved input, reported it, and stepped
+`MatchState` — but **nothing applied the frame to a player's position**, because
+`MatchState` had no player entities. Players were `PlayerSlot { id, team, life,
+bot }`: a seat, not a body. Buddies had positions; players did not.
 
-This is a hole in the plan rather than a shortcut here. §6.4 calls
+That was a hole in the plan rather than a shortcut here. §6.4 calls
 `sim::step_local(state, input)` but no task creates it, and T-021 (snapshots),
 T-022 (reach checks "using its own player position"), T-023 (bots that fight and
-push a core) and T-024 (a full match) all need it. The reentrancy test says so
-out loud: it diverges two rooms by damaging a core, not by moving a player,
-because a test that relied on movement would pass whether or not the rooms shared
-state.
+push a core) and T-024 (a full match) all need it. It is recorded in the table
+below as **P-01** — a prerequisite, not a plan task — and the section after this
+one is what it turned out to involve.
 
-The next unit of work is that entity layer: a `MoveState` per player, spawning at
-the pad, `apply_input` calling `sim::movement::step` against a `VoxelQuery`, and
-HP/death/respawn. It has to land before snapshots, because a snapshot of players
-who cannot move is a snapshot of nothing.
+It ships as `MatchState::apply_input`, not `step_local`: the plan's name is for
+the client's prediction entry point, which wraps this and adds the replay of
+unacknowledged frames (§6.4 steps 5–8). The one function both sides run is the
+input application itself, so that is the thing that got a name here.
+
+## Bodies: two kinds of dead
+
+`PlayerSlot` is what *elimination* sees, and D-02 requires that elimination look at
+nothing but `team` and `life`: a player mid-swing dies on the same tick as one
+standing still. A body is the opposite — it is everything elimination must
+ignore. Keeping them in two types is what makes "elimination does not depend on
+the body" checkable by reading one struct instead of auditing a function.
+
+The consequence is that "dead" is two different things, and conflating them is
+the bug the module is shaped to prevent:
+
+| | `hp` | `PlayerLife` | Comes back? |
+| --- | --- | --- | --- |
+| Shot to zero | `0` | `Alive` | Yes, after 8 s (§4.8) |
+| Team eliminated (D-02) | `0` | `Dead` | Never |
+
+`PlayerLife` is one-way — there is no spectator state — so a respawn checks it
+first. `respawn_due` skips an eliminated seat even if a timer somehow fires on
+its body, because a respawn that trusted the timer would resurrect a team D-02
+had removed from the match.
+
+The order inside a tick is **respawn, then input**. A player whose 8 s expires on
+tick N can act on tick N rather than N+1; the other order costs one tick of dead
+time per death, which is invisible in a test and very visible in a fight.
+
+### The spawn point is searched, not stored
+
+"Cannot respawn inside a block" is a rule, not an assertion, so the point is
+found rather than remembered. Three obstacles, and only one of them is visible to
+the voxel query:
+
+1. **The core.** Not a voxel — it is a structure with a protected volume stamped
+   into the pad's blocked mask. `collides` cannot see it, so the search consults
+   the pad directly. A spawn point chosen by "first cell where the AABB fits"
+   would put players inside their own core.
+2. **Crates.** Also not voxels in the current model; the pad owns them.
+3. **Terrain.** This one the world query does see.
+
+`MatchState::new` has no world, so it produces the *nominal* point — first pad
+column outside the core with no crate in it — and the room calls `place_spawns`
+with real terrain on the tick the match goes live. `respawn_due` re-checks the
+stored point, because a pad can be built over during the eight seconds a player
+is dead.
+
+The search walks rings outward from the pad's centre, and within a ring it takes
+the **four cardinals before the corners**. `(r, 0)` is `r` away; `(r, r)` is
+`r√2` away. A plain `(dz, dx)` walk of a ring picks a corner when a nearer
+cardinal was free — a respawn 41% further from where the player died, for no
+reason anyone could see.
+
+### Three things this found
+
+**The golden fixtures had never landed a single hit.** T-015's fixtures hash five
+fields, one of which is `combat`. That field was hashing an *empty event list*
+for 20,000 ticks. The scripted input walked in four fixed compass directions, so
+two duelists starting 6.7 m apart drifted further apart and never came within a
+2.6 m sword reach — `combat` was stable, reproducible, and measuring nothing.
+The script now faces the nearest other body and walks toward it. A guard test
+(`the_scenario_reaches_movement_damage_and_respawn`) fails if a run ever produces
+zero downs again, in the same spirit as the "decay branch was never exercised"
+assertion in `match_always_terminates`. The duel fixture now records 34 downs,
+34 revives and 1,326 protected body-ticks in 200 s.
+
+**A point-blank swing always missed.** The melee cone test was
+`if distance > ZERO`, so it applied at every distance — and at 5 cm the direction
+between two bodies is dominated by whichever centimetre they happen to be offset
+by, which is noise. Since `sim` has no player-versus-player collision, two
+players *do* end up overlapping, which makes "standing on top of each other" the
+most common melee situation in the game and the one situation where nobody could
+be hit. The cone now applies only beyond the target's own half-width: inside its
+silhouette, aim cannot be wrong.
+
+**Elimination left the bodies at full health.** D-02 sets `PlayerLife::Dead` for
+the whole team on one tick, but a `PlayerSlot` has no HP — so an eliminated team
+left six bodies at 100 HP standing in the world. Nothing simulated them, but the
+state hash and a future snapshot would both have reported a team that was out of
+the match as fully healthy. `settle` now downs the bodies of the players
+`Base::eliminate` reports killing, with `respawn_at` left `None` so nothing can
+bring them back.
+
+### A gap recorded, not invented
+
+**There is no player-versus-player collision.** Two bodies walk through each
+other. §4.8 does not mention it, no task asks for it, and adding it means
+changing the movement sweep that T-009 owns and that every golden fixture runs
+through — a design decision, not a bug fix. What it costs today: bodies can
+occupy the same space, and the point-blank exemption above exists partly because
+of it. It should be decided before the client renders two players in one place.
 
 ## Content discrepancies, resolved rather than guessed
 

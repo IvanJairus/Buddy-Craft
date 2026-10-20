@@ -10,41 +10,57 @@
 //!
 //! # What it is not
 //!
-//! This is not the room loop. It has no network, no airdrops, no crate carrying
-//! and no respawn rules from §4.8 — those arrive with the room (M2+). What it
-//! does have is the property that matters here: **a pure function from a seed
-//! to a sequence of hashes**, covering every arithmetic path in `sim` that a
-//! platform difference could perturb.
+//! This is not the room loop. It has no network, no airdrops and no crate
+//! carrying — those arrive with the room (M2+). What it does have is the
+//! property that matters here: **a pure function from a seed to a sequence of
+//! hashes**, covering every arithmetic path in `sim` that a platform difference
+//! could perturb.
 //!
 //! The scripted inputs are deliberately boring — four directions, a jump every
 //! 50 ticks, a crate every 25 — because a determinism failure should be
 //! reproducible by reading a 30-line script, not by bisecting a bot AI.
 //!
-//! # Two deliberate simplifications
+//! # Bodies live in the match state, not here
 //!
-//! * **Players respawn after 8 s at their spawn point**, which is §4.8's number
-//!   but not its rules: there is no spawn protection and no "died while
-//!   mid-air" handling. Those belong to the room loop.
-//! * **Buddies are spawned directly** rather than crafted, so the buddy path is
-//!   exercised without the harness having to build a 9-crate recipe first.
+//! This harness used to carry its own `Vec<Mover>`, which meant player movement
+//! was outside `MatchState::state_hash` and outside the code the room runs. Both
+//! were wrong for the same reason: the point of the harness is to hash *the
+//! rules*, and a copy of the rules is not the rules. Bodies are now
+//! `MatchState`'s, driven through `MatchState::apply_input`, and the only thing
+//! this module does is decide *where they stand* (`set_spawn`) and *what they
+//! press* (`script`).
+//!
+//! # One deliberate simplification
+//!
+//! **Buddies are spawned directly** rather than crafted, so the buddy path is
+//! exercised without the harness having to build a 9-crate recipe first.
 
 use crate::buddy::{Buddy, BuddyContext, BuddyKind, Target};
 use crate::combat::{self, Combatant, DamageEvent};
 use crate::ids::{EntityId, PlayerId, TeamId};
 use crate::input::{buttons, InputFrame};
 use crate::match_rules::{Layout, Mode};
-use crate::movement::{self, MoveConfig, MoveIntent, MoveState};
+use crate::movement::MoveState;
 use crate::state::{ring_pad_origins, MatchState, RoomSetup};
 use crate::time::{Tick, TICK_HZ};
 use crate::tuning;
 use crate::vec::Vec3;
 use crate::world_query::VoxelGrid;
 
-/// Ticks a dead player waits before respawning (§4.8: 8 s).
-const RESPAWN_TICKS: u32 = 8 * TICK_HZ;
-
 /// Ticks between a player's melee swings (0.45 s at 20 Hz).
 const SWING_TICKS: u32 = 9;
+
+/// The yaw byte that faces from `from` toward `to`.
+///
+/// Yaw 0 faces `+Z` and increases toward `+X`, which is exactly `atan2(x, z)` —
+/// not `atan2(z, x)`, and getting that backwards aims every scripted swing 90
+/// degrees off. The result is wrapped into `0..256` because `atan2` returns
+/// `-pi..=pi`.
+fn yaw_toward(from: Vec3, to: Vec3) -> u8 {
+    let rad = crate::fixed::atan2(to.x - from.x, to.z - from.z);
+    let turns = (i64::from(rad.0) * 256) / i64::from(crate::fixed::TAU.0);
+    turns.rem_euclid(256) as u8
+}
 
 /// How the harness drives one match.
 #[derive(Clone, Copy, Debug)]
@@ -108,15 +124,20 @@ impl ScenarioConfig {
     }
 }
 
-/// A player's simulated body.
+/// A running scenario.
 #[derive(Clone, Debug)]
-struct Mover {
-    state: MoveState,
-    hp: i32,
-    /// Tick the player respawns, if dead.
-    respawn_at: Option<Tick>,
-    prev_buttons: u8,
-    spawn: Vec3,
+pub struct Scenario {
+    config: ScenarioConfig,
+    state: MatchState,
+    world: VoxelGrid,
+    seed: u64,
+    tick: Tick,
+    /// Crates placed so far, used to walk the scripted pad pattern.
+    placed: u32,
+    /// Damage events emitted this tick.
+    events: Vec<DamageEvent>,
+    /// Damage events emitted over the whole run, for the combat hash.
+    damage_total: i64,
 }
 
 /// One hashed checkpoint.
@@ -161,24 +182,6 @@ impl HashFrame {
     }
 }
 
-/// A running scenario.
-#[derive(Clone, Debug)]
-pub struct Scenario {
-    config: ScenarioConfig,
-    state: MatchState,
-    world: VoxelGrid,
-    cfg: MoveConfig,
-    movers: Vec<Mover>,
-    seed: u64,
-    tick: Tick,
-    /// Crates placed so far, used to walk the scripted pad pattern.
-    placed: u32,
-    /// Damage events emitted this tick.
-    events: Vec<DamageEvent>,
-    /// Damage events emitted over the whole run, for the combat hash.
-    damage_total: i64,
-}
-
 impl Scenario {
     /// Build a scenario. Panics only if the config describes an illegal room,
     /// which is a programming error in a test, not a runtime condition.
@@ -190,7 +193,7 @@ impl Scenario {
         )
         .expect("scenario config must describe a legal room");
         let origins = ring_pad_origins(&layout, 20, 1);
-        let state = MatchState::new(config.setup, &origins).expect("legal room");
+        let mut state = MatchState::new(config.setup, &origins).expect("legal room");
 
         let mut world = VoxelGrid::new([-32, 0, -32], [64, 12, 64]);
         world.fill_layer(0, true);
@@ -207,34 +210,30 @@ impl Scenario {
             }
         }
 
-        let players = state.players().to_vec();
-        let movers = players
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                // Deterministic, distinct per team, and well away from the two
-                // walls so the scripted circle-strafe has room to run.
-                let spawn = Vec3::from_ints(
-                    -6 + i32::from(p.team.0) * 4 + (i as i32 % 2) * 2,
-                    1,
-                    -4 + (i as i32 % 3) * 3,
-                );
-                Mover {
-                    state: MoveState::at(spawn),
-                    hp: tuning::embedded().player.hp,
-                    respawn_at: None,
-                    prev_buttons: 0,
-                    spawn,
-                }
-            })
-            .collect();
+        // Pads sit 40 m apart on a ring, which is four times melee reach — a
+        // match where nobody can hit anybody would hash an empty combat path.
+        // Placing the bodies by hand puts them within reach of each other while
+        // staying clear of the two walls, which is what keeps the scripted
+        // circle-strafe meaningful.
+        let seats: Vec<(PlayerId, TeamId)> =
+            state.players().iter().map(|s| (s.id, s.team)).collect();
+        for (i, (id, team)) in seats.into_iter().enumerate() {
+            let spawn = Vec3::from_ints(
+                -6 + i32::from(team.0) * 4 + (i as i32 % 2) * 2,
+                1,
+                -4 + (i as i32 % 3) * 3,
+            );
+            assert!(
+                state.set_spawn(id, spawn),
+                "seat {} must be addressable",
+                id.0
+            );
+        }
 
         Scenario {
             config,
             state,
             world,
-            cfg: MoveConfig::embedded(),
-            movers,
             seed: config.seed,
             tick: Tick::ZERO,
             placed: 0,
@@ -250,7 +249,11 @@ impl Scenario {
 
     /// One player's body.
     pub fn mover(&self, index: usize) -> &MoveState {
-        &self.movers[index].state
+        &self
+            .state
+            .body(PlayerId(index as u8))
+            .expect("a scenario body per seat")
+            .state
     }
 
     /// Current tick.
@@ -265,30 +268,57 @@ impl Scenario {
 
     /// The scripted input for player `index` at `now`.
     ///
-    /// Four directions changing every two seconds, a jump every 50 ticks, and
-    /// a yaw that sweeps the full circle. Deterministic, and enough to keep
-    /// every movement branch (walk, jump, land, step up, block) in play.
+    /// Three things, all deterministic:
     ///
-    /// The seed offsets both the direction phase and the jump cadence. Without
-    /// that the field would be decorative — two fixtures with different seeds
-    /// would run identical input and the `a_different_seed` test would have
-    /// nothing to catch.
+    /// * **Face the nearest other body.** This is the one that matters. The
+    ///   script used to walk in four fixed compass directions, which meant two
+    ///   duelists starting 6.7 m apart drifted further apart and *never landed a
+    ///   hit in 20,000 ticks* — the `combat` field of every golden fixture was
+    ///   hashing an empty event list. A guard test
+    ///   (`the_scenario_reaches_movement_damage_and_respawn`) now fails if that
+    ///   ever becomes true again.
+    /// * **Walk forward, strafing on a two-second cycle.** Forward because the
+    ///   yaw already points at the target, so advancing closes the distance;
+    ///   strafing so the diagonal (`INV_SQRT2`) path and both collision axes
+    ///   stay in play.
+    /// * **Jump every 50 ticks.** Enough to exercise the jump arc, the landing
+    ///   branch and the step-up attempt without dominating the hash.
+    ///
+    /// The seed offsets the strafe phase and the jump cadence, so two seeds do
+    /// not walk identical paths — `a_different_seed_produces_a_different_sequence`
+    /// is what checks that, and it has caught a decorative seed once already.
     fn script(&self, index: usize, now: Tick) -> InputFrame {
         let t = now.0;
-        let phase = (t / 40) as usize + index + (self.seed % 4) as usize;
-        let (move_x, move_z) = match phase % 4 {
-            0 => (1, 0),
-            1 => (0, 1),
-            2 => (-1, 0),
-            _ => (0, -1),
+        let seed = self.seed as u32;
+        let bodies = self.state.bodies();
+        let me = bodies[index].state.pos;
+
+        let mut yaw = 0;
+        let mut closest = None;
+        for (i, other) in bodies.iter().enumerate() {
+            if i == index {
+                continue;
+            }
+            let d = me.distance_sq(other.state.pos);
+            if closest.is_none_or(|best| d < best) {
+                closest = Some(d);
+                yaw = yaw_toward(me, other.state.pos);
+            }
+        }
+
+        let strafe = match ((t / 40) + index as u32 + seed % 4) % 3 {
+            0 => 1,
+            1 => -1,
+            _ => 0,
         };
+
         InputFrame {
             tick: now,
-            move_x,
-            move_z,
-            yaw: ((t.wrapping_mul(3).wrapping_add(self.seed as u32)) % 256) as u8,
+            move_x: strafe,
+            move_z: 1,
+            yaw,
             pitch: 0,
-            buttons: if (t + self.seed as u32) % 50 == 0 {
+            buttons: if (t + seed) % 50 == 0 {
                 buttons::JUMP
             } else {
                 0
@@ -315,24 +345,19 @@ impl Scenario {
     }
 
     fn step_movement(&mut self, now: Tick) {
-        let dt = movement::tick_dt();
-        let frames: Vec<InputFrame> = (0..self.movers.len())
-            .map(|i| self.script(i, now))
-            .collect();
-        for (i, mover) in self.movers.iter_mut().enumerate() {
-            if let Some(at) = mover.respawn_at {
-                if now.0 >= at.0 {
-                    mover.respawn_at = None;
-                    mover.hp = tuning::embedded().player.hp;
-                    mover.state = MoveState::at(mover.spawn);
-                } else {
-                    continue;
-                }
-            }
-            let frame = frames[i];
-            let intent = MoveIntent::from_frame(&frame, mover.prev_buttons);
-            mover.prev_buttons = frame.buttons;
-            movement::step(&self.world, &self.cfg, &mut mover.state, intent, dt);
+        // Respawn first, then input, so a player whose timer expires this tick
+        // can act on this tick. Reversing the order costs one tick of dead time
+        // per death, which over 20,000 ticks is 20,000 ticks of divergence from
+        // what the room does.
+        self.state.respawn_due(now, &self.world);
+
+        for index in 0..self.state.players().len() {
+            let id = self.state.players()[index].id;
+            let frame = self.script(index, now);
+            // A down or eliminated player returns `Err`, which is the correct
+            // answer here: the script keeps pressing buttons, the simulation
+            // ignores them.
+            let _ = self.state.apply_input(id, &frame, &self.world);
         }
     }
 
@@ -380,14 +405,15 @@ impl Scenario {
 
         // Build the target list once: every living player, as the AI sees them.
         let targets: Vec<Target> = self
-            .movers
+            .state
+            .players()
             .iter()
-            .zip(self.state.players())
-            .map(|(mover, player)| Target {
+            .zip(self.state.bodies())
+            .map(|(player, body)| Target {
                 id: EntityId::new(u32::from(player.id.0), 0),
                 team: player.team,
-                pos: mover.state.pos,
-                hp: mover.hp,
+                pos: body.state.pos,
+                hp: body.hp,
                 max_hp: tuning::embedded().player.hp,
                 role: None,
             })
@@ -431,26 +457,34 @@ impl Scenario {
             return;
         }
         let weapon = tuning::embedded().weapons.sword;
+        let cfg = *self.state.move_config();
         let combatants: Vec<Combatant> = self
-            .movers
+            .state
+            .players()
             .iter()
-            .zip(self.state.players())
-            .map(|(mover, player)| Combatant {
+            .zip(self.state.bodies())
+            .map(|(player, body)| Combatant {
                 id: EntityId::new(u32::from(player.id.0), 0),
                 team: player.team,
-                pos: mover.state.pos,
-                half_width: self.cfg.half_width,
-                height: self.cfg.height,
-                hp: mover.hp,
-                alive: mover.hp > 0,
+                pos: body.state.pos,
+                half_width: cfg.half_width,
+                height: cfg.height,
+                hp: body.hp,
+                alive: body.is_up(),
             })
             .collect();
 
         for (i, player) in self.state.players().iter().enumerate() {
-            if self.movers[i].hp <= 0 {
+            let Some(body) = self.state.body(player.id) else {
+                continue;
+            };
+            // A downed player neither swings nor is swung at; a protected one
+            // is excluded for the same reason, and `damage_player` enforces it
+            // on the receiving side even if this filter is ever removed.
+            if !body.is_up() || body.is_protected(now) {
                 continue;
             }
-            let eye = self.movers[i].state.pos + Vec3::from_ints(0, 1, 0);
+            let eye = body.state.pos + Vec3::from_ints(0, 1, 0);
             let frame = self.script(i, now);
             let look = crate::input::look_direction(frame.yaw, 0);
             combat::melee(
@@ -464,19 +498,21 @@ impl Scenario {
             );
         }
 
-        for event in &self.events {
+        // Copy the events out before touching the state: `damage_player` needs
+        // the whole match state, and `self.events` is borrowed for the loop.
+        let events = std::mem::take(&mut self.events);
+        for event in &events {
             let Some(index) = self.index_of(event.target) else {
                 continue;
             };
-            if self.movers[index].respawn_at.is_some() {
-                continue;
-            }
-            self.movers[index].hp = (self.movers[index].hp - event.amount).max(0);
-            self.damage_total += i64::from(event.amount);
-            if self.movers[index].hp == 0 {
-                self.movers[index].respawn_at = Some(now.advance(RESPAWN_TICKS));
-            }
+            let id = self.state.players()[index].id;
+            // The applied amount, not the requested one: a protected or already
+            // down player absorbs the hit, and counting it would make the
+            // combat hash claim damage that never happened.
+            let applied = self.state.damage_player(id, event.amount, now);
+            self.damage_total += i64::from(applied);
         }
+        self.events = events;
     }
 
     fn step_cores(&mut self, now: Tick) {
@@ -499,13 +535,19 @@ impl Scenario {
     }
 
     /// A checkpoint of every subsystem.
+    ///
+    /// `movement` and `combat` both read the same bodies, deliberately: the
+    /// split is by *question*, not by data. "Where is everyone?" and "how hurt
+    /// is everyone?" diverge independently, and knowing which one moved first
+    /// is the whole reason the frame has five fields.
     pub fn hash_frame(&self) -> HashFrame {
         let mut movement = Fnv::new();
-        for mover in &self.movers {
-            movement.vec(mover.state.pos);
-            movement.vec(mover.state.vel);
-            movement.byte(u8::from(mover.state.on_ground));
-            movement.u32(mover.respawn_at.map_or(u32::MAX, |t| t.0));
+        for body in self.state.bodies() {
+            movement.vec(body.state.pos);
+            movement.vec(body.state.vel);
+            movement.byte(u8::from(body.state.on_ground));
+            movement.byte(u8::from(body.state.in_water));
+            movement.u32(body.respawn_at.map_or(u32::MAX, |t| t.0));
         }
 
         let mut buddies = Fnv::new();
@@ -521,8 +563,9 @@ impl Scenario {
         }
 
         let mut combat = Fnv::new();
-        for mover in &self.movers {
-            combat.i32(mover.hp);
+        for body in self.state.bodies() {
+            combat.i32(body.hp);
+            combat.u32(body.protect_until.map_or(u32::MAX, |t| t.0));
         }
         combat.u16(self.events.len() as u16);
         for event in &self.events {
@@ -597,5 +640,133 @@ impl Fnv {
 
     fn finish(&self) -> u64 {
         self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What one body did over a run, for the coverage assertions below.
+    #[derive(Default)]
+    struct Tally {
+        moved: usize,
+        downed: usize,
+        revived: usize,
+        protected_ticks: usize,
+    }
+
+    /// The harness has to actually reach the paths it claims to hash.
+    ///
+    /// A golden file proves *stability*, not *coverage*: a scenario where nobody
+    /// ever dies would hash perfectly and prove nothing about respawning. This
+    /// test is the counterweight, in the same spirit as the decay branch check in
+    /// `state::tests::match_always_terminates`.
+    #[test]
+    fn the_scenario_reaches_movement_damage_and_respawn() {
+        let mut s = Scenario::new(ScenarioConfig::duel(0x00C0_FFEE, 4_000));
+        let start: Vec<Vec3> = s.state().bodies().iter().map(|b| b.state.pos).collect();
+        let mut was_up: Vec<bool> = s.state().bodies().iter().map(|b| b.is_up()).collect();
+        let mut tally = Tally::default();
+
+        for _ in 0..4_000 {
+            s.step();
+            let now = s.tick();
+            for (i, body) in s.state().bodies().iter().enumerate() {
+                if body.state.pos != start[i] {
+                    tally.moved += 1;
+                }
+                if was_up[i] && !body.is_up() {
+                    tally.downed += 1;
+                }
+                if !was_up[i] && body.is_up() {
+                    tally.revived += 1;
+                }
+                if body.is_protected(now) {
+                    tally.protected_ticks += 1;
+                }
+                was_up[i] = body.is_up();
+            }
+        }
+
+        println!(
+            "duel, 200 s: {} body-ticks moved, {} downs, {} revives, {} protected ticks",
+            tally.moved, tally.downed, tally.revived, tally.protected_ticks
+        );
+        assert!(tally.moved > 0, "no body ever moved");
+        assert!(
+            tally.downed > 0,
+            "nobody was downed in 200 s of scripted melee, so the respawn path \
+             is not in the golden sequence at all"
+        );
+        assert!(
+            tally.revived > 0,
+            "someone was downed but never came back, so the respawn timer is \
+             not being run"
+        );
+        assert!(
+            tally.protected_ticks > 0,
+            "spawn protection never ran, so it is not covered by the goldens"
+        );
+        assert!(
+            tally.revived + 2 >= tally.downed,
+            "{} downs but only {} revives: at most two can be pending at the end \
+             of a run, because only two bodies exist",
+            tally.downed,
+            tally.revived
+        );
+    }
+
+    #[test]
+    fn yaw_toward_covers_the_cardinal_directions() {
+        let origin = Vec3::from_ints(0, 0, 0);
+        // `atan2` is a cubic approximation with ~0.09 degrees of error, so a
+        // cardinal lands within one yaw unit of the exact value rather than on
+        // it. One unit is 1.4 degrees, which is far inside the 22.5-degree
+        // melee cone the harness needs it for.
+        for (target, want) in [
+            (Vec3::from_ints(0, 0, 5), 0u8),
+            (Vec3::from_ints(5, 0, 0), 64),
+            (Vec3::from_ints(0, 0, -5), 128),
+            (Vec3::from_ints(-5, 0, 0), 192),
+        ] {
+            let got = yaw_toward(origin, target);
+            let diff = (i32::from(got) - i32::from(want)).rem_euclid(256);
+            assert!(
+                diff <= 1 || diff == 255,
+                "yaw_toward({target:?}) = {got}, want {want}"
+            );
+        }
+        // And the vector it produces points back at the target.
+        let dir = crate::input::forward_from_yaw(yaw_toward(origin, Vec3::from_ints(3, 0, 3)));
+        assert!(dir.x.to_f64() > 0.6 && dir.z.to_f64() > 0.6, "{dir:?}");
+    }
+
+    /// The script must actually bring bodies into reach.
+    ///
+    /// Starting apart is fine — the script walks toward the nearest other body —
+    /// but if the closest approach over 10 s is still outside the sword's reach,
+    /// the harness is hashing a fight that never happens.
+    #[test]
+    fn the_script_brings_bodies_within_melee_reach() {
+        let mut s = Scenario::new(ScenarioConfig::duel(1, 1_000));
+        let reach = tuning::embedded().weapons.sword.reach;
+        let mut closest = crate::fixed::Fixed::from_int(1_000);
+
+        for _ in 0..200 {
+            s.step();
+            let bodies = s.state().bodies();
+            for (i, a) in bodies.iter().enumerate() {
+                for b in bodies.iter().skip(i + 1) {
+                    closest = closest.min(a.state.pos.distance(b.state.pos));
+                }
+            }
+        }
+
+        assert!(
+            closest < reach,
+            "closest approach over 10 s was {closest:?}, outside the {reach:?} reach — \
+             the scripted melee never connects"
+        );
     }
 }

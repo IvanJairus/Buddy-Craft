@@ -317,7 +317,13 @@ pub fn melee(
         if distance > weapon.reach + target.half_width {
             continue;
         }
-        if distance > ZERO {
+        // The cone is skipped at contact range. Two bodies that overlap have a
+        // direction between them that is dominated by whichever centimetre they
+        // happen to be offset by — a point-blank swing would then miss as often
+        // as it hit, and *bodies do overlap*, because `sim` has no
+        // player-versus-player collision. Inside the target's own half-width the
+        // attacker is within its silhouette, and aim cannot be wrong.
+        if distance > target.half_width {
             let along = look.dot(delta.normalize());
             if along < cone {
                 continue;
@@ -742,6 +748,49 @@ mod tests {
                 &mut out
             ),
             1
+        );
+    }
+
+    #[test]
+    fn a_point_blank_swing_always_connects() {
+        // Two bodies that walk into each other end up overlapping, because
+        // `sim` has no player-versus-player collision. At that distance the
+        // direction between them is noise, so the cone test used to reject the
+        // hit and two players standing on top of each other could not damage
+        // each other at all — the most common melee situation in the game.
+        let sword = &tuning::embedded().weapons.sword;
+        let a = hero();
+        let mut out = Vec::new();
+
+        // Overlapping: 5 cm apart, and the attacker facing the wrong way.
+        let touching = foe(10, 0, 0);
+        let hits = melee(
+            a.id,
+            a.team,
+            eye_of(&a),
+            Vec3::new(ZERO, ZERO, -crate::fixed::ONE),
+            sword,
+            &[touching],
+            &mut out,
+        );
+        assert_eq!(hits, 1, "a point-blank swing must land regardless of aim");
+
+        // Just outside the silhouette the cone applies again: 1 m behind the
+        // attacker is out of reach of the aim, not of the arm.
+        out.clear();
+        let behind = foe(11, 0, -1);
+        assert_eq!(
+            melee(
+                a.id,
+                a.team,
+                eye_of(&a),
+                look_forward(),
+                sword,
+                &[behind],
+                &mut out
+            ),
+            0,
+            "1 m behind must still be rejected by the cone"
         );
     }
 

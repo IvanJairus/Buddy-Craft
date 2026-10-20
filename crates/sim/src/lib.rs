@@ -31,6 +31,7 @@ pub mod match_rules;
 pub mod movement;
 pub mod pad;
 pub mod pathfind;
+pub mod player;
 pub mod recipe;
 pub mod rng;
 pub mod scenario;
@@ -56,6 +57,7 @@ pub use match_rules::{
 };
 pub use movement::{MoveConfig, MoveFlags, MoveIntent, MoveState};
 pub use pad::{Pad, Pads, PlaceError};
+pub use player::{NoBody, PlayerBody, PlayerTick};
 pub use recipe::{BlockPos, Craft, CraftOutcome, RecipeBook, RecipeId, RecipeOutput};
 pub use rng::{RngStreams, Xoshiro256};
 pub use scenario::{HashFrame, Scenario, ScenarioConfig};

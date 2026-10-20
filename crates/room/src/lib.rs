@@ -23,7 +23,7 @@ pub use lifecycle::{Conditions, Effect, IllegalTransition, Lifecycle, Phase};
 
 use sim::{
     ring_pad_origins, InputFrame, Layout, MatchState, Outcome, PlayerId, RoomSetup, SetupError,
-    Tick,
+    Tick, VoxelQuery,
 };
 
 /// What the host knows about the lobby that the room does not.
@@ -151,10 +151,19 @@ impl Room {
     /// Advance exactly one tick — 50 ms of simulated time (§6.2).
     ///
     /// Pure in the sense that matters: the result is a function of the room's
-    /// state and the packets queued since the last call. No clock is read, so a
-    /// test can run 20,000 ticks in milliseconds and get the same answer as a
-    /// server that took 17 minutes to do it.
-    pub fn tick(&mut self, roster: Roster) -> TickOutput {
+    /// state, the packets queued since the last call, and the world. No clock is
+    /// read, so a test can run 20,000 ticks in milliseconds and get the same
+    /// answer as a server that took 17 minutes to do it.
+    ///
+    /// # Why the world is a parameter
+    ///
+    /// The room does not own the terrain. It is generated from a seed on the
+    /// client and stored as diffs on the server (§6.7), and either way it is far
+    /// too large to copy into a room. Passing `&dyn VoxelQuery` keeps the room
+    /// agnostic about where blocks live while still letting movement collide
+    /// against them. `dyn` rather than `impl` because a room is long-lived and
+    /// its tick loop should not be monomorphised once per world type.
+    pub fn tick(&mut self, roster: Roster, world: &dyn VoxelQuery) -> TickOutput {
         self.now = self.now.next();
 
         let effect = self.lifecycle.update(
@@ -165,6 +174,13 @@ impl Room {
                 match_over: self.state.is_over(),
             },
         );
+
+        // The tick the match starts is the only one where spawn points can be
+        // resolved against real terrain: `MatchState::new` has no world, so it
+        // produces nominal points and leaves the collision check to here.
+        if effect == Some(Effect::BeginMatch) {
+            self.state.place_spawns(world);
+        }
 
         // Resolve input every tick, in every phase. In the lobby this only
         // drains the queue, but skipping it there would let a client that held
@@ -179,7 +195,19 @@ impl Room {
         // the phase has already changed, so the match's first step happens on the
         // same tick the host emits `S_START` — one tick, not two.
         let outcome = match self.lifecycle.phase() {
-            Phase::Live => Some(self.state.advance()),
+            Phase::Live => {
+                // Respawn before input, so a player whose 8 s expires on this
+                // tick can act on this tick. The other order costs one tick of
+                // dead time per death and is invisible in a test but not in a
+                // fight.
+                self.state.respawn_due(self.now, world);
+                for (id, frame) in &inputs {
+                    // A down or eliminated player is refused, which is not an
+                    // error: they are still connected and still sending.
+                    let _ = self.state.apply_input(*id, frame, world);
+                }
+                Some(self.state.advance())
+            }
             // The match just ended on this tick, and the host needs the outcome
             // *now* to build `S_END` — reporting it only from the next tick
             // would mean a host that stops ticking on `EndMatch` never sees it.
@@ -221,6 +249,14 @@ mod tests {
         Room::on_ring(Tick(0), duel(), 20, 40).expect("room")
     }
 
+    /// The floor the room's pads stand on: `ring` at radius 20 and height 40, so
+    /// the walking surface is `y = 40` and the block under it is `y = 39`.
+    fn ground() -> sim::world_query::VoxelGrid {
+        let mut w = sim::world_query::VoxelGrid::new([-48, 36, -48], [96, 8, 96]);
+        w.fill_layer(39, true);
+        w
+    }
+
     fn ready() -> Roster {
         Roster {
             players: 2,
@@ -246,9 +282,9 @@ mod tests {
     }
 
     /// Tick until the room is live, returning the tick the match started on.
-    fn start(room: &mut Room) -> Tick {
+    fn start(room: &mut Room, world: &dyn VoxelQuery) -> Tick {
         for _ in 0..200 {
-            if room.tick(ready()).effect == Some(Effect::BeginMatch) {
+            if room.tick(ready(), world).effect == Some(Effect::BeginMatch) {
                 return room.now();
             }
         }
@@ -257,9 +293,10 @@ mod tests {
 
     #[test]
     fn a_tick_advances_exactly_one_tick() {
+        let world = ground();
         let mut room = room();
         assert_eq!(room.now(), Tick(0));
-        let out = room.tick(idle());
+        let out = room.tick(idle(), &world);
         assert_eq!(out.tick, Tick(1));
         assert_eq!(room.now(), Tick(1));
         assert_eq!(sim::time::TICK_MS, 50);
@@ -267,9 +304,10 @@ mod tests {
 
     #[test]
     fn the_match_clock_does_not_run_in_the_lobby() {
+        let world = ground();
         let mut room = room();
         for _ in 0..100 {
-            room.tick(idle());
+            room.tick(idle(), &world);
         }
         assert_eq!(room.phase(), Phase::Lobby);
         assert_eq!(
@@ -281,8 +319,9 @@ mod tests {
 
     #[test]
     fn the_match_starts_on_the_tick_the_countdown_expires() {
+        let world = ground();
         let mut room = room();
-        let started = start(&mut room);
+        let started = start(&mut room, &world);
         assert_eq!(room.phase(), Phase::Live);
         // One step has already happened on that tick, so the match clock is at 1.
         assert_eq!(room.state().elapsed(), Tick(1));
@@ -291,9 +330,11 @@ mod tests {
 
     #[test]
     fn input_is_resolved_but_not_applied_before_the_match() {
+        let world = ground();
         let mut room = room();
+        let spawn = room.state().body(PlayerId(0)).expect("body").state.pos;
         room.queue_input(PlayerId(0), &packet(1, 1, buttons::JUMP));
-        let out = room.tick(idle());
+        let out = room.tick(idle(), &world);
         assert_eq!(out.inputs.len(), 2, "every player resolves every tick");
         let (_, frame) = out.inputs[0];
         assert!(
@@ -301,12 +342,18 @@ mod tests {
             "the queue still resolves in the lobby"
         );
         assert!(out.outcome.is_none(), "nothing is simulated yet");
+        assert_eq!(
+            room.state().body(PlayerId(0)).expect("body").state.pos,
+            spawn,
+            "a lobby frame must not move anybody"
+        );
     }
 
     #[test]
     fn afk_player_stops_moving_in_the_room() {
+        let world = ground();
         let mut room = room();
-        start(&mut room);
+        start(&mut room, &world);
         let queued_at = room.now().0;
         room.queue_input(PlayerId(0), &packet(1, queued_at, buttons::JUMP));
 
@@ -318,7 +365,7 @@ mod tests {
         let mut held = 0u32;
         let mut stopped_after = None;
         for i in 0..20 {
-            if room.tick(ready()).inputs[0].1.held(buttons::JUMP) {
+            if room.tick(ready(), &world).inputs[0].1.held(buttons::JUMP) {
                 held += 1;
             } else {
                 stopped_after = Some(i);
@@ -356,14 +403,15 @@ mod tests {
 
     #[test]
     fn the_outcome_appears_when_the_match_ends() {
+        let world = ground();
         let mut room = room();
-        start(&mut room);
+        start(&mut room, &world);
         // Kill every core. `damage_core` takes raw damage and applies the 0.35
         // multiplier, so this is deliberately far past 10,000.
         for team in 0..2u8 {
             room.state_mut().damage_core(TeamId(team), 100_000);
         }
-        let out = room.tick(ready());
+        let out = room.tick(ready(), &world);
         assert_eq!(out.effect, Some(Effect::EndMatch));
         assert!(out.outcome.is_some_and(|o| o.is_over()));
         assert_eq!(room.phase(), Phase::Ended);
@@ -374,31 +422,35 @@ mod tests {
         // The reentrancy property. If anything in the room were a global — a
         // static counter, a lazy cache — the two rooms would contaminate each
         // other, and the contamination would depend on tick order.
+        let world = ground();
         let mut a = room();
         let mut b = room();
-        start(&mut a);
-        start(&mut b);
+        start(&mut a, &world);
+        start(&mut b, &world);
 
-        // Give each room a different history: `a` loses a core, `b` does not.
-        // Input is not used for this because `MatchState::advance` does not yet
-        // move players — a divergence test that relied on it would pass whether
-        // or not the rooms shared state.
-        a.state_mut().damage_core(TeamId(0), 5_000);
-
-        // Also queue different input, and check that each room resolves its own.
+        // Give each room a different history, using nothing but input: `a`'s
+        // player 0 walks forward, `b`'s stands still. This is the divergence the
+        // body layer made possible — before it, `MatchState::advance` could not
+        // move anybody and a test like this had to damage a core to get two
+        // different hashes.
         let now = a.now().0;
         a.queue_input(PlayerId(0), &packet(1, now, buttons::JUMP));
 
         // Tick them alternately, so any shared state would be written by one and
         // read by the other.
         for _ in 0..40 {
-            a.tick(ready());
-            let out_b = b.tick(ready());
+            a.tick(ready(), &world);
+            let out_b = b.tick(ready(), &world);
             assert!(
                 !out_b.inputs[0].1.held(buttons::JUMP),
                 "room b saw room a's input"
             );
         }
+        assert_ne!(
+            a.state().body(PlayerId(0)).unwrap().state.pos,
+            b.state().body(PlayerId(0)).unwrap().state.pos,
+            "input must actually move the body"
+        );
         assert_ne!(
             a.state().state_hash(),
             b.state().state_hash(),
@@ -408,24 +460,25 @@ mod tests {
         // And a third room ticked alone matches `b` exactly, so `b`'s result did
         // not depend on `a` existing.
         let mut c = room();
-        start(&mut c);
+        start(&mut c, &world);
         for _ in 0..40 {
-            c.tick(ready());
+            c.tick(ready(), &world);
         }
         assert_eq!(b.state().state_hash(), c.state().state_hash());
     }
 
     #[test]
     fn a_tick_is_reproducible_from_the_same_inputs() {
+        let world = ground();
         let run = || {
             let mut room = room();
-            start(&mut room);
+            start(&mut room, &world);
             let now = room.now().0;
             for (i, player) in [PlayerId(0), PlayerId(1)].into_iter().enumerate() {
                 room.queue_input(player, &packet(i as u16, now, buttons::FIRE));
             }
             for _ in 0..50 {
-                room.tick(ready());
+                room.tick(ready(), &world);
             }
             room.state().state_hash()
         };
@@ -434,10 +487,11 @@ mod tests {
 
     #[test]
     fn an_empty_room_cleans_up_and_stops_ticking() {
+        let world = ground();
         let mut room = room();
         let mut cleanups = 0;
         for _ in 0..(lifecycle::EMPTY_TICKS * 2) {
-            if room.tick(idle()).effect == Some(Effect::Cleanup) {
+            if room.tick(idle(), &world).effect == Some(Effect::Cleanup) {
                 cleanups += 1;
             }
         }

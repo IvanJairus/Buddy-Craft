@@ -27,13 +27,17 @@
 
 use crate::base::{Base, PlayerLife, PlayerSlot};
 use crate::buddy::Buddy;
-use crate::ids::TeamId;
+use crate::ids::{PlayerId, TeamId};
+use crate::input::InputFrame;
 use crate::match_rules::{check_outcome, Layout, MatchRules, Mode, Outcome, TeamStatus};
+use crate::movement::MoveConfig;
 use crate::pad::Pads;
+use crate::player::{self, NoBody, PlayerBody, PlayerTick};
 use crate::recipe::{self, CraftOutcome, RecipeBook};
 use crate::time::{Tick, TICK_HZ};
 use crate::tuning;
 use crate::vec::Vec3;
+use crate::world_query::{EmptyWorld, VoxelQuery};
 
 /// Everything needed to seat a room.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -130,6 +134,16 @@ impl TeamState {
 }
 
 /// A running match.
+///
+/// # The two player lists
+///
+/// `players` is the seat — what elimination sees, and what the protocol reports.
+/// `bodies` is the body — what moves. They are index-parallel and, by
+/// construction, `players[i].id == PlayerId(i)`: [`Layout::seat`] numbers the
+/// seats in order and [`MatchState::new`] preserves that order. The invariant is
+/// what lets [`MatchState::body`] be an index rather than a search, and it is
+/// asserted at construction so a future reordering fails loudly instead of
+/// silently addressing the wrong body.
 #[derive(Clone, Debug)]
 pub struct MatchState {
     mode: Mode,
@@ -137,9 +151,15 @@ pub struct MatchState {
     elapsed: Tick,
     teams: Vec<TeamState>,
     players: Vec<PlayerSlot>,
+    /// Index-parallel with `players`. See the struct docs.
+    bodies: Vec<PlayerBody>,
     pads: Pads,
     outcome: Outcome,
     rules: MatchRules,
+    /// Resolved once at construction: movement reads eleven `Fixed`s per tick
+    /// and re-parsing the tuning table per player per tick would dominate the
+    /// tick budget.
+    cfg: MoveConfig,
     /// Total decay applied so far, so the cumulative schedule can be applied
     /// as a difference rather than re-applied every tick.
     decay_applied: i32,
@@ -185,11 +205,11 @@ impl MatchState {
         }
 
         let seats = layout.seat(setup.humans, setup.bots);
-        let players = seats
+        let players: Vec<PlayerSlot> = seats
             .iter()
             .enumerate()
             .map(|(i, seat)| {
-                let id = crate::ids::PlayerId(i as u8);
+                let id = PlayerId(i as u8);
                 if seat.bot {
                     PlayerSlot::bot(id, seat.team)
                 } else {
@@ -198,15 +218,45 @@ impl MatchState {
             })
             .collect();
 
+        let cfg = MoveConfig::embedded();
+
+        // Spawn points need the pad, which needs the world to know whether a
+        // column is clear. `new` has no world, so it uses `EmptyWorld` and
+        // produces the *nominal* point — the first pad column outside the core
+        // that has no crate in it. The room calls `place_spawns` with the real
+        // world when the match goes live, and that is where terrain starts to
+        // matter. Building it here anyway means a match state is never without
+        // a body, which is what lets `state_hash` cover positions from tick 0.
+        let bodies: Vec<PlayerBody> = players
+            .iter()
+            .map(|slot| {
+                let pos = match pads.get(slot.team) {
+                    Some(pad) => player::spawn_point(&EmptyWorld, &cfg, pad),
+                    None => Vec3::ZERO,
+                };
+                PlayerBody::spawned(pos)
+            })
+            .collect();
+
+        debug_assert!(
+            players
+                .iter()
+                .enumerate()
+                .all(|(i, slot)| slot.id == PlayerId(i as u8)),
+            "seat order and player id must agree; `MatchState::body` relies on it"
+        );
+
         Ok(MatchState {
             mode: setup.mode,
             layout,
             elapsed: Tick::ZERO,
             teams,
             players,
+            bodies,
             pads,
             outcome: Outcome::Running,
             rules: MatchRules::from_tuning(),
+            cfg,
             decay_applied: 0,
         })
     }
@@ -241,6 +291,37 @@ impl MatchState {
     /// Every player slot, humans and bots, in seat order.
     pub fn players(&self) -> &[PlayerSlot] {
         &self.players
+    }
+
+    /// Every player body, index-parallel with [`MatchState::players`].
+    pub fn bodies(&self) -> &[PlayerBody] {
+        &self.bodies
+    }
+
+    /// One player's body.
+    pub fn body(&self, id: PlayerId) -> Option<&PlayerBody> {
+        self.bodies.get(self.index_of(id)?)
+    }
+
+    /// One player's body, mutably. Damage and respawn go through the methods
+    /// below rather than here, so the two ways of dying stay in one place.
+    pub fn body_mut(&mut self, id: PlayerId) -> Option<&mut PlayerBody> {
+        let index = self.index_of(id)?;
+        self.bodies.get_mut(index)
+    }
+
+    /// The resolved movement configuration.
+    pub fn move_config(&self) -> &MoveConfig {
+        &self.cfg
+    }
+
+    /// The index of `id` in the seat list, or `None` if there is no such seat.
+    fn index_of(&self, id: PlayerId) -> Option<usize> {
+        let index = id.0 as usize;
+        match self.players.get(index) {
+            Some(slot) if slot.id == id => Some(index),
+            _ => None,
+        }
     }
 
     /// Every team, in team order.
@@ -307,6 +388,194 @@ impl MatchState {
         removed
     }
 
+    // -- players -----------------------------------------------------------
+
+    /// Apply one resolved input frame to one player's body.
+    ///
+    /// Returns the movement result, or why the frame was dropped. Dropping is
+    /// normal, not an error: a player waiting out a respawn still sends input
+    /// (they are still connected), and an eliminated player is still in the
+    /// room until the match ends.
+    ///
+    /// The buttons are recorded even when the frame is dropped, so a player who
+    /// dies holding fire does not come back and fire instantly — the edge is
+    /// consumed against what they were actually holding.
+    pub fn apply_input<W: VoxelQuery + ?Sized>(
+        &mut self,
+        id: PlayerId,
+        frame: &InputFrame,
+        world: &W,
+    ) -> Result<PlayerTick, NoBody> {
+        let index = self.index_of(id).ok_or(NoBody::NoSuchPlayer)?;
+
+        let Self {
+            players,
+            bodies,
+            cfg,
+            ..
+        } = self;
+
+        let slot = players.get(index).ok_or(NoBody::NoSuchPlayer)?;
+        let body = bodies.get_mut(index).ok_or(NoBody::NoSuchPlayer)?;
+
+        let previous = body.prev_buttons;
+        body.prev_buttons = frame.buttons;
+
+        if !slot.life.is_alive() {
+            return Err(NoBody::Eliminated);
+        }
+        if !body.is_up() {
+            return Err(NoBody::Down);
+        }
+
+        Ok(player::apply(body, frame, previous, world, cfg))
+    }
+
+    /// Damage one player, honouring spawn protection.
+    ///
+    /// Returns the HP actually removed. Zero means "nothing happened", which is
+    /// the right answer for three different reasons — protected, already down,
+    /// or eliminated — because in all three cases the attacker's hit did nothing
+    /// and the client should draw no hit marker.
+    pub fn damage_player(&mut self, id: PlayerId, amount: i32, now: Tick) -> i32 {
+        if amount <= 0 {
+            return 0;
+        }
+        let Some(index) = self.index_of(id) else {
+            return 0;
+        };
+        if !self.players[index].life.is_alive() {
+            return 0;
+        }
+        let body = &mut self.bodies[index];
+        if !body.is_up() || body.is_protected(now) {
+            return 0;
+        }
+        let applied = amount.min(body.hp);
+        body.hp -= applied;
+        if body.hp == 0 {
+            // Inlined rather than delegating to `kill_player`: the body is
+            // already mutably borrowed, and a second lookup would have to
+            // re-check everything this function has just checked.
+            player::down(body, now);
+        }
+        applied
+    }
+
+    /// Kill one player outright, starting their respawn timer.
+    ///
+    /// Returns false when the player cannot die: already down, already
+    /// eliminated, or not seated.
+    pub fn kill_player(&mut self, id: PlayerId, now: Tick) -> bool {
+        let Some(index) = self.index_of(id) else {
+            return false;
+        };
+        if !self.players[index].life.is_alive() {
+            return false;
+        }
+        let body = &mut self.bodies[index];
+        if !body.is_up() {
+            return false;
+        }
+        player::down(body, now);
+        true
+    }
+
+    /// Bring back every player whose timer has expired.
+    ///
+    /// Called at the *start* of a tick, before input is applied, so a player
+    /// whose 8 s expires on tick N can act on tick N rather than N+1.
+    ///
+    /// Eliminated players are skipped even if their timer somehow fires: `life`
+    /// is one-way, and a respawn that ignored it would resurrect a team that
+    /// D-02 removed from the match.
+    pub fn respawn_due<W: VoxelQuery + ?Sized>(&mut self, now: Tick, world: &W) -> usize {
+        let Self {
+            players,
+            bodies,
+            cfg,
+            ..
+        } = self;
+
+        let mut revived = 0;
+        for (index, body) in bodies.iter_mut().enumerate() {
+            let Some(slot) = players.get(index) else {
+                continue;
+            };
+            if !slot.life.is_alive() {
+                continue;
+            }
+            let Some(at) = body.respawn_at else {
+                continue;
+            };
+            if now.0 < at.0 {
+                continue;
+            }
+            // The stored spawn point may have been built over during the
+            // player's death, so it is re-checked rather than trusted.
+            let pos = player::nearest_free(world, cfg, body.spawn);
+            body.respawn(pos, now);
+            revived += 1;
+        }
+        revived
+    }
+
+    /// Recompute every spawn point from its team's pad, using `world`.
+    ///
+    /// Called once when a match goes live. [`MatchState::new`] has no world, so
+    /// it can only produce nominal spawn points; this is where terrain, water
+    /// and anything already standing on the pad are taken into account.
+    ///
+    /// Returns how many bodies moved, so a caller can log a map whose pads are
+    /// unexpectedly obstructed.
+    pub fn place_spawns<W: VoxelQuery + ?Sized>(&mut self, world: &W) -> usize {
+        let Self {
+            players,
+            bodies,
+            pads,
+            cfg,
+            ..
+        } = self;
+
+        let mut moved = 0;
+        for (index, body) in bodies.iter_mut().enumerate() {
+            let Some(slot) = players.get(index) else {
+                continue;
+            };
+            let Some(pad) = pads.get(slot.team) else {
+                continue;
+            };
+            let pos = player::spawn_point(world, cfg, pad);
+            if body.spawn != pos {
+                moved += 1;
+            }
+            body.spawn = pos;
+            if body.is_up() {
+                // A body that is already standing is moved too: at match start
+                // the nominal point and the real one are usually the same, but
+                // when they differ the player must not start inside a block.
+                body.state = crate::movement::MoveState::at(pos);
+            }
+        }
+        moved
+    }
+
+    /// Override one player's spawn point and put them there.
+    ///
+    /// The escape hatch for a harness that wants bodies somewhere specific —
+    /// the determinism scenario places players where their scripted inputs will
+    /// actually meet, which a ring of pads 40 m apart would not do. Returns
+    /// false for a seat that does not exist.
+    pub fn set_spawn(&mut self, id: PlayerId, pos: Vec3) -> bool {
+        let Some(index) = self.index_of(id) else {
+            return false;
+        };
+        let body = &mut self.bodies[index];
+        body.spawn = pos;
+        body.state = crate::movement::MoveState::at(pos);
+        true
+    }
+
     /// Apply the overtime decay that is due at the current tick.
     fn apply_decay(&mut self) {
         let max_hp = tuning::embedded().core.hp;
@@ -332,6 +601,7 @@ impl MatchState {
             teams,
             players,
             pads,
+            bodies,
             ..
         } = self;
 
@@ -340,13 +610,21 @@ impl MatchState {
                 let pad = pads
                     .get_mut(team.id)
                     .expect("every team has a pad by construction");
-                team.base.eliminate(pad, players);
+                let record = team.base.eliminate(pad, players);
                 // "Their buddy slots are freed" (§4.8): the team is out, so its
                 // units leave the simulation rather than standing around dead.
                 for buddy in &mut team.buddies {
                     buddy.kill();
                 }
                 team.buddies.clear();
+                // D-02 kills the players, and a killed player's body has to
+                // agree: a team that is out of the match must not leave six
+                // bodies at full health for the snapshot to report.
+                for id in &record.players_killed {
+                    if let Some(body) = bodies.get_mut(id.0 as usize) {
+                        player::eliminate(body);
+                    }
+                }
             }
         }
 
@@ -505,6 +783,23 @@ impl MatchState {
                 PlayerLife::Dead => 1,
             });
             h.u8(u8::from(player.bot));
+        }
+
+        // Bodies. `prev_buttons` is here on purpose: it decides whether the
+        // *next* tick sees a jump or a shot, so two states that differ only in
+        // that byte will diverge one tick later — which is exactly the kind of
+        // divergence a checkpoint taken before the fact has to catch.
+        h.u16(self.bodies.len() as u16);
+        for body in &self.bodies {
+            h.vec(body.state.pos);
+            h.vec(body.state.vel);
+            h.u8(u8::from(body.state.on_ground));
+            h.u8(u8::from(body.state.in_water));
+            h.i32(body.hp);
+            h.vec(body.spawn);
+            h.u32(body.respawn_at.map_or(u32::MAX, |t| t.0));
+            h.u32(body.protect_until.map_or(u32::MAX, |t| t.0));
+            h.u8(body.prev_buttons);
         }
 
         h.finish()
@@ -1059,6 +1354,60 @@ mod tests {
                     s.teams[0].buddies[0].pos = Vec3::from_ints(99, 41, 99);
                 }),
             ),
+            (
+                "player position",
+                Box::new(|s: &mut MatchState| {
+                    s.bodies[0].state.pos = Vec3::from_ints(7, 41, 7);
+                }),
+            ),
+            (
+                "player velocity",
+                Box::new(|s: &mut MatchState| {
+                    s.bodies[0].state.vel = Vec3::from_ints(0, -4, 0);
+                }),
+            ),
+            (
+                "player on_ground",
+                Box::new(|s: &mut MatchState| {
+                    s.bodies[0].state.on_ground = !s.bodies[0].state.on_ground;
+                }),
+            ),
+            (
+                "player in_water",
+                Box::new(|s: &mut MatchState| {
+                    s.bodies[0].state.in_water = !s.bodies[0].state.in_water;
+                }),
+            ),
+            (
+                "player hp",
+                Box::new(|s: &mut MatchState| {
+                    s.bodies[0].hp -= 1;
+                }),
+            ),
+            (
+                "player spawn",
+                Box::new(|s: &mut MatchState| {
+                    s.bodies[0].spawn = Vec3::from_ints(1, 41, 1);
+                }),
+            ),
+            (
+                "player respawn_at",
+                Box::new(|s: &mut MatchState| {
+                    s.bodies[0].respawn_at = Some(Tick(500));
+                }),
+            ),
+            (
+                "player protect_until",
+                Box::new(|s: &mut MatchState| {
+                    s.bodies[0].protect_until = Some(Tick(500));
+                }),
+            ),
+            (
+                "player prev_buttons",
+                Box::new(|s: &mut MatchState| {
+                    s.bodies[0].prev_buttons = 0b1010;
+                }),
+            ),
         ];
 
         for (name, mutate) in mutations {
@@ -1089,5 +1438,210 @@ mod tests {
         // And a different shape differs.
         let c = room(Mode::Teams, Some(2), 4, 2);
         assert_ne!(a.state_hash(), c.state_hash());
+    }
+
+    // -- player bodies -----------------------------------------------------
+
+    /// A flat floor at `y = 40`, which is one block under every pad the test
+    /// helper lays out at `y = 41`.
+    fn flat_world() -> crate::world_query::VoxelGrid {
+        let mut w = crate::world_query::VoxelGrid::new([-112, 38, -112], [224, 8, 224]);
+        w.fill_layer(40, true);
+        w
+    }
+
+    fn forward(tick: u32) -> InputFrame {
+        InputFrame {
+            tick: Tick(tick),
+            move_z: 1,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_frame_moves_the_body() {
+        let mut state = duel();
+        let world = flat_world();
+        let before = state.body(PlayerId(0)).unwrap().state.pos;
+
+        for tick in 0..20 {
+            let out = state
+                .apply_input(PlayerId(0), &forward(tick), &world)
+                .expect("a seated, living player accepts input");
+            assert!(out.flags.on_ground, "the pad surface is solid ground");
+        }
+
+        let after = state.body(PlayerId(0)).unwrap().state.pos;
+        let travelled = after.horizontal_distance(before).to_f64();
+        // 20 ticks at 4.5 m/s is 4.5 m; the body spends the first tick
+        // settling onto the floor, so allow a little slack.
+        assert!(
+            (3.5..=4.6).contains(&travelled),
+            "expected about 4.5 m of travel, got {travelled:.2} m"
+        );
+    }
+
+    #[test]
+    fn an_unknown_seat_is_refused() {
+        let mut state = duel();
+        let world = flat_world();
+        assert_eq!(
+            state.apply_input(PlayerId(9), &forward(0), &world),
+            Err(NoBody::NoSuchPlayer)
+        );
+    }
+
+    #[test]
+    fn an_eliminated_player_never_moves_again() {
+        // D-02 is one-way: no input, no respawn, no exception.
+        let mut state = duel();
+        let world = flat_world();
+        state.damage_core(TeamId(0), KILL_RAW);
+        assert_eq!(state.players()[0].life, PlayerLife::Dead);
+        assert!(
+            !state.body(PlayerId(0)).unwrap().is_up(),
+            "elimination must down the body, not only the seat"
+        );
+
+        assert_eq!(
+            state.apply_input(PlayerId(0), &forward(0), &world),
+            Err(NoBody::Eliminated)
+        );
+
+        // Even if something armed a timer on the body, `respawn_due` refuses:
+        // `life` is checked before `respawn_at`.
+        state.bodies[0].respawn_at = Some(Tick(1));
+        assert_eq!(state.respawn_due(Tick(1_000), &world), 0);
+        assert!(!state.body(PlayerId(0)).unwrap().is_up());
+        assert_eq!(state.body(PlayerId(0)).unwrap().hp, 0);
+    }
+
+    #[test]
+    fn a_down_player_is_ignored_but_their_buttons_are_recorded() {
+        let mut state = duel();
+        let world = flat_world();
+        state.kill_player(PlayerId(0), Tick(0));
+        assert!(!state.body(PlayerId(0)).unwrap().is_up());
+
+        let held = InputFrame {
+            tick: Tick(1),
+            buttons: crate::input::buttons::FIRE,
+            ..Default::default()
+        };
+        assert_eq!(
+            state.apply_input(PlayerId(0), &held, &world),
+            Err(NoBody::Down)
+        );
+        assert_eq!(
+            state.body(PlayerId(0)).unwrap().prev_buttons,
+            crate::input::buttons::FIRE,
+            "a dropped frame must still advance the button history, or the \
+             first shot after a respawn is eaten"
+        );
+    }
+
+    #[test]
+    fn respawn_puts_the_body_back_at_its_spawn_on_the_tick_the_timer_expires() {
+        let mut state = duel();
+        let world = flat_world();
+        let spawn = state.body(PlayerId(0)).unwrap().spawn;
+
+        state.kill_player(PlayerId(0), Tick(10));
+        let due = 10 + crate::player::respawn_ticks();
+        assert_eq!(state.body(PlayerId(0)).unwrap().respawn_at, Some(Tick(due)));
+
+        // One tick early: nothing.
+        assert_eq!(state.respawn_due(Tick(due - 1), &world), 0);
+        assert!(!state.body(PlayerId(0)).unwrap().is_up());
+
+        // On the tick: back, at the spawn point, protected.
+        assert_eq!(state.respawn_due(Tick(due), &world), 1);
+        let body = state.body(PlayerId(0)).unwrap();
+        assert!(body.is_up());
+        assert_eq!(body.state.pos, spawn);
+        assert!(body.is_protected(Tick(due)));
+        assert!(!body.is_protected(Tick(due + crate::player::protect_ticks())));
+    }
+
+    #[test]
+    fn spawn_protection_absorbs_damage_until_it_expires() {
+        let mut state = duel();
+        let world = flat_world();
+        state.kill_player(PlayerId(0), Tick(0));
+        let due = crate::player::respawn_ticks();
+        state.respawn_due(Tick(due), &world);
+        assert!(state.body(PlayerId(0)).unwrap().is_protected(Tick(due)));
+
+        assert_eq!(
+            state.damage_player(PlayerId(0), 40, Tick(due)),
+            0,
+            "a protected player takes nothing"
+        );
+        assert_eq!(state.body(PlayerId(0)).unwrap().hp, 100);
+
+        let after = due + crate::player::protect_ticks();
+        assert_eq!(
+            state.damage_player(PlayerId(0), 40, Tick(after)),
+            40,
+            "and takes everything once the window closes"
+        );
+    }
+
+    #[test]
+    fn lethal_damage_starts_the_respawn_timer() {
+        let mut state = duel();
+        let hp = state.body(PlayerId(0)).unwrap().hp;
+        assert_eq!(state.damage_player(PlayerId(0), hp + 50, Tick(7)), hp);
+        let body = state.body(PlayerId(0)).unwrap();
+        assert!(!body.is_up());
+        assert_eq!(
+            body.respawn_at,
+            Some(Tick(7 + crate::player::respawn_ticks()))
+        );
+        // The seat is still Alive: being shot is not being eliminated.
+        assert_eq!(state.players()[0].life, PlayerLife::Alive);
+        assert_eq!(
+            state.damage_player(PlayerId(0), 10, Tick(8)),
+            0,
+            "a corpse takes no further damage"
+        );
+    }
+
+    #[test]
+    fn place_spawns_moves_a_body_out_of_a_solid_column() {
+        // The pad centre column is solid, so the nominal spawn point — chosen
+        // without a world — is inside a block. `place_spawns` is what fixes it.
+        let mut state = duel();
+        let mut world = flat_world();
+        let nominal = state.body(PlayerId(0)).unwrap().spawn;
+        let cell = nominal.floor_to_ints();
+        world.fill_box(
+            [cell[0], cell[1], cell[2]],
+            [cell[0], cell[1] + 2, cell[2]],
+            true,
+        );
+        assert!(crate::movement::collides(
+            &world,
+            state.move_config(),
+            nominal
+        ));
+
+        let moved = state.place_spawns(&world);
+        assert!(moved >= 1, "the obstructed body should have been relocated");
+        let placed = state.body(PlayerId(0)).unwrap().spawn;
+        assert!(
+            !crate::movement::collides(&world, state.move_config(), placed),
+            "place_spawns left the body inside geometry at {placed:?}"
+        );
+    }
+
+    #[test]
+    fn a_harness_can_place_a_body_where_it_wants() {
+        let mut state = duel();
+        assert!(state.set_spawn(PlayerId(1), Vec3::from_ints(5, 41, 5)));
+        let body = state.body(PlayerId(1)).unwrap();
+        assert_eq!(body.spawn, Vec3::from_ints(5, 41, 5));
+        assert_eq!(body.state.pos, Vec3::from_ints(5, 41, 5));
+        assert!(!state.set_spawn(PlayerId(9), Vec3::ZERO));
     }
 }
