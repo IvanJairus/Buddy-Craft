@@ -86,13 +86,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.87.0"
-          targets: wasm32-wasip1
+          targets: wasm32-wasip1, wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: wasm-golden
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # T-030: the bridge must compile to the browser target and expose exactly
+      # the 13 functions of §8.4. wasm-bindgen suffixes raw export names with a
+      # crate hash; the script matches the base names and rejects extras.
+      - name: build the wasm bridge
+        run: cargo build --target wasm32-unknown-unknown -p client-wasm
+      - name: check the wasm export contract
+        run: node tools/wasm-exports.mjs target/wasm32-unknown-unknown/debug/client_wasm.wasm
       # The golden fixtures are generated natively and compared *again* here
       # with the same code compiled to wasm. This is the AC's "native and wasm
       # produce identical hash sequences", and it needs no wasm runtime beyond

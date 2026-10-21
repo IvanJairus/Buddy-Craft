@@ -5,7 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+# `cdylib` is the browser artifact; `rlib` keeps the crate unit-testable and
+# lets a native host embed the same bridge (T-030, T-048).
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 sim.workspace = true
 world.workspace = true
 protocol.workspace = true
+wasm-bindgen = "0.2"
+

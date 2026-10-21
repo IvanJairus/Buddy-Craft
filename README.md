@@ -13,9 +13,10 @@ the match ends when a team's core is destroyed.
 > validation (T-017, T-018), the room lifecycle and tick loop (T-019, T-020),
 > player bodies (P-01), the per-client snapshot encoder (T-021), the block edit
 > pipeline (T-022), the airdrop economy (T-025), the headless match loop (P-02),
-> the bots that play it (T-023) and the whole-match invariant harness (T-024).
-> The offline client and its wasm bridge are next. See
-> [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
+> the bots that play it (T-023), the whole-match invariant harness (T-024) and
+> the wasm boundary with its render buffer (T-030). The renderer and the
+> offline match loop follow. See [`docs/PLAN.md`](docs/PLAN.md) for the full
+> 60-task backlog.
 
 ---
 
@@ -99,9 +100,11 @@ crates/
   world/        voxel storage, worldgen, mesher, chunk diffs
   protocol/     wire messages, tags, size budgets        (M2)
   room/         pure room state machine, match loop and bots (M2)
-  client-wasm/  wasm bridge for the browser            (M3)
+  client-wasm/  wasm boundary: 13 exports and the render buffer (M2)
   host-worker/  Cloudflare Durable Object host         (M4)
   host-axum/    tokio/axum host                        (M4)
+apps/
+  web/src/wasm/loader.ts  typed views over the render buffer (M2)
 data/
   tuning.ron    every designer-facing number, single source of truth
   buddies.ron   the six buddy roles, one row each, validated at load
@@ -111,6 +114,7 @@ docs/
   PLAN.md       the specification this repo implements
 tools/
   wasm-golden.mjs  runs the wasm build of the golden test under node:wasi
+  wasm-exports.mjs checks the bridge's 13-function export contract
 fuzz/
   fuzz_targets/decode.rs  libFuzzer harness for the decoder (not a workspace member)
 ```
@@ -126,7 +130,7 @@ tests use the second without a runtime.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 441 tests
+cargo test --workspace --all-targets              # 451 tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
@@ -150,7 +154,7 @@ mesh   0.619 ms/column   budget 1.2 ms
 ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfinding)
 ```
 
-## What M0 and M1 cover so far
+## What is done so far
 
 | Task | Deliverable | Status |
 | --- | --- | --- |
@@ -181,6 +185,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | P-02 | match loop: joins airdrops, edits, combat, crafting, buddies and elimination | done |
 | T-023 | bots: collect, build, fight, push a core, driven only by inputs and edits | done |
 | T-024 | whole-match harness: eight invariants per tick, reconnect, three-match leak probe | done |
+| T-030 | wasm boundary: 13 exports, byte-stable render buffer, zero-allocation tick | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -324,6 +329,17 @@ recorded here rather than quietly skipped:
   drops in the air. The 120 floor pickups have their own cap in §4.4.3 and are
   counted separately; folding them into 46 would make the two rules
   contradict each other for no benefit.
+- **T-030's file list assumed two things this repo did not have.** It names
+  `client-wasm/src/lib.rs`, `render_buffer.rs` and `loader.ts`, but the crate had
+  no `wasm-bindgen` dependency or cdylib target, and `apps/web` was never
+  created (T-001's web skeleton was skipped). The bridge adds the dependency and
+  `crate-type = ["cdylib", "rlib"]`, creates only the wasm loader, and leaves
+  the rest of the app to T-031. Raw wasm export names carry wasm-bindgen's hash
+  suffix, so `tools/wasm-exports.mjs` checks the 13 base names and CI runs it.
+  The wasm-bindgen CLI that turns those exports into JS glue could not be built
+  on the pinned 1.87 toolchain; the loader is type-checked with `tsc` and tested
+  against the interface shape instead, and the glue step remains a deploy-time
+  check.
 - **`no_entity_leak` runs the same seed three times, not three seeds.** A
   growing entity count would show up in any run, but a leaked global shows up
   only as a *divergence* between two runs of the same input. Three identical
@@ -1068,6 +1084,43 @@ simulated minutes neither pushed a core to zero: a lone bot spends its time
 collecting and dying rather than assembling a push. That is a bot-quality
 limit, not a harness limitation, and it is why T-023's acceptance test is a
 full six-bot room.
+
+## The wasm boundary: one buffer, thirteen exports
+
+The client does not parse a scene graph out of wasm. It reads one `#[repr(C)]`
+buffer: a 52-byte header followed by the arrays it points at. Thirteen exports
+are the whole API, each returning a `u32` pointer or status, so no `JsValue` is
+created on the frame path.
+
+| Piece | Size or rule | Why |
+| --- | --- | --- |
+| `RenderDesc` | 52 bytes | 13 `u32` fields; one pointer finds the whole frame |
+| `GpuPlayer` | 32 bytes | u16/u8/u8, six f32, u8/u8/u16, with no padding |
+| Arrays | 18 players, 64 buddies, 128 projectiles, 512 particles | allocated once in `cb_init` |
+| `cb_tick` | zero allocations after 10 frames | 600 ticks under a counting allocator |
+| Magic | `0xCBA7E001` on every tick | a zeroed buffer is a dropped frame, not an empty one |
+
+The tests assert every `size_of` and `offset_of`, not just the totals. A field
+reorder that keeps `GpuPlayer` at 32 bytes still moves `hp` away from offset 28,
+and a JS `DataView` written against the old layout would read a position byte as
+hit points. `RenderBuffer` puts the arrays immediately after the header, which
+is what lets the loader size every view from one `cb_render_desc()` pointer.
+
+`apps/web/src/wasm/loader.ts` owns the other half of the contract. Its `alloc`
+wrapper calls `cb_mem_alloc` and then `rebuildViews()` unconditionally, because
+a grow detaches every cached `ArrayBuffer`. In dev builds every frame checks
+that each view still has a non-zero buffer and that the magic is present; the
+error names `memory.grow`, the actual cause. The loader was exercised under Node
+with a fake wasm that grows memory, detaches the views, and services a mesh
+handoff; the handoff copies out with `.slice()` before releasing the
+generation.
+
+Until the chunk pipeline lands, `cb_tick` steps one local body against a flat
+floor. That is enough to prove wire input decoding, the 50 ms accumulator (at
+most four catch-up steps per frame) and the render write without pretending to
+be a second match loop. `cb_mesh_chunk` returns zero and `cb_on_snapshot`
+records the payload size for the 4 KB boundary check; T-032 and T-043 fill those
+payloads into the header that is already pinned.
 
 ## Content discrepancies, resolved rather than guessed
 
