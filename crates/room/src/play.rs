@@ -235,6 +235,27 @@ impl Match {
         &self.world
     }
 
+    /// Take every pending column diff, one message per column.
+    ///
+    /// A column with more than [`protocol::MAX_DIFF_ENTRIES`] pending cells is
+    /// split across calls; the host keeps calling until this returns empty.
+    pub fn take_diffs(&mut self) -> Vec<protocol::ChunkDiff> {
+        let columns = self.world.pending_columns();
+        columns
+            .into_iter()
+            .filter_map(|(cx, cz)| self.world.take_diff(cx, cz))
+            .collect()
+    }
+
+    /// Every column a client joining now needs, in deterministic key order.
+    pub fn join_diffs(&mut self) -> Vec<protocol::ChunkDiff> {
+        let columns = self.world.edited_columns();
+        columns
+            .into_iter()
+            .flat_map(|(cx, cz)| self.world.full_diffs(cx, cz))
+            .collect()
+    }
+
     /// Events emitted this tick.
     pub fn events(&self) -> &[MatchEvent] {
         &self.events

@@ -38,7 +38,7 @@ pub mod mesh;
 pub mod noise;
 
 pub use block::{BlockDef, BlockId, BlockRegistry, AIR, CRATE, CRATE_INDEX};
-pub use chunk::{Column, CHUNK_X, CHUNK_Y, CHUNK_Z, VOLUME};
+pub use chunk::{column_hash, Column, CHUNK_X, CHUNK_Y, CHUNK_Z, VOLUME};
 pub use diff::{decode, ChunkDiff, ChunkPatch, DiffError};
 pub use gen::{Base, DropSite, WorldGen};
 pub use mesh::{Face, Mesh, Vertex, VERTEX_STRIDE};

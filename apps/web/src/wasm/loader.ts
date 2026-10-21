@@ -456,6 +456,28 @@ export class ClientWasm {
     return (this.wasm.cb_on_snapshot(ptr >>> 0, len >>> 0) >>> 0) === OK;
   }
 
+  /**
+   * Hand one complete server frame to the bridge.
+   *
+   * `cb_on_snapshot` applies `S_CHUNK_DIFF` to the cached voxel columns and
+   * records the rest for T-043. Chunk meshing and diff rows allocate on the
+   * Rust heap, so rebuild the views after the call even though the staging
+   * arena itself does not grow.
+   */
+  onServerMessage(bytes: Uint8Array): boolean {
+    if (!this.initialised) {
+      throw new Error("ClientWasm.onServerMessage before init");
+    }
+    if (bytes.byteLength === 0 || bytes.byteLength > 4096) {
+      return false;
+    }
+    const ptr = this.alloc(bytes.byteLength);
+    new Uint8Array(this.wasm.memory.buffer, ptr, bytes.byteLength).set(bytes);
+    const ok = (this.wasm.cb_on_snapshot(ptr, bytes.byteLength) >>> 0) === OK;
+    this.rebuildViews();
+    return ok;
+  }
+
   /** Select a quality tier (0..2). */
   setQuality(level: number): boolean {
     return (this.wasm.cb_set_quality(level) >>> 0) === OK;

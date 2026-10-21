@@ -37,7 +37,7 @@ use sim::time::{Tick, TICK_MS};
 use sim::vec::Vec3;
 use sim::world_query::VoxelQuery;
 use wasm_bindgen::prelude::*;
-use world::chunk::{Column, CHUNK_Y};
+use world::chunk::{Column, CHUNK_Y, VOLUME};
 use world::gen::{WorldGen, MAP_COLS};
 use world::mesh::mesh_with_neighbours;
 
@@ -97,6 +97,9 @@ struct Bridge {
     buttons: u8,
     gen: WorldGen,
     columns: BTreeMap<(i32, i32), Column>,
+    /// Last wire version applied per column. Stale frames are ignored.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    versions: BTreeMap<(i32, i32), u32>,
 }
 
 impl Bridge {
@@ -133,6 +136,7 @@ impl Bridge {
             // without changing any of the 13 signatures.
             gen: WorldGen::new(u64::from(seed), 2),
             columns: BTreeMap::new(),
+            versions: BTreeMap::new(),
         }
     }
 
@@ -144,6 +148,75 @@ impl Bridge {
         }
         let column = self.gen.column(cx, cz);
         self.columns.insert((cx, cz), column);
+    }
+
+    /// Apply a chunk diff to the cached voxel state.
+    ///
+    /// A stale version is accepted as a no-op, because the frame is harmless
+    /// and the caller may be replaying a join stream. A malformed keyframe is
+    /// rejected before the old column is replaced.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    fn apply_chunk_diff(&mut self, diff: protocol::ChunkDiff) -> bool {
+        let cx = i32::from(diff.cx);
+        let cz = i32::from(diff.cz);
+        let key = (cx, cz);
+        if diff.version <= self.versions.get(&key).copied().unwrap_or(0) {
+            return true;
+        }
+
+        let mut column = self
+            .columns
+            .remove(&key)
+            .unwrap_or_else(|| self.gen.column(cx, cz));
+
+        if diff.keyframe {
+            let mut rebuilt = Column::new();
+            let mut index = 0usize;
+            for run in &diff.runs {
+                for _ in 0..run.length {
+                    if index >= VOLUME {
+                        self.columns.insert(key, column);
+                        return false;
+                    }
+                    let (x, y, z) = Column::coords(index);
+                    rebuilt.set(x, y, z, world::block::BlockId(run.block));
+                    index += 1;
+                }
+            }
+            if index != VOLUME {
+                self.columns.insert(key, column);
+                return false;
+            }
+            column = rebuilt;
+        } else {
+            for entry in &diff.entries {
+                let index = entry.index as usize;
+                if index >= VOLUME {
+                    self.columns.insert(key, column);
+                    return false;
+                }
+                let (x, y, z) = Column::coords(index);
+                column.set(x, y, z, world::block::BlockId(entry.block));
+            }
+        }
+
+        self.columns.insert(key, column);
+        self.versions.insert(key, diff.version);
+        true
+    }
+
+    /// Decode one server frame. Chunk diffs mutate terrain; snapshots are
+    /// recorded for T-043, which owns their entity payload.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    fn on_server_message(&mut self, bytes: &[u8]) -> bool {
+        match protocol::decode_s2c(bytes) {
+            Ok(protocol::S2c::ChunkDiff(diff)) => self.apply_chunk_diff(diff),
+            Ok(_) => {
+                self.last_snapshot = (0, bytes.len() as u32);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// Mesh one column with its four neighbours, as the §8.4 payload.
@@ -434,18 +507,42 @@ pub fn cb_tick(dt_ms: u32, input_ptr: u32) -> u32 {
     with_bridge(|bridge| bridge.tick(dt_ms, wire)).unwrap_or(0)
 }
 
-/// Accept a snapshot from the server. Decoding lands with T-043; T-030 records
-/// its size so a host can assert the 4 KB cap at the boundary.
+/// Accept one server frame.
+///
+/// `S_CHUNK_DIFF` is applied to the cached voxel columns and a stale version is
+/// ignored. Other valid frames are recorded for T-043's entity decoder. The
+/// 4 KB cap is the protocol's inbound frame limit; chunk diffs carry their own
+/// tighter 1.5 KB check in the browser decoder.
 #[wasm_bindgen]
 pub fn cb_on_snapshot(ptr: u32, len: u32) -> u32 {
     if ptr == 0 || len == 0 || len > 4096 {
         return 0;
     }
-    with_bridge(|bridge| {
-        bridge.last_snapshot = (ptr, len);
-        OK
-    })
-    .unwrap_or(0)
+    #[cfg(target_arch = "wasm32")]
+    {
+        // SAFETY: `ptr` comes from `cb_mem_alloc` and `len` is the number of
+        // bytes JS wrote there. The arena is inside this wasm instance's
+        // linear memory.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+        with_bridge(|bridge| {
+            if bridge.on_server_message(bytes) {
+                OK
+            } else {
+                0
+            }
+        })
+        .unwrap_or(0)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // A 64-bit native pointer does not fit the u32 ABI. Native tests call
+        // `Bridge::on_server_message` directly; the export only records here.
+        with_bridge(|bridge| {
+            bridge.last_snapshot = (ptr, len);
+            OK
+        })
+        .unwrap_or(0)
+    }
 }
 
 /// Queue one local edit and return its sequence number (0 when uninitialised).
@@ -799,6 +896,94 @@ mod tests {
         assert_eq!(frame.yaw, 64);
         assert_eq!(frame.pitch, 192);
         assert_eq!(frame.tick, Tick(9));
+    }
+
+    #[test]
+    fn chunk_diff_updates_the_cached_column() {
+        assert_eq!(cb_init(0xC0FFEE, 0, 0, 0), OK);
+        let before = with_bridge(|bridge| bridge.mesh_payload(8, 8)).expect("initialised");
+
+        let index = Column::index(8, 95, 8) as u16;
+        let patch = protocol::ChunkDiff {
+            cx: 8,
+            cz: 8,
+            version: 1,
+            keyframe: false,
+            entries: vec![protocol::DiffEntry {
+                index,
+                block: world::CRATE.0,
+            }],
+            runs: Vec::new(),
+        };
+        let frame = protocol::encode_s2c(&protocol::S2c::ChunkDiff(patch));
+        assert!(
+            with_bridge(|bridge| bridge.on_server_message(&frame)).expect("initialised"),
+            "a valid diff applies"
+        );
+        let after = with_bridge(|bridge| bridge.mesh_payload(8, 8)).expect("initialised");
+        assert_ne!(after, before, "the edited cell must change the mesh");
+
+        let stale = protocol::encode_s2c(&protocol::S2c::ChunkDiff(protocol::ChunkDiff {
+            cx: 8,
+            cz: 8,
+            version: 1,
+            keyframe: false,
+            entries: vec![protocol::DiffEntry {
+                index,
+                block: world::block::AIR.0,
+            }],
+            runs: Vec::new(),
+        }));
+        assert!(
+            with_bridge(|bridge| bridge.on_server_message(&stale)).expect("initialised"),
+            "a stale version is an accepted no-op"
+        );
+        assert_eq!(
+            with_bridge(|bridge| bridge.mesh_payload(8, 8)).expect("initialised"),
+            after,
+            "a stale version must not touch the column"
+        );
+
+        let undo = protocol::encode_s2c(&protocol::S2c::ChunkDiff(protocol::ChunkDiff {
+            cx: 8,
+            cz: 8,
+            version: 2,
+            keyframe: false,
+            entries: vec![protocol::DiffEntry {
+                index,
+                block: world::block::AIR.0,
+            }],
+            runs: Vec::new(),
+        }));
+        assert!(with_bridge(|bridge| bridge.on_server_message(&undo)).expect("initialised"));
+        assert_eq!(
+            with_bridge(|bridge| bridge.mesh_payload(8, 8)).expect("initialised"),
+            before,
+            "removing the crate restores the generated mesh"
+        );
+    }
+
+    #[test]
+    fn keyframe_replaces_the_cached_column() {
+        assert_eq!(cb_init(0xC0FFEE, 0, 0, 0), OK);
+        let frame = protocol::encode_s2c(&protocol::S2c::ChunkDiff(protocol::ChunkDiff {
+            cx: 9,
+            cz: 9,
+            version: 3,
+            keyframe: true,
+            entries: Vec::new(),
+            runs: vec![protocol::DiffRun {
+                block: world::CRATE.0,
+                length: VOLUME as u32,
+            }],
+        }));
+        assert!(with_bridge(|bridge| bridge.on_server_message(&frame)).expect("initialised"));
+
+        let mut expected = Column::new();
+        expected.fill(world::CRATE);
+        let hash = with_bridge(|bridge| world::column_hash(&bridge.columns[&(9, 9)]))
+            .expect("initialised");
+        assert_eq!(hash, world::column_hash(&expected));
     }
 
     mod allocations {

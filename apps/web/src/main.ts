@@ -33,6 +33,7 @@ import {
 } from "./game/inputDesktop";
 import { TouchInput, type TouchState } from "./game/inputTouch";
 import { errorMessage, showFatalScreen, showRttOverlay } from "./game/net/client";
+import { ChunkSync } from "./game/net/chunkSync";
 import { Hud, type HudStats } from "./ui/hud";
 import { RecipeBookUi, type RecipeBookInfo } from "./ui/recipeBook";
 import { LobbyScreen } from "./ui/lobby";
@@ -121,6 +122,12 @@ interface TestApi {
   showScreen(id: ScreenId): void;
   netFatal(code: number, detail?: string): string;
   netRtt(ms: number): void;
+  applyChunkDiff(frame: number[]): {
+    ok: boolean;
+    applied: number;
+    refreshed: number;
+    chunks: ChunkInfo | null;
+  };
 }
 
 declare global {
@@ -179,6 +186,7 @@ async function boot(): Promise<void> {
       keepRadius: 7,
     });
   }
+  const chunkSync = new ChunkSync();
   entities = clearScene ? null : new EntityRenderer(renderer.scene);
   particles = clearScene ? null : new ParticleSystem(renderer.scene, 256);
   if (chunks !== null) {
@@ -458,6 +466,28 @@ async function boot(): Promise<void> {
     },
     netRtt: (ms) => {
       showRttOverlay(ms);
+    },
+    applyChunkDiff: (frame) => {
+      if (client === null) {
+        throw new Error("wasm is not initialised");
+      }
+      chunkSync.enqueueFrame(Uint8Array.from(frame));
+      let ok = true;
+      let refreshed = 0;
+      const applied = chunkSync.flush(
+        renderer.camera.position.x,
+        renderer.camera.position.z,
+        (patch, raw) => {
+          if (raw === null || !client!.onServerMessage(raw)) {
+            ok = false;
+            return;
+          }
+          if (chunks !== null) {
+            refreshed += chunks.refreshAround(patch.cx, patch.cz);
+          }
+        },
+      );
+      return { ok, applied: applied.length, refreshed, chunks: chunks?.info() ?? null };
     },
   };
   window.__cbReady = true;

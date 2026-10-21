@@ -22,8 +22,8 @@ the match ends when a team's core is destroyed.
 > HUD with its 10 Hz store (T-037), the recipe book with Rust near-miss (T-038),
 > the lobby/settings shell (T-039), the WebSocket net client with reconnect
 > and RTT (T-040), and client prediction with a rollback ring and a smoothed
-> visual residual (T-041). Chunk diff streaming, snapshot interpolation and the
-> offline match loop follow.
+> visual residual (T-041), and chunk diff streaming with keyframes and real
+> remeshing (T-042). Snapshot interpolation and the offline match loop follow.
 > See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
@@ -144,13 +144,13 @@ tests use the second without a runtime.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 463 Rust tests
+cargo test --workspace --all-targets              # 469 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 51 specs, 1 headed (pointer lock)
+cd apps/web && npm ci && npm run test:e2e          # 56 specs, 1 headed (pointer lock)
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -214,6 +214,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-039 | shell: Boot/Main/Lobby/Match/Results, room-code validation, persisted settings and remap | done |
 | T-040 | net client: five control frames, reconnect backoff, session token, 1 Hz RTT, fatal screen | done |
 | T-041 | prediction: 128-input rollback ring, 5 cm threshold, 300 ms RTT, clamped exponential residual | done |
+| T-042 | chunk diffs: versioned columns, 1.5 KB splitting, keyframes, real remesh around edits | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -400,8 +401,10 @@ recorded here rather than quietly skipped:
   "what block is at (x, y, z)?". The mesh payload grew a
   256-byte height map per column, and the chunk manager implements
   `VoxelSource` over it. That is a surface, not a full column mirror: caves and
-  the air under a canopy are approximate. T-042 owns the real voxel state; the
-  interaction does not need to change when it lands.
+  the air under a canopy are approximate. T-042 now stores the real edited
+  column in wasm and remeshes it, but the raycast still reads the height map
+  because no block-query export exists. The top face is exact after a diff; a
+  floating crate's underside is the known gap.
 - **T-035's pointer-lock spec cannot run in the headless shell.** Chromium's
   headless build refuses `requestPointerLock` even from a trusted click, so the
   spec is a headed Playwright project and CI runs the suite under Xvfb. The
@@ -444,7 +447,7 @@ recorded here rather than quietly skipped:
 - **The recipe book's CSS is a third file.** The task names two TypeScript
   files; the panel needs layout styles, so `recipeBook.css` is added. The
   prediction and the ghost are not yet wired to pad state; their APIs are
-  exercised by the page specs and T-042/T-048 will feed them.
+  exercised by the page specs and T-048 will feed them.
 - **The lobby is local until T-045.** The room code, copy button and join
   validation are real and tested; T-040 supplies the WebSocket client, but
   there is no authoritative host to connect to yet, so Start enters the demo
@@ -476,6 +479,26 @@ recorded here rather than quietly skipped:
   API before T-043 can feed it a snapshot would freeze the wrong shape. The Rust
   tests call the predictor directly; T-043 wires it into the tick and render
   path.
+- **T-042 extended `S_CHUNK_DIFF` with a keyframe.** §6.7 names only sparse
+  entries, but the acceptance criterion requires a whole-column replacement.
+  The message now has `keyframe: bool` and `runs: Vec<(u8, u32)>`; a sparse
+  frame carries an empty run list. The decoder still enforces 1.5 KB and the
+  server only emits a keyframe when its encoded frame fits.
+- **The 1.5 KB split is byte-based, not entry-based.** A postcard `u16` index
+  above 16,383 takes three bytes, so an entry costs four bytes, not the plan's
+  estimated three. Four hundred high-index edits produce two frames. The server
+  measures the encoded size; the old 500-entry cap alone could produce a frame
+  the client is required to reject.
+- **`cb_on_snapshot` now applies chunk diffs.** No extra export was added: the
+  existing server-frame entry point decodes `S_CHUNK_DIFF`, checks the column
+  version and mutates the cached column. The loader hands it the bytes after a
+  copy and rebuilds its views. T-043 can route snapshots through the same entry
+  point without changing the ABI.
+- **Interaction still reads the height map.** T-042 stores the real edited
+  column in wasm and re-meshes the centre plus four neighbours, but the raycast
+  has no block-query export. The top surface is exact after a diff; the air
+  under a floating crate is not represented. That query is the remaining seam,
+  not a second terrain model.
 - **Reconnect attempts reset on a successful open.** The six-attempt ceiling is
   for six consecutive failed connections, not six for the session; an unstable
   link that opens and closes would otherwise be permanently dead. The token is
@@ -1269,7 +1292,7 @@ source of truth; `tools/wasm-exports.mjs` checks the 15 base names in CI.
 prove wire input decoding, the 50 ms accumulator (at most four catch-up steps
 per frame) and the render write without pretending to be a second match loop.
 T-032 fills `cb_mesh_chunk` with real neighbour-aware terrain; `cb_on_snapshot`
-records the payload size for the 4 KB boundary check until T-043 decodes it.
+applies `S_CHUNK_DIFF` and records other frames for T-043.
 
 ## The renderer: a budget that moves, a ceiling that does not
 
@@ -1316,7 +1339,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 601.5 KB raw and 152.1 KB gzipped,
+device deterministically. The JS bundle is 605.4 KB raw and 153.5 KB gzipped,
 under §8.10's 450 KB gzip target; the wasm asset is measured in the chunk
 section below.
 
@@ -1335,7 +1358,7 @@ budget when they want a steady state without waiting.
 | Triangles | 104,862 (gate 350k) |
 | 200 load/unload cycles | 34 KB heap growth after GC (gate 5 MB) |
 | 64 MB `memory.grow` | views rebuilt, geometry unchanged, new meshes still work |
-| wasm asset | 376.1 KB raw, 120.9 KB gzipped (target 700 KB) |
+| wasm asset | 415.0 KB raw, 133.5 KB gzipped (target 700 KB) |
 
 The mesher is neighbour-aware: each column is meshed with the four columns
 around it, so interior chunk borders do not draw walls. The payload is a
@@ -1410,12 +1433,13 @@ off-by-one this avoids.
 | visuals | wireframe at cell + 0.5; ghost at cell + normal + 0.5 |
 | edits | place and break call the sink once and leave a pending record; ack retires it |
 
-`VoxelSource` is the seam. The 13-export bridge has no block query, so the mesh
+`VoxelSource` is the seam. The 15-export bridge has no block query, so the mesh
 payload now carries a 256-byte height map per column, computed in Rust from the
 column itself rather than from merged vertices. The chunk manager turns that into
-`solid(x, y, z) = y < top(x, z)`. It is a surface approximation: the air under a
-canopy and a cave are not represented. T-042's column diff stream replaces the
-source without touching the interaction.
+`solid(x, y, z) = y < top(x, z)`. T-042 applies diffs to the real wasm column and
+remeshes it, and the top surface after a diff is exact. The air under a floating
+crate and a cave are still approximate; a block-query export is the remaining
+seam.
 
 Reach is 6 m. The local edit sink is `cb_local_edit`; the pending map keeps the
 returned sequence until the ack, which is the record a predicted-edit layer
@@ -1531,7 +1555,7 @@ unlock clock.
 | Near-miss parity | 500 random clusters; every predicted completion matched the matcher |
 | Banner | `SWORD: needs 1 more crate` |
 | Ghost | one `InstancedMesh`, count = recipe cost |
-| wasm asset | 376.1 KB raw, 120.9 KB gzipped |
+| wasm asset | 415.0 KB raw, 133.5 KB gzipped |
 
 `cb_near_miss` runs the Rust canonicaliser over rotations and translations and
 returns `recipe_id << 8 | missing`. Rust maps the missing blocks back into the
@@ -1545,8 +1569,7 @@ also has an extra crate.
 The ghost is one translucent instanced copy of a recipe row. The book opens from
 E on desktop and from its own 44 px button on touch; the near-miss banner is
 driven by the same Rust call. The pad state that will feed an anchor and a live
-cluster is T-042/T-048's job; the prediction and overlay APIs are already
-tested.
+cluster is T-048's job; the prediction and overlay APIs are already tested.
 
 This task is why the wasm boundary grew from 13 to 15 exports. §5.1 says JS
 never decides whether a recipe matches, so porting the canonicaliser into
@@ -1659,6 +1682,36 @@ implementation to drift.
 Both T-041 files exist, but the bridge still has 15 exports. The predictor stays
 internal until T-043's decoder can feed it a snapshot; exposing a `cb_predict_*`
 API before the snapshot shape exists would freeze the wrong interface.
+
+## Chunk diffs: one version per column
+
+T-042 makes the server's edited cells reach the client without a map download.
+`S_CHUNK_DIFF` now carries either a sparse cell list or a run-length keyframe
+that replaces the whole column. The server gives every emitted frame a
+per-column version; the client applies only a version newer than the one it
+holds, so a duplicate is a no-op and a keyframe can reset a client that missed
+earlier edits.
+
+The §6.7 budget is 1.5 KB, and the plan's "3 bytes per entry" estimate is
+optimistic: a postcard `u16` index above 16,383 takes three bytes, so a
+high-index entry costs four bytes including its block id. The server splits by
+encoded size, not just the 500-entry count. A join after 400 high-index edits
+produces two frames, both under the limit; the test applies both to a freshly
+generated column and compares `world::column_hash` with the server's. A
+full-column keyframe is tested at the protocol, client and wasm layers.
+
+On the client, `ChunkSync` decodes with hard limits, orders queued frames by
+distance from the player's column, and drops equal or older versions. The
+bridge's existing `cb_on_snapshot` entry point now applies a chunk diff to its
+cached voxel columns; no new wasm export was needed, so the surface stays at 15.
+The loader rebuilds its views after the call, and `ChunkManager.refreshAround`
+re-meshes the edited column and its four neighbours.
+
+The page spec turns this into a visible result: it places a crate at the surface
+of column (8, 8), observes the mesh's height rise by one, then applies the next
+version with air and observes the original surface return. The unit specs pin
+the Rust wire vectors, stale-version rejection, nearest-first order and keyframe
+replacement.
 
 ## Content discrepancies, resolved rather than guessed
 

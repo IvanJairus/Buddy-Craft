@@ -31,9 +31,9 @@
 //! [`Pads::check`]: sim::Pads::check
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use protocol::{edit_action, edit_reject, ChunkDiff, DiffEntry};
+use protocol::{edit_action, edit_reject, ChunkDiff, DiffEntry, DiffRun, MAX_DIFF_ENTRIES};
 use sim::{Fixed, Pads, PlayerId, TeamId, Tick, Vec3, VoxelQuery};
 use world::block::{self, BlockId, AIR};
 use world::{Column, WorldGen, CHUNK_X, CHUNK_Y, CHUNK_Z};
@@ -43,6 +43,9 @@ pub const REACH: Fixed = Fixed::from_int(6);
 
 /// Edits per second per player (§6.6, §11.3).
 pub const EDITS_PER_SECOND: u32 = 8;
+
+/// The §6.7 ceiling for one `S_CHUNK_DIFF` frame, including its tag.
+pub const MAX_DIFF_BYTES: usize = 1_536;
 
 /// The bucket's capacity, and therefore the largest burst in one tick.
 ///
@@ -62,10 +65,12 @@ const TOKENS_PER_TICK: u32 = EDITS_PER_SECOND * 1_000 / 20;
 struct Chunk {
     column: Column,
     /// Bumped once per *emitted* diff, because a client accepts a diff only when
-    /// its version is exactly `last_applied + 1`. Bumping per edit would let two
-    /// edits in one tick skip a version the client is waiting for.
+    /// its version is newer than what it holds.
     version: u32,
     pending: Vec<DiffEntry>,
+    /// Every cell ever written, including cells restored to generated terrain.
+    /// A joining client needs the current value of each, not the edit history.
+    changed: BTreeSet<u16>,
 }
 
 /// The server's view of the mutable world: generated terrain plus edits.
@@ -135,25 +140,45 @@ impl EditWorld {
             index: Column::index(lx, ly, lz) as u16,
             block: id.0,
         });
+        chunk.changed.insert(Column::index(lx, ly, lz) as u16);
         true
     }
 
-    /// Take the pending edits for one column, if any, as a wire diff.
+    /// Take the next pending edits for one column, if any, as a wire diff.
     ///
-    /// The version increments here rather than on each edit, because the client
-    /// applies a diff only when its version is exactly one past what it holds.
+    /// The version increments here rather than on each edit, and the batch is
+    /// cut by encoded bytes so the client's 1.5 KB decoder limit always holds.
     pub fn take_diff(&mut self, cx: i32, cz: i32) -> Option<ChunkDiff> {
         let columns = self.columns.get_mut();
         let chunk = columns.get_mut(&(cx, cz))?;
         if chunk.pending.is_empty() {
             return None;
         }
-        chunk.version += 1;
+        let next_version = chunk.version + 1;
+        let header = diff_header_len(cx, cz, next_version);
+        let mut used = header;
+        let mut count = 0usize;
+        for entry in &chunk.pending {
+            if count > 0
+                && (count == MAX_DIFF_ENTRIES
+                    || used + entry_wire_len(entry.index) > MAX_DIFF_BYTES)
+            {
+                break;
+            }
+            used += entry_wire_len(entry.index);
+            count += 1;
+        }
+        if count == 0 {
+            return None;
+        }
+        chunk.version = next_version;
         Some(ChunkDiff {
             cx: cx as i16,
             cz: cz as i16,
-            version: chunk.version,
-            entries: std::mem::take(&mut chunk.pending),
+            version: next_version,
+            keyframe: false,
+            entries: chunk.pending.drain(..count).collect(),
+            runs: Vec::new(),
         })
     }
 
@@ -168,6 +193,109 @@ impl EditWorld {
             .filter(|(_, chunk)| !chunk.pending.is_empty())
             .map(|(key, _)| *key)
             .collect()
+    }
+
+    /// Columns that hold at least one cell differing from generated terrain.
+    ///
+    /// A joining client needs these even after the pending diffs were drained:
+    /// the latest value of a cell is not in the pending queue any more.
+    pub fn edited_columns(&self) -> Vec<(i32, i32)> {
+        self.columns
+            .borrow()
+            .iter()
+            .filter(|(_, chunk)| !chunk.changed.is_empty())
+            .map(|(key, _)| *key)
+            .collect()
+    }
+
+    /// Everything a client joining now needs to reproduce one column.
+    ///
+    /// One or more frames, each under the §6.7 1.5 KB budget. A run-length
+    /// keyframe is used when the changed-cell list is larger than one sparse
+    /// message and the keyframe itself fits. Repeated joins get monotonic
+    /// versions, and a column at version 0 is bumped so the client accepts it.
+    pub fn full_diffs(&mut self, cx: i32, cz: i32) -> Vec<ChunkDiff> {
+        let generated = self.gen.column(cx, cz);
+        let columns = self.columns.get_mut();
+        let Some(chunk) = columns.get_mut(&(cx, cz)) else {
+            return Vec::new();
+        };
+
+        let mut entries = Vec::new();
+        for index in &chunk.changed {
+            let (x, y, z) = Column::coords(*index as usize);
+            let block = chunk.column.get(x, y, z);
+            if block != generated.get(x, y, z) {
+                entries.push(DiffEntry {
+                    index: *index,
+                    block: block.0,
+                });
+            }
+        }
+        if entries.is_empty() {
+            return Vec::new();
+        }
+        if chunk.version == 0 {
+            chunk.version = 1;
+        }
+        let mut version = chunk.version;
+
+        if entries.len() > MAX_DIFF_ENTRIES {
+            let keyframe = ChunkDiff {
+                cx: cx as i16,
+                cz: cz as i16,
+                version,
+                keyframe: true,
+                entries: Vec::new(),
+                runs: column_runs(&chunk.column),
+            };
+            let frame = protocol::encode_s2c(&protocol::S2c::ChunkDiff(keyframe.clone()));
+            if frame.len() <= MAX_DIFF_BYTES {
+                return vec![keyframe];
+            }
+        }
+
+        let mut out = Vec::new();
+        let mut batch: Vec<DiffEntry> = Vec::new();
+        let mut used = diff_header_len(cx, cz, version);
+        for entry in entries {
+            let entry_len = entry_wire_len(entry.index);
+            if !batch.is_empty()
+                && (batch.len() == MAX_DIFF_ENTRIES || used + entry_len > MAX_DIFF_BYTES)
+            {
+                out.push(ChunkDiff {
+                    cx: cx as i16,
+                    cz: cz as i16,
+                    version,
+                    keyframe: false,
+                    entries: std::mem::take(&mut batch),
+                    runs: Vec::new(),
+                });
+                version += 1;
+                used = diff_header_len(cx, cz, version);
+            }
+            used += entry_len;
+            batch.push(entry);
+        }
+        out.push(ChunkDiff {
+            cx: cx as i16,
+            cz: cz as i16,
+            version,
+            keyframe: false,
+            entries: batch,
+            runs: Vec::new(),
+        });
+        chunk.version = version;
+        out
+    }
+
+    /// Hash every cell in one column, generating it if it was never touched.
+    pub fn column_hash(&self, cx: i32, cz: i32) -> u64 {
+        let columns = self.columns.borrow();
+        match columns.get(&(cx, cz)) {
+            Some(chunk) => world::column_hash(&chunk.column),
+            None => world::column_hash(&self.gen.column(cx, cz)),
+        }
     }
 
     /// The version of one column's diff stream.
@@ -185,6 +313,7 @@ impl Chunk {
             column,
             version: 0,
             pending: Vec::new(),
+            changed: BTreeSet::new(),
         }
     }
 }
@@ -198,6 +327,49 @@ impl VoxelQuery for EditWorld {
     fn water(&self, x: i32, y: i32, z: i32) -> bool {
         self.block(x, y, z) == block::registry().id_of("water").unwrap_or(AIR)
     }
+}
+
+/// Bytes an index takes inside a postcard `u16`, plus the one-byte block id.
+fn entry_wire_len(index: u16) -> usize {
+    let value = u32::from(index);
+    let index_bytes = if value < 128 {
+        1
+    } else if value < 16_384 {
+        2
+    } else {
+        3
+    };
+    index_bytes + 1
+}
+
+/// Size of an empty diff with this header, tag included.
+fn diff_header_len(cx: i32, cz: i32, version: u32) -> usize {
+    protocol::encode_s2c(&protocol::S2c::ChunkDiff(ChunkDiff {
+        cx: cx as i16,
+        cz: cz as i16,
+        version,
+        keyframe: false,
+        entries: Vec::new(),
+        runs: Vec::new(),
+    }))
+    .len()
+}
+
+/// Split a column into runs in the same order as generated storage expects.
+fn column_runs(col: &Column) -> Vec<DiffRun> {
+    let mut runs: Vec<DiffRun> = Vec::new();
+    for y in 0..CHUNK_Y {
+        for z in 0..CHUNK_Z {
+            for x in 0..CHUNK_X {
+                let block = col.get(x, y, z).0;
+                match runs.last_mut() {
+                    Some(last) if last.block == block => last.length += 1,
+                    _ => runs.push(DiffRun { block, length: 1 }),
+                }
+            }
+        }
+    }
+    runs
 }
 
 /// Split a world position into a column key and local coordinates, or `None`
@@ -681,6 +853,40 @@ mod tests {
     }
 
     #[test]
+    fn take_diff_splits_by_wire_bytes_not_just_count() {
+        let (mut world, _pads, _origin) = fixture();
+        let cx = 8i32;
+        let cz = 8i32;
+        for i in 0..501usize {
+            let index = 20_000 + i % 4_000;
+            let (x, y, z) = Column::coords(index);
+            world.set_block(
+                cx * CHUNK_X as i32 + x as i32,
+                y as i32,
+                cz * CHUNK_Z as i32 + z as i32,
+                block::CRATE,
+            );
+        }
+
+        let mut versions = Vec::new();
+        let mut total = 0;
+        while let Some(diff) = world.take_diff(cx, cz) {
+            assert!(!diff.keyframe);
+            assert!(diff.entries.len() <= MAX_DIFF_ENTRIES);
+            let frame = protocol::encode_s2c(&protocol::S2c::ChunkDiff(diff.clone()));
+            assert!(
+                frame.len() <= MAX_DIFF_BYTES,
+                "one split frame is {} bytes",
+                frame.len()
+            );
+            total += diff.entries.len();
+            versions.push(diff.version);
+        }
+        assert_eq!(total, 501, "splitting must not lose an edit");
+        assert_eq!(versions, vec![1, 2]);
+    }
+
+    #[test]
     fn breaking_terrain_is_refused() {
         let (mut world, mut pads, origin) = fixture();
         let mut pipeline = EditPipeline::new();
@@ -836,5 +1042,111 @@ mod tests {
         let diff = world.take_diff(cx, cz).expect("a diff");
         assert_eq!(diff.entries.len(), 1);
         assert_eq!(diff.entries[0].block, block::CRATE.0);
+    }
+
+    fn apply_join_frame(frame: &[u8], column: &mut Column) {
+        let protocol::S2c::ChunkDiff(diff) =
+            protocol::decode_s2c(frame).expect("a join diff decodes")
+        else {
+            panic!("expected a chunk diff");
+        };
+        if diff.keyframe {
+            *column = Column::new();
+            let mut index = 0usize;
+            for run in &diff.runs {
+                for _ in 0..run.length {
+                    let (x, y, z) = Column::coords(index);
+                    column.set(x, y, z, block::BlockId(run.block));
+                    index += 1;
+                }
+            }
+            assert_eq!(index, world::VOLUME, "a keyframe covers the column");
+        } else {
+            for entry in &diff.entries {
+                let (x, y, z) = Column::coords(entry.index as usize);
+                column.set(x, y, z, block::BlockId(entry.block));
+            }
+        }
+    }
+
+    #[test]
+    fn edit_then_join() {
+        let (mut world, _pads, _origin) = fixture();
+        let cx = 8i32;
+        let cz = 8i32;
+        for i in 0..400usize {
+            // High cells force three-byte varint indices, the case where the
+            // per-entry budget is 4 bytes rather than the plan's estimated 3.
+            let index = 20_000 + (i * 11) % 4_000;
+            let (x, y, z) = Column::coords(index);
+            assert!(world.set_block(
+                cx * CHUNK_X as i32 + x as i32,
+                y as i32,
+                cz * CHUNK_Z as i32 + z as i32,
+                block::CRATE,
+            ));
+        }
+
+        let joins = world.full_diffs(cx, cz);
+        assert_eq!(joins.len(), 2, "400 high indices need two frames");
+        let frames: Vec<Vec<u8>> = joins
+            .iter()
+            .map(|diff| protocol::encode_s2c(&protocol::S2c::ChunkDiff(diff.clone())))
+            .collect();
+        for frame in &frames {
+            assert!(
+                frame.len() <= MAX_DIFF_BYTES,
+                "a join frame is {} bytes, budget is {MAX_DIFF_BYTES}",
+                frame.len()
+            );
+        }
+
+        let mut client = WorldGen::new(SEED, 2).column(cx, cz);
+        for frame in &frames {
+            apply_join_frame(frame, &mut client);
+        }
+        assert_eq!(
+            world::column_hash(&client),
+            world.column_hash(cx, cz),
+            "the joining client must reconstruct the server's column"
+        );
+    }
+
+    #[test]
+    fn keyframe_replaces_the_whole_column() {
+        let (mut world, _pads, _origin) = fixture();
+        let cx = 9i32;
+        let cz = 9i32;
+        for y in 0..CHUNK_Y {
+            for z in 0..CHUNK_Z {
+                for x in 0..CHUNK_X {
+                    world.set_block(
+                        cx * CHUNK_X as i32 + x as i32,
+                        y as i32,
+                        cz * CHUNK_Z as i32 + z as i32,
+                        block::CRATE,
+                    );
+                }
+            }
+        }
+
+        let joins = world.full_diffs(cx, cz);
+        assert_eq!(joins.len(), 1, "the keyframe fits one message");
+        let join = joins.into_iter().next().expect("a keyframe diff");
+        assert!(
+            join.keyframe,
+            "more than 500 changed cells needs a keyframe"
+        );
+        assert!(join.entries.is_empty());
+        let frame = protocol::encode_s2c(&protocol::S2c::ChunkDiff(join));
+        assert!(
+            frame.len() <= MAX_DIFF_BYTES,
+            "the run-length keyframe is {} bytes",
+            frame.len()
+        );
+
+        let mut client = WorldGen::new(SEED, 2).column(cx, cz);
+        apply_join_frame(&frame, &mut client);
+        assert_eq!(world::column_hash(&client), world.column_hash(cx, cz));
     }
 }

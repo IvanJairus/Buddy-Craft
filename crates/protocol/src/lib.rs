@@ -923,6 +923,15 @@ pub struct DiffEntry {
     pub block: u8,
 }
 
+/// One run in a keyframe column (§6.7).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct DiffRun {
+    /// Block id for every cell in the run.
+    pub block: u8,
+    /// Cells covered by the run.
+    pub length: u32,
+}
+
 /// The cells of one column that differ from generated terrain (§6.7).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ChunkDiff {
@@ -932,8 +941,12 @@ pub struct ChunkDiff {
     pub cz: i16,
     /// The server's edit count for this column.
     pub version: u32,
-    /// The changed cells, at most [`MAX_DIFF_ENTRIES`].
+    /// True when `runs` replaces the whole column and `entries` is ignored.
+    pub keyframe: bool,
+    /// The changed cells, at most [`MAX_DIFF_ENTRIES`]. Empty for a keyframe.
     pub entries: Vec<DiffEntry>,
+    /// The whole column as runs, only when `keyframe` is true.
+    pub runs: Vec<DiffRun>,
 }
 
 /// A standalone event, for the cases where an event must not wait for a
@@ -1285,6 +1298,7 @@ mod tests {
                 cx: -128,
                 cz: 128,
                 version: u32::MAX,
+                keyframe: false,
                 entries: (0..MAX_DIFF_ENTRIES)
                     .map(|_| DiffEntry {
                         // The largest index a 16×96×16 column can produce.
@@ -1292,6 +1306,7 @@ mod tests {
                         block: 19,
                     })
                     .collect(),
+                runs: Vec::new(),
             }),
             S2c::Event(Event {
                 kind: event_kind::AIRDROP,
@@ -1384,6 +1399,49 @@ mod tests {
     }
 
     // -- roundtrip ----------------------------------------------------------
+
+    #[test]
+    fn chunk_diff_wire_shape() {
+        // The TS decoder is pinned to this byte vector. Signed coordinates are
+        // zigzag varints, so cx = 3 is 0x06 and cz = -2 is 0x03.
+        let frame = encode_s2c(&S2c::ChunkDiff(ChunkDiff {
+            cx: 3,
+            cz: -2,
+            version: 7,
+            keyframe: false,
+            entries: vec![DiffEntry {
+                index: 5,
+                block: 19,
+            }],
+            runs: Vec::new(),
+        }));
+        assert_eq!(
+            frame,
+            vec![0x87, 0x06, 0x03, 0x07, 0x00, 0x01, 0x05, 0x13, 0x00]
+        );
+
+        let keyframe = encode_s2c(&S2c::ChunkDiff(ChunkDiff {
+            cx: 0,
+            cz: 0,
+            version: 2,
+            keyframe: true,
+            entries: Vec::new(),
+            runs: vec![
+                DiffRun {
+                    block: 0,
+                    length: 24_575,
+                },
+                DiffRun {
+                    block: 19,
+                    length: 1,
+                },
+            ],
+        }));
+        assert_eq!(
+            keyframe,
+            vec![0x87, 0x00, 0x00, 0x02, 0x01, 0x00, 0x02, 0x00, 0xFF, 0xBF, 0x01, 0x13, 0x01]
+        );
+    }
 
     #[test]
     fn roundtrip_all() {

@@ -226,6 +226,24 @@ impl Column {
     }
 }
 
+/// FNV-1a over every cell, in `y`, then `z`, then `x` order.
+///
+/// Two columns with the same hash are the same terrain to every system in the
+/// game. The order is fixed so a native server and a wasm client that applied
+/// the same diff agree without serialising the 24 KB column.
+pub fn column_hash(col: &Column) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for y in 0..CHUNK_Y {
+        for z in 0..CHUNK_Z {
+            for x in 0..CHUNK_X {
+                hash ^= u64::from(col.get(x, y, z).0);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+            }
+        }
+    }
+    hash
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -186,6 +186,44 @@ export class ChunkManager {
     return { solid: (x, y, z) => this.solidAt(x, y, z) };
   }
 
+  /**
+   * Remesh one loaded column after its voxel data changed.
+   *
+   * Returns false when the column is outside the current streaming set; it
+   * will be meshed from the new data when it loads. The caller refreshes the
+   * four neighbours too, because a border edit changes their culled faces.
+   */
+  refreshColumn(cx: number, cz: number): boolean {
+    const key = keyOf(cx, cz);
+    if (!this.loaded.has(key)) {
+      return false;
+    }
+    const entry = this.meshes.get(key);
+    if (entry !== undefined) {
+      this.group.remove(entry.mesh);
+      entry.mesh.geometry.dispose();
+      this.meshes.delete(key);
+    }
+    this.loaded.delete(key);
+    this.meshOne(cx, cz);
+    return true;
+  }
+
+  /** Refresh a column and its four neighbours, returning how many were live. */
+  refreshAround(cx: number, cz: number): number {
+    let refreshed = 0;
+    for (const [dx, dz] of [
+      [0, 0],
+      [-1, 0],
+      [1, 0],
+      [0, -1],
+      [0, 1],
+    ]) {
+      if (this.refreshColumn(cx + dx, cz + dz)) refreshed += 1;
+    }
+    return refreshed;
+  }
+
   info(): ChunkInfo {
     return {
       loaded: this.loaded.size,
