@@ -1,0 +1,49 @@
+name: Security
+
+# Plan T-059. The CSP itself is verified in the normal Playwright suite; this
+# workflow covers the dependency and bundle checks that do not need a browser.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: build the client
+        working-directory: apps/web
+        run: npm ci && npm run build
+      - name: scan the built bundle
+        run: node tools/secret-scan.mjs apps/web/dist
+      - name: audit web dependencies
+        working-directory: apps/web
+        run: npm audit --audit-level=high
+
+  cargo-audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.87.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: audit
+      - name: install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: audit the workspace
+        run: cargo audit
