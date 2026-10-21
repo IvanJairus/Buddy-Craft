@@ -26,6 +26,7 @@ import {
 } from "./render/entities";
 import { ParticleSystem, type ParticleInfo } from "./render/particles";
 import { Juice, EVENT_HIT, type JuiceStats } from "./render/juice";
+import { AudioEngine, type AudioStats } from "./audio/engine";
 import { Interaction, type PendingEdit, type RayHit, type VisualState } from "./game/interaction";
 import {
   DesktopInput,
@@ -142,6 +143,12 @@ interface TestApi {
   juiceDamage(amount: number, x: number, y: number, z: number): JuiceStats;
   juiceBenchmark(frames?: number): { averageMs: number; stats: JuiceStats };
   serverMessage(frame: number[]): boolean;
+  audioStats(): AudioStats;
+  audioUnlock(): Promise<boolean>;
+  audioCue(cue: string, x?: number, y?: number, z?: number): number;
+  audioRumble(level: number): AudioStats;
+  audioPanner(): { x: number; y: number; z: number } | null;
+  audioEvent(kind: number, a: number, b: number): void;
 }
 
 declare global {
@@ -213,6 +220,15 @@ async function boot(): Promise<void> {
     reducedMotion: () => document.body.classList.contains("cb-reduced-motion"),
     surfaceAt: (x, z) => chunks?.surfaceAt(x, z) ?? 40,
   });
+  const tierName = renderer.currentTier.toLowerCase();
+  const audio = new AudioEngine(tierName === "low" ? "low" : tierName === "high" ? "high" : "med");
+  window.addEventListener(
+    "pointerdown",
+    () => {
+      void audio.unlock();
+    },
+    { once: true },
+  );
   if (chunks !== null) {
     interaction = new Interaction(renderer.scene, chunks.voxelSource(), {
       localEdit: (x, y, z, block, action) => wasmClient.localEdit(x, y, z, block, action),
@@ -570,6 +586,19 @@ async function boot(): Promise<void> {
       }
       return client.onServerMessage(Uint8Array.from(frame));
     },
+    audioStats: () => audio.stats(),
+    audioUnlock: () => audio.unlock(),
+    audioCue: (cue, x, y, z) =>
+      audio.play(
+        cue,
+        x === undefined || y === undefined || z === undefined ? undefined : { x, y, z },
+      ),
+    audioRumble: (level) => {
+      audio.rumble(level);
+      return audio.stats();
+    },
+    audioPanner: () => audio.lastPanner(),
+    audioEvent: (kind, a, b) => audio.handleEvent(kind, a, b),
   };
   window.__cbReady = true;
 
@@ -609,15 +638,14 @@ async function boot(): Promise<void> {
     }
     const views = client?.renderViews ?? null;
     if (views !== null) {
-      juice.consumeEvents(
-        views.events,
-        views.desc.getUint32(DESC_EVENT_COUNT, true),
-        now,
-      );
+      const eventCount = views.desc.getUint32(DESC_EVENT_COUNT, true);
+      juice.consumeEvents(views.events, eventCount, now);
+      audio.consumeEvents(views.events, eventCount);
     }
     const dt = lastJuiceAt === 0 ? 16 : Math.min(100, Math.max(0, now - lastJuiceAt));
     lastJuiceAt = now;
     juice.update(now, dt);
+    audio.update(dt / 1_000);
     if (views !== null) {
       entities?.update(views, renderer.quality.entityAnimation && juice.timeScale > 0);
     }
