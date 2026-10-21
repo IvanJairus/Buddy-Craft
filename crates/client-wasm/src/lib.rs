@@ -37,7 +37,7 @@ use sim::time::{Tick, TICK_MS};
 use sim::vec::Vec3;
 use sim::world_query::VoxelQuery;
 use wasm_bindgen::prelude::*;
-use world::chunk::Column;
+use world::chunk::{Column, CHUNK_Y};
 use world::gen::{WorldGen, MAP_COLS};
 use world::mesh::mesh_with_neighbours;
 
@@ -147,10 +147,13 @@ impl Bridge {
 
     /// Mesh one column with its four neighbours, as the §8.4 payload.
     ///
-    /// Layout: `u32 vertex_bytes`, `u32 index_bytes`, the 12-byte vertices,
-    /// then `u32` triangle indices. The header exists because the mesher
-    /// chooses the AO-safe diagonal per quad; regenerating indices in JS from
-    /// vertex order would lose that choice.
+    /// Layout: `u32 vertex_bytes`, `u32 index_bytes`, `u32 height_bytes`,
+    /// the 12-byte vertices, the `u32` triangle indices, then one `u8` top
+    /// boundary per local column (16 x 16, x-major). The header exists because
+    /// the mesher chooses the AO-safe diagonal per quad; regenerating indices
+    /// in JS from vertex order would lose that choice. The height map is
+    /// computed from the column itself, not from the vertices, so greedy
+    /// merging cannot leave a local cell without a height.
     fn mesh_payload(&mut self, cx: i32, cz: i32) -> Vec<u8> {
         if !(0..MAP_COLS).contains(&cx) || !(0..MAP_COLS).contains(&cz) {
             return Vec::new();
@@ -179,13 +182,27 @@ impl Bridge {
 
         let vertices = mesh.as_bytes();
         let index_bytes = mesh.indices.len() * 4;
-        let mut payload = Vec::with_capacity(8 + vertices.len() + index_bytes);
+        let mut heights = [0u8; 16 * 16];
+        for lz in 0..16usize {
+            for lx in 0..16usize {
+                for y in (0..CHUNK_Y).rev() {
+                    if center.get(lx, y, lz).0 != 0 {
+                        heights[lz * 16 + lx] = (y + 1) as u8;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut payload = Vec::with_capacity(12 + vertices.len() + index_bytes + heights.len());
         payload.extend_from_slice(&(vertices.len() as u32).to_le_bytes());
         payload.extend_from_slice(&(index_bytes as u32).to_le_bytes());
+        payload.extend_from_slice(&(heights.len() as u32).to_le_bytes());
         payload.extend_from_slice(&vertices);
         for index in mesh.indices {
             payload.extend_from_slice(&index.to_le_bytes());
         }
+        payload.extend_from_slice(&heights);
         payload
     }
 
@@ -562,10 +579,18 @@ mod tests {
 
         let vertex_bytes = u32::from_le_bytes(first[0..4].try_into().unwrap()) as usize;
         let index_bytes = u32::from_le_bytes(first[4..8].try_into().unwrap()) as usize;
+        let height_bytes = u32::from_le_bytes(first[8..12].try_into().unwrap()) as usize;
         assert_eq!(vertex_bytes % 12, 0, "vertices are 12 bytes each");
         assert_eq!(index_bytes % 4, 0, "indices are u32");
-        assert_eq!(first.len(), 8 + vertex_bytes + index_bytes);
+        assert_eq!(height_bytes, 16 * 16);
+        assert_eq!(first.len(), 12 + vertex_bytes + index_bytes + height_bytes);
         assert!(index_bytes > 0);
+        assert!(
+            first[12 + vertex_bytes + index_bytes..]
+                .iter()
+                .any(|h| *h > 0),
+            "the centre column has a height map"
+        );
 
         let second = with_bridge(|bridge| bridge.mesh_payload(8, 8)).expect("bridge initialised");
         assert_eq!(first, second, "meshing one column twice must be identical");

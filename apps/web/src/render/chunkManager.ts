@@ -26,6 +26,7 @@
 
 import * as THREE from "three";
 import type { ClientWasm } from "../wasm/loader";
+import type { VoxelSource } from "../game/interaction";
 
 export const COLUMN_SIZE = 16;
 export const MAP_COLUMNS = 16;
@@ -71,6 +72,8 @@ interface ChunkEntry {
   mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
   cx: number;
   cz: number;
+  /** Top solid boundary per local (x, z), 0 when empty. */
+  heights: Uint8Array;
 }
 
 function keyOf(cx: number, cz: number): string {
@@ -150,6 +153,39 @@ export class ChunkManager {
     return this.loaded.has(keyOf(cx, cz));
   }
 
+  /**
+   * Top solid boundary at a world column from the rendered mesh.
+   *
+   * This is the highest vertex in that local column, so it is the top face of
+   * the highest solid block. It is a surface approximation: caves and the air
+   * under a tree canopy are not represented. T-042's column mirror replaces
+   * it for edits; T-034 only needs a nearby, coherent surface.
+   */
+  surfaceAt(x: number, z: number): number {
+    const cx = Math.floor(x / COLUMN_SIZE);
+    const cz = Math.floor(z / COLUMN_SIZE);
+    const entry = this.meshes.get(keyOf(cx, cz));
+    if (entry === undefined) {
+      return 0;
+    }
+    const lx = x - cx * COLUMN_SIZE;
+    const lz = z - cz * COLUMN_SIZE;
+    if (lx < 0 || lz < 0 || lx >= COLUMN_SIZE || lz >= COLUMN_SIZE) {
+      return 0;
+    }
+    return entry.heights[lz * COLUMN_SIZE + lx];
+  }
+
+  /** True when a world cell lies under the rendered surface. */
+  solidAt(x: number, y: number, z: number): boolean {
+    return y < this.surfaceAt(x, z);
+  }
+
+  /** A `VoxelSource` for the interaction raycast. */
+  voxelSource(): VoxelSource {
+    return { solid: (x, y, z) => this.solidAt(x, y, z) };
+  }
+
   info(): ChunkInfo {
     return {
       loaded: this.loaded.size,
@@ -183,21 +219,24 @@ export class ChunkManager {
     const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
     const vertexBytes = view.getUint32(0, true);
     const indexBytes = view.getUint32(4, true);
+    const heightBytes = view.getUint32(8, true);
     if (
       vertexBytes % VERTEX_BYTES !== 0 ||
       indexBytes % 4 !== 0 ||
-      8 + vertexBytes + indexBytes !== payload.byteLength
+      heightBytes !== COLUMN_SIZE * COLUMN_SIZE ||
+      12 + vertexBytes + indexBytes + heightBytes !== payload.byteLength
     ) {
       throw new Error(
         `column ${key}: malformed mesh payload (${vertexBytes} vertex bytes, ` +
-          `${indexBytes} index bytes, ${payload.byteLength} total)`,
+          `${indexBytes} index bytes, ${heightBytes} height bytes, ` +
+          `${payload.byteLength} total)`,
       );
     }
 
     const vertexCount = vertexBytes / VERTEX_BYTES;
     const positions = new Float32Array(vertexCount * 3);
     for (let i = 0; i < vertexCount; i += 1) {
-      const at = 8 + i * VERTEX_BYTES;
+      const at = 12 + i * VERTEX_BYTES;
       positions[i * 3] = payload[at];
       positions[i * 3 + 1] = payload[at + 1];
       positions[i * 3 + 2] = payload[at + 2];
@@ -205,8 +244,12 @@ export class ChunkManager {
 
     const indices = new Uint32Array(indexBytes / 4);
     for (let i = 0; i < indices.length; i += 1) {
-      indices[i] = view.getUint32(8 + vertexBytes + i * 4, true);
+      indices[i] = view.getUint32(12 + vertexBytes + i * 4, true);
     }
+    const heights = payload.slice(
+      12 + vertexBytes + indexBytes,
+      12 + vertexBytes + indexBytes + heightBytes,
+    );
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
@@ -216,7 +259,7 @@ export class ChunkManager {
     const mesh = new THREE.Mesh(geometry, this.material);
     mesh.position.set(cx * COLUMN_SIZE, 0, cz * COLUMN_SIZE);
     this.group.add(mesh);
-    this.meshes.set(key, { mesh, cx, cz });
+    this.meshes.set(key, { mesh, cx, cz, heights });
     this.loaded.add(key);
     this.meshed += 1;
     this.lastMeshBytes = payload.byteLength;

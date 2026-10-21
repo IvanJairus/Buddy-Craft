@@ -16,8 +16,9 @@ the match ends when a team's core is destroyed.
 > the bots that play it (T-023), the whole-match invariant harness (T-024), the
 > wasm boundary with its render buffer (T-030), the three.js renderer with its
 > quality tiers and adaptive resolution (T-031) and chunk streaming with real
-> wasm meshing (T-032) and instanced entities with GPU-lifetime particles
-> (T-033). The interaction layer and the offline match loop follow.
+> wasm meshing (T-032), instanced entities with GPU-lifetime particles
+> (T-033) and the block interaction raycast with its previews (T-034). The
+> input layer and the offline match loop follow.
 > See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
@@ -108,6 +109,7 @@ crates/
 apps/
   web/src/main.ts          boot benchmark, wasm init, chunk loop (M2)
   web/src/render/          renderer, tiers, chunks, entities, particles (M2)
+  web/src/game/            interaction: DDA raycast and edit previews (M2)
   web/src/wasm/loader.ts   raw wasm loader and render views (M2)
   web/scripts/             wasm bridge build step (M2)
   web/tests/               Playwright specs for the browser contract (M2)
@@ -142,7 +144,7 @@ cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 18 Playwright specs
+cd apps/web && npm ci && npm run test:e2e          # 22 Playwright specs
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -198,6 +200,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-031 | three.js WebGL2 bootstrap, exact quality tiers, adaptive resolution, boot benchmark | done |
 | T-032 | chunk streaming: 6/7 hysteresis, neighbour meshing, 88 chunk draws, 34 KB leak | done |
 | T-033 | instanced 3-part entities, float-driven animation, 256 GPU-lifetime particles | done |
+| T-034 | DDA voxel raycast, 6 m reach, wireframe highlight, ghost preview, pending edits | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -379,6 +382,13 @@ recorded here rather than quietly skipped:
   adding the extra float §8.3 mentions: the 32-byte stride is pinned by offset
   tests, and adding a seventh float would move every field after it. The
   convention is stated in both the section above and the module docs.
+- **T-034 needed a voxel source the bridge does not provide.** The task's file
+  list names only `interaction.ts`, but T-030 pins the bridge at 13 exports and
+  none of them answers "what block is at (x, y, z)?". The mesh payload grew a
+  256-byte height map per column, and the chunk manager implements
+  `VoxelSource` over it. That is a surface, not a full column mirror: caves and
+  the air under a canopy are approximate. T-042 owns the real voxel state; the
+  interaction does not need to change when it lands.
 - **`window.__cbTest` ships in the production bundle.** The synthetic
   frame-time injector has to reach the same adaptive code the player runs, so
   gating it to a dev build would test a different path. It only calls renderer
@@ -1214,7 +1224,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 548.7 KB raw and 138.5 KB gzipped,
+device deterministically. The JS bundle is 556.8 KB raw and 140.9 KB gzipped,
 under §8.10's 450 KB gzip target; the wasm asset is measured in the chunk
 section below.
 
@@ -1233,13 +1243,15 @@ budget when they want a steady state without waiting.
 | Triangles | 104,862 (gate 350k) |
 | 200 load/unload cycles | 34 KB heap growth after GC (gate 5 MB) |
 | 64 MB `memory.grow` | views rebuilt, geometry unchanged, new meshes still work |
-| wasm asset | 321.8 KB raw, 105.9 KB gzipped (target 700 KB) |
+| wasm asset | 322.8 KB raw, 106.4 KB gzipped (target 700 KB) |
 
 The mesher is neighbour-aware: each column is meshed with the four columns
-around it, so interior chunk borders do not draw walls. The payload is an
-8-byte header, 12-byte vertices and `u32` indices. The header exists because the
-mesher chooses the AO-safe diagonal per quad; rebuilding indices from vertex
-order in JS would lose that choice.
+around it, so interior chunk borders do not draw walls. The payload is a
+12-byte header, 12-byte vertices, `u32` indices and a 256-byte height map. The
+header exists because the mesher chooses the AO-safe diagonal per quad;
+rebuilding indices from vertex order would lose that choice. The height map is
+what T-034's raycast targets; it comes from the column, not from the merged
+vertices, so a greedy quad cannot leave a cell without a height.
 
 Ownership is explicit twice. `cb_mesh_chunk` writes into staging memory, the
 loader copies with `.slice()`, and only then releases. And because the Rust
@@ -1291,6 +1303,36 @@ vertex shader computes age, position and alpha from `uTime`. `update()` writes
 one uniform, and the test asserts the attribute-write counter stays at 256
 after 120 frames. The tier's particle cap changes `instanceCount` without
 reallocating the pool.
+
+## Interaction: the same grid the server validates
+
+The block you highlight and the block you send are the same integer cell. The
+raycast is Amanatides-Woo DDA over the voxel grid, not a triangle ray: a mesh
+hit gives a point on a greedy quad, and converting it back to a cell is the
+off-by-one this avoids.
+
+| Check | Assertion |
+| --- | --- |
+| 20-case ray table | six faces, diagonals, fractional origins, unnormalised and zero directions, out of reach, origin inside a block |
+| through-wall | a wall at x = 2 wins over a target at x = 5 |
+| visuals | wireframe at cell + 0.5; ghost at cell + normal + 0.5 |
+| edits | place and break call the sink once and leave a pending record; ack retires it |
+
+`VoxelSource` is the seam. The 13-export bridge has no block query, so the mesh
+payload now carries a 256-byte height map per column, computed in Rust from the
+column itself rather than from merged vertices. The chunk manager turns that into
+`solid(x, y, z) = y < top(x, z)`. It is a surface approximation: the air under a
+canopy and a cave are not represented. T-042's column diff stream replaces the
+source without touching the interaction.
+
+Reach is 6 m. The local edit sink is `cb_local_edit`; the pending map keeps the
+returned sequence until the ack, which is the record a predicted-edit layer
+needs. A rejected ack removes it. The local world is not mutated before the ack,
+so rollback means forgetting the prediction, not undoing a write.
+
+The page spec streams the real map, reads the top boundary of column (128,128),
+casts down from two metres above it, and asserts the hit cell, normal, placement
+cell and both previews before placing, breaking and acking both edits.
 
 ## Content discrepancies, resolved rather than guessed
 

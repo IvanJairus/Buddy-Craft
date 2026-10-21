@@ -37,12 +37,13 @@ function quadPayload(): Uint8Array {
   for (let i = 0; i < corners.length; i += 1) {
     vertices.set(corners[i], i * 12);
   }
-  const out = new Uint8Array(8 + 48 + 24);
+  const out = new Uint8Array(12 + 48 + 24 + 256);
   const view = new DataView(out.buffer);
   view.setUint32(0, 48, true);
   view.setUint32(4, 24, true);
-  out.set(vertices, 8);
-  [0, 1, 2, 0, 2, 3].forEach((index, i) => view.setUint32(8 + 48 + i * 4, index, true));
+  view.setUint32(8, 256, true);
+  out.set(vertices, 12);
+  [0, 1, 2, 0, 2, 3].forEach((index, i) => view.setUint32(12 + 48 + i * 4, index, true));
   return out;
 }
 

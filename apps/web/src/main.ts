@@ -25,6 +25,7 @@ import {
   type EntityValue,
 } from "./render/entities";
 import { ParticleSystem, type ParticleInfo } from "./render/particles";
+import { Interaction, type PendingEdit, type RayHit, type VisualState } from "./game/interaction";
 import { GameRenderer } from "./render/renderer";
 import type { RendererInfo } from "./render/renderer";
 import {
@@ -57,6 +58,15 @@ interface TestApi {
   entityBenchmark(frames?: number): (EntityInfo & { averageMs: number }) | null;
   particles(): ParticleInfo | null;
   particleBenchmark(): { spawned: ParticleInfo; after: ParticleInfo } | null;
+  surface(x: number, z: number): number;
+  aim(origin: [number, number, number], direction: [number, number, number]): {
+    hit: RayHit | null;
+    visuals: VisualState | null;
+  };
+  placeBlock(block: number): number;
+  breakBlock(): number;
+  pendingEdits(): PendingEdit[];
+  ackEdit(seq: number, accepted: boolean): boolean;
 }
 
 declare global {
@@ -81,6 +91,7 @@ let client: ClientWasm | null = null;
 let chunks: ChunkManager | null = null;
 let entities: EntityRenderer | null = null;
 let particles: ParticleSystem | null = null;
+let interaction: Interaction | null = null;
 
 async function boot(): Promise<void> {
   if (tier === null) {
@@ -109,6 +120,11 @@ async function boot(): Promise<void> {
   }
   entities = clearScene ? null : new EntityRenderer(renderer.scene);
   particles = clearScene ? null : new ParticleSystem(renderer.scene, 256);
+  if (chunks !== null) {
+    interaction = new Interaction(renderer.scene, chunks.voxelSource(), {
+      localEdit: (x, y, z, block, action) => wasmClient.localEdit(x, y, z, block, action),
+    });
+  }
 
   const input = new Uint8Array(4);
   window.__cbTest = {
@@ -210,6 +226,25 @@ async function boot(): Promise<void> {
         particles.update(frame / 60);
       }
       return { spawned, after: particles.info() };
+    },
+    surface: (x, z) => chunks?.surfaceAt(x, z) ?? 0,
+    aim: (origin, direction) => {
+      if (interaction === null) {
+        return { hit: null, visuals: null };
+      }
+      const hit = interaction.aim(
+        { x: origin[0], y: origin[1], z: origin[2] },
+        { x: direction[0], y: direction[1], z: direction[2] },
+      );
+      return { hit, visuals: interaction.visuals() };
+    },
+    placeBlock: (block) => interaction?.place(block) ?? 0,
+    breakBlock: () => interaction?.breakBlock() ?? 0,
+    pendingEdits: () => interaction?.pending() ?? [],
+    ackEdit: (seq, accepted) => {
+      const known = interaction?.ack(seq, accepted) ?? false;
+      client?.ackEdit(seq, accepted);
+      return known;
     },
   };
   window.__cbReady = true;
