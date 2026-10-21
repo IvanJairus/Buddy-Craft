@@ -389,6 +389,7 @@ mod tests {
         // A valid tag with half a payload: a malformed stream, so close.
         let full = C2s::Input(Input {
             seq: 1,
+            acked_seq: 0,
             first_tick: Tick(10),
             frames: [WireInput::default(); INPUT_FRAMES],
         })

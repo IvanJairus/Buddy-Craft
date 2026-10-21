@@ -799,6 +799,8 @@ impl MatchState {
             h.vec(body.spawn);
             h.u32(body.respawn_at.map_or(u32::MAX, |t| t.0));
             h.u32(body.protect_until.map_or(u32::MAX, |t| t.0));
+            h.u8(body.yaw);
+            h.u8(body.pitch);
             h.u8(body.prev_buttons);
         }
 
@@ -1406,6 +1408,18 @@ mod tests {
                 "player prev_buttons",
                 Box::new(|s: &mut MatchState| {
                     s.bodies[0].prev_buttons = 0b1010;
+                }),
+            ),
+            (
+                "player yaw",
+                Box::new(|s: &mut MatchState| {
+                    s.bodies[0].yaw = 200;
+                }),
+            ),
+            (
+                "player pitch",
+                Box::new(|s: &mut MatchState| {
+                    s.bodies[0].pitch = 40;
                 }),
             ),
         ];

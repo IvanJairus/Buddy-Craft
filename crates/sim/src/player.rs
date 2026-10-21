@@ -82,6 +82,16 @@ pub struct PlayerBody {
     pub respawn_at: Option<Tick>,
     /// Tick spawn protection expires, if it is running.
     pub protect_until: Option<Tick>,
+    /// Facing, in 1/256 turns. `0` faces `+Z`.
+    ///
+    /// Stored because it is *state*, not just input: a snapshot has to tell
+    /// every other client which way this player is looking, and a respawned
+    /// player faces somewhere definite rather than wherever their last frame
+    /// pointed. `MoveState` deliberately does not carry it — movement is
+    /// horizontal and does not care which way the head is turned.
+    pub yaw: u8,
+    /// Pitch, in 1/256 turns. `0` is level, `64` straight up.
+    pub pitch: u8,
     /// The previous tick's buttons, so edges are derived rather than sent.
     pub prev_buttons: u8,
 }
@@ -95,6 +105,8 @@ impl PlayerBody {
             spawn: pos,
             respawn_at: None,
             protect_until: None,
+            yaw: 0,
+            pitch: 0,
             prev_buttons: 0,
         }
     }
@@ -133,6 +145,11 @@ impl PlayerBody {
         self.hp = tuning::embedded().player.hp;
         self.respawn_at = None;
         self.protect_until = Some(now.advance(protect_ticks()));
+        // Facing resets to +Z. Keeping the death facing would respawn players
+        // looking at whatever killed them, which is a small thing that reads as
+        // a large one on a respawn screen.
+        self.yaw = 0;
+        self.pitch = 0;
         self.prev_buttons = 0;
     }
 }
@@ -295,6 +312,11 @@ pub fn apply<W: VoxelQuery + ?Sized>(
     cfg: &MoveConfig,
 ) -> PlayerTick {
     let intent = MoveIntent::from_frame(frame, previous_buttons);
+    // Facing is taken from the frame even when the move is blocked: a player
+    // pressed against a wall still turns, and a snapshot that froze their head
+    // would make them look stuck.
+    body.yaw = frame.yaw;
+    body.pitch = frame.pitch;
     let flags = movement::step(world, cfg, &mut body.state, intent, movement::tick_dt());
     PlayerTick {
         flags,

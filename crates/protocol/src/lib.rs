@@ -32,7 +32,7 @@
 //! test harness want the first without the second.
 
 use serde::de::{self, SeqAccess, Visitor};
-use serde::ser::SerializeTuple;
+use serde::ser::{SerializeStruct, SerializeTuple};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use sim::{InputFrame, Tick};
@@ -433,10 +433,35 @@ pub struct TeamChoice {
 }
 
 /// Three ticks of input (§6.2: 15 Hz, three frames per packet).
+///
+/// # Why the snapshot acknowledgement rides here
+///
+/// §6.3 encodes each snapshot as a delta against "the last snapshot the client
+/// **acknowledged** (`baseline_seq`)", and §6.3 also mentions a keyframe being
+/// sent "immediately if the client NACKs a missing baseline". Neither an ack nor
+/// a NACK appears in §7.1, so the mechanism §6.3 describes has nothing to carry
+/// it.
+///
+/// It rides on `C_INPUT` rather than becoming a tenth message for two reasons.
+/// A separate 20 Hz ack message plus the 15 Hz input stream is 35 messages a
+/// second against §7.4's 30/s token bucket, so it would rate-limit the client
+/// into a disconnect. And the input stream is exactly when the ack is useful:
+/// every packet already proves the client is alive, so it may as well say how
+/// far its world has caught up.
+///
+/// A missing baseline needs no NACK. The server keeps a bounded history of sent
+/// snapshots; when the client's ack falls out of it, the next snapshot is a
+/// keyframe. Losing a packet therefore self-heals in at most
+/// `snapshot::BASELINE_HISTORY` ticks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Input {
     /// Packet sequence, for the client's own acknowledgement bookkeeping.
     pub seq: u16,
+    /// The newest snapshot sequence the client has received, or 0 for none.
+    ///
+    /// This is the delta baseline: the server encodes against it when it still
+    /// has it, and sends a keyframe when it does not.
+    pub acked_seq: u16,
     /// The tick `frames[0]` applies to.
     pub first_tick: Tick,
     /// Consecutive frames: `frames[i]` applies to `first_tick + i`.
@@ -604,7 +629,22 @@ pub struct Start {
 }
 
 /// One player's delta (§7.3).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+///
+/// # Why the serde impls are hand-written
+///
+/// §7.3's square brackets are literal: `[pos_x][pos_y][pos_z][yaw][hp][flags][anim]`
+/// means a field that is *absent from the byte stream* when its presence bit is
+/// clear. Derived serde cannot express that — it writes every field of a struct
+/// unconditionally — so a stationary entity would cost nine bytes instead of
+/// three, and the 2 KB snapshot budget would be spent on the one thing deltas
+/// exist to avoid sending.
+///
+/// postcard makes the conditional form possible without changing formats:
+/// `serialize_struct` ignores the declared length, and `deserialize_struct`
+/// hands the visitor a sequence accessor that only reads when asked. So the
+/// length passed below is the *maximum* field count, and the visitor reads
+/// exactly `2 + popcount(presence-expanded)` of them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct SnapshotPlayer {
     /// Player id.
     pub id: u8,
@@ -626,8 +666,9 @@ pub struct SnapshotPlayer {
     pub anim: u8,
 }
 
-/// One buddy's delta (§7.3).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+/// One buddy's delta (§7.3). Conditional encoding, same as
+/// [`SnapshotPlayer`] and for the same reason.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct SnapshotBuddy {
     /// Buddy id.
     pub id: u8,
@@ -711,6 +752,132 @@ pub struct Snapshot {
     pub structures: Vec<SnapshotStructure>,
     /// Events this tick.
     pub events: Vec<SnapshotEvent>,
+}
+
+/// The maximum number of fields a [`SnapshotPlayer`] can put on the wire.
+const PLAYER_FIELDS: &[&str] = &[
+    "id", "presence", "x", "y", "z", "yaw", "hp", "flags", "anim",
+];
+
+/// The maximum number of fields a [`SnapshotBuddy`] can put on the wire.
+const BUDDY_FIELDS: &[&str] = &["id", "presence", "x", "y", "z", "hp"];
+
+impl Serialize for SnapshotPlayer {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut out = serializer.serialize_struct("SnapshotPlayer", PLAYER_FIELDS.len())?;
+        out.serialize_field("id", &self.id)?;
+        out.serialize_field("presence", &self.presence)?;
+        // `presence::POS` covers all three axes: a position is one decision, and
+        // splitting it into three bits would let a sender claim two of them.
+        if self.presence & presence::POS != 0 {
+            out.serialize_field("x", &self.x)?;
+            out.serialize_field("y", &self.y)?;
+            out.serialize_field("z", &self.z)?;
+        }
+        if self.presence & presence::YAW != 0 {
+            out.serialize_field("yaw", &self.yaw)?;
+        }
+        if self.presence & presence::HP != 0 {
+            out.serialize_field("hp", &self.hp)?;
+        }
+        if self.presence & presence::FLAGS != 0 {
+            out.serialize_field("flags", &self.flags)?;
+        }
+        if self.presence & presence::ANIM != 0 {
+            out.serialize_field("anim", &self.anim)?;
+        }
+        out.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for SnapshotPlayer {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Fields;
+        impl<'de> Visitor<'de> for Fields {
+            type Value = SnapshotPlayer;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a snapshot player delta")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let short = || de::Error::invalid_length(0, &"a snapshot player delta");
+                let mut out = SnapshotPlayer {
+                    id: seq.next_element()?.ok_or_else(short)?,
+                    presence: seq.next_element()?.ok_or_else(short)?,
+                    ..Default::default()
+                };
+                if out.presence & presence::POS != 0 {
+                    out.x = seq.next_element()?.ok_or_else(short)?;
+                    out.y = seq.next_element()?.ok_or_else(short)?;
+                    out.z = seq.next_element()?.ok_or_else(short)?;
+                }
+                if out.presence & presence::YAW != 0 {
+                    out.yaw = seq.next_element()?.ok_or_else(short)?;
+                }
+                if out.presence & presence::HP != 0 {
+                    out.hp = seq.next_element()?.ok_or_else(short)?;
+                }
+                if out.presence & presence::FLAGS != 0 {
+                    out.flags = seq.next_element()?.ok_or_else(short)?;
+                }
+                if out.presence & presence::ANIM != 0 {
+                    out.anim = seq.next_element()?.ok_or_else(short)?;
+                }
+                Ok(out)
+            }
+        }
+        deserializer.deserialize_struct("SnapshotPlayer", PLAYER_FIELDS, Fields)
+    }
+}
+
+impl Serialize for SnapshotBuddy {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut out = serializer.serialize_struct("SnapshotBuddy", BUDDY_FIELDS.len())?;
+        out.serialize_field("id", &self.id)?;
+        out.serialize_field("presence", &self.presence)?;
+        if self.presence & presence::POS != 0 {
+            out.serialize_field("x", &self.x)?;
+            out.serialize_field("y", &self.y)?;
+            out.serialize_field("z", &self.z)?;
+        }
+        if self.presence & presence::HP != 0 {
+            out.serialize_field("hp", &self.hp)?;
+        }
+        out.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for SnapshotBuddy {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Fields;
+        impl<'de> Visitor<'de> for Fields {
+            type Value = SnapshotBuddy;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a snapshot buddy delta")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let short = || de::Error::invalid_length(0, &"a snapshot buddy delta");
+                let mut out = SnapshotBuddy {
+                    id: seq.next_element()?.ok_or_else(short)?,
+                    presence: seq.next_element()?.ok_or_else(short)?,
+                    ..Default::default()
+                };
+                if out.presence & presence::POS != 0 {
+                    out.x = seq.next_element()?.ok_or_else(short)?;
+                    out.y = seq.next_element()?.ok_or_else(short)?;
+                    out.z = seq.next_element()?.ok_or_else(short)?;
+                }
+                if out.presence & presence::HP != 0 {
+                    out.hp = seq.next_element()?.ok_or_else(short)?;
+                }
+                Ok(out)
+            }
+        }
+        deserializer.deserialize_struct("SnapshotBuddy", BUDDY_FIELDS, Fields)
+    }
 }
 
 /// The answer to one `C_EDIT` (§6.6).
@@ -1016,6 +1183,7 @@ mod tests {
             C2s::TeamChoice(TeamChoice { team: 5 }),
             C2s::Input(Input {
                 seq: u16::MAX,
+                acked_seq: u16::MAX,
                 first_tick: Tick(56_400),
                 frames: [WireInput {
                     axes: 0xFF,

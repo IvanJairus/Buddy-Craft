@@ -10,9 +10,10 @@ the match ends when a team's core is destroyed.
 > fixed-point movement (T-009), the crate-recipe matcher (T-010), combat (T-011),
 > buddy AI (T-012), base damage and elimination (T-013), match rules (T-014) and
 > the determinism harness (T-015) — are done. M2 has the wire contract and its
-> validation (T-017, T-018); the room state machine, snapshots and bots are next,
-> then the web client. See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task
-> backlog.
+> validation (T-017, T-018), the room lifecycle and tick loop (T-019, T-020),
+> player bodies (P-01) and the per-client snapshot encoder (T-021). The block
+> edit pipeline, airdrops, bots and the `match_sim` harness are next, then the web
+> client. See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
 
@@ -168,6 +169,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-019 | room lifecycle: six edges, one terminal state, no clock | done |
 | T-020 | tick loop, per-player input queue, 200 ms AFK timeout | done |
 | P-01 | player bodies: spawn search, input application, death, respawn | done |
+| T-021 | per-client snapshots: 48 m AOI, acked-baseline deltas, 2 KB budget | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -228,6 +230,12 @@ recorded here rather than quietly skipped:
   another; keeping them byte-identical would have meant keeping the blind spot.
   The diff is the record: `state`, `movement` and `combat` all move at tick 0, and
   the checkpoint counts (201/201/143) are unchanged, so no match got shorter.
+- **The goldens were regenerated a second time in T-021**, because `PlayerBody`
+  gained `yaw` and `pitch` and both are hashed: facing is state, and a field that
+  is not hashed is a desync no fixture would catch. Every checkpoint in all three
+  fixtures changes, which is the honest signature of "a field was added to the
+  hash" rather than a rules change — the movement, buddies and combat fields are
+  untouched at tick 0 and the wasm build produces the same new sequence.
 - **T-016's "no numeric literal > 1" grep test is not implemented.** The other
   two T-016 criteria are: tuning parses at compile time and `tuning_matches_docs`
   pins it to the plan. The third is deferred because a blanket "no literal above
@@ -237,6 +245,15 @@ recorded here rather than quietly skipped:
   designer-facing number is hardcoded", which needs a rule that can tell a named
   constant from an inline magic number. That is a source-scanning tool, and it
   belongs next to T-015's harness rather than bolted onto the rules crate.
+- **§6.3's "own player: always, full fidelity" is read as scope, not as
+  encoding.** The table's column header is *Scope*, and the row means "your own
+  body is never culled". Sending it whole on every delta frame — the literal
+  reading — makes the own-player entry absolute while every other entry is a
+  delta, which is a decoder trap: a client that adds deltas doubles its own
+  position. The gate test (`delta_chain_reconstructs_the_state`) failed on
+  exactly that, so the encoder gives every entity one rule. The cost is a few
+  bytes per frame; the benefit is that the client has no special case for its own
+  body, which is the entity prediction depends on.
 
 ## Combat: events, not side effects
 
@@ -732,6 +749,57 @@ changing the movement sweep that T-009 owns and that every golden fixture runs
 through — a design decision, not a bug fix. What it costs today: bodies can
 occupy the same space, and the point-blank exemption above exists partly because
 of it. It should be decided before the client renders two players in one place.
+
+## Snapshots: the baseline is the frame the client acknowledged
+
+§6.3 says each snapshot is delta-encoded against "the last snapshot the client
+**acknowledged**", and that one word decides the whole module. Encoding against
+the last frame the server *sent* is cheaper and wrong: if that frame is dropped,
+the client applies a delta to a state it never had, and the error survives until
+the next keyframe — three seconds of a player standing in the wrong place. The
+server therefore keeps the frames it sent, keyed by sequence, and encodes against
+whichever one the client names in `C_INPUT.acked_seq`.
+
+That makes packet loss cost exactly one frame, and it makes the recovery path
+free: a baseline that has fallen out of the 64-frame history produces a keyframe
+instead of a guess. There is no NACK message on the wire — an ack that cannot be
+resolved *is* the NACK.
+
+The ack rides on `C_INPUT` rather than becoming its own message because §7.4's
+token bucket is 30 messages/s: 20 Hz of acks plus 15 Hz of input is 35/s, so a
+separate ack message would rate-limit the client into a disconnect.
+
+Measured on the worst case §7.3 budgets for — 6 players, 12 buddies, 24
+projectiles, 4 structures, 16 events, every field changing, all inside 48 m:
+
+```
+keyframe   529 B   budget 2048 B
+delta      383 B   budget 2048 B   (§6.8 average: ~550 B)
+stationary entity   2 B   ceiling 3 B
+```
+
+Three decisions are worth knowing about, because each one is a trap that the
+gate test caught or that the next task would have hit:
+
+- **Every entity obeys the same rule, including your own body.** §6.3's "own
+  player: always, full fidelity" is a *scope* statement — your body is never
+  culled — not an instruction to re-send it whole every frame. The first
+  implementation did re-send it whole, and the reconstruction test failed
+  immediately: a client that adds deltas doubled its own position. One rule for
+  every entity costs a few bytes and removes an exception from the decoder.
+- **A new entity needs no wire bit.** Its baseline row does not exist, so its
+  delta is taken against zero — which is its absolute position. The client's
+  "absent from the baseline" case and the "new entity" case are the same case.
+- **The hysteresis band is a flag, not a second radius.** An entity between 48 m
+  and 52 m stays in the snapshot and carries `STALE`, so the client knows the
+  position is last-known. Past 52 m it simply disappears, and the client removes
+  what it is not told about — there is no despawn message, and adding one would
+  give two ways to say the same thing.
+
+Events are never culled: the snapshot carries all of them regardless of distance,
+and an overflow past 16 in one tick is reported to the host rather than
+`truncate`d. A player learning their core is under attack must not depend on
+being within render distance of it.
 
 ## Content discrepancies, resolved rather than guessed
 

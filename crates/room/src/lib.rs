@@ -17,9 +17,13 @@
 
 pub mod input;
 pub mod lifecycle;
+pub mod snapshot;
 
 pub use input::{InputQueue, INPUT_TIMEOUT_TICKS, QUEUE_CAPACITY};
 pub use lifecycle::{Conditions, Effect, IllegalTransition, Lifecycle, Phase};
+pub use snapshot::{
+    Encoded, SnapshotEncoder, AOI_HYSTERESIS, AOI_RADIUS, BASELINE_HISTORY, KEYFRAME_INTERVAL,
+};
 
 use sim::{
     ring_pad_origins, InputFrame, Layout, MatchState, Outcome, PlayerId, RoomSetup, SetupError,
@@ -271,6 +275,7 @@ mod tests {
     fn packet(seq: u16, first_tick: u32, held: u8) -> protocol::Input {
         protocol::Input {
             seq,
+            acked_seq: 0,
             first_tick: Tick(first_tick),
             frames: [WireInput {
                 axes: WireInput::pack_axes(0, 1),
