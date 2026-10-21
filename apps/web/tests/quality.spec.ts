@@ -37,7 +37,7 @@ async function info(page: import("@playwright/test").Page): Promise<RendererInfo
 }
 
 test("the clear frame renders through WebGL2", async ({ page }) => {
-  await boot(page, "/?quality=high");
+  await boot(page, "/?quality=high&chunks=off");
   const before = await info(page);
   expect(before.webgl2).toBe(true);
 
@@ -54,7 +54,7 @@ test("device pixel ratio is clamped to 2", async ({ browser }) => {
     viewport: { width: 800, height: 600 },
   });
   const page = await context.newPage();
-  await boot(page, "/?quality=high");
+  await boot(page, "/?quality=high&chunks=off");
 
   expect(await page.evaluate(() => window.devicePixelRatio)).toBe(3);
   const state = await info(page);
@@ -65,7 +65,7 @@ test("device pixel ratio is clamped to 2", async ({ browser }) => {
 });
 
 test("each tier applies the exact §8.5 numbers", async ({ page }) => {
-  await boot(page, "/?quality=high");
+  await boot(page, "/?quality=high&chunks=off");
   const tiers: QualityTier[] = ["LOW", "MED", "HIGH"];
   for (const tier of tiers) {
     await page.evaluate((next) => (window as unknown as TestWindow).__cbTest!.setTier(next), tier);
@@ -79,7 +79,7 @@ test("each tier applies the exact §8.5 numbers", async ({ page }) => {
 });
 
 test("dynamic resolution drops under 25 ms frames and recovers under 8 ms", async ({ page }) => {
-  await boot(page, "/?quality=high");
+  await boot(page, "/?quality=high&chunks=off");
   expect((await info(page)).scale).toBe(1);
 
   await page.evaluate(() => (window as unknown as TestWindow).__cbTest!.setFrameTime(25));
@@ -97,7 +97,7 @@ test("dynamic resolution drops under 25 ms frames and recovers under 8 ms", asyn
 });
 
 test("the scale never falls below 0.55", async ({ page }) => {
-  await boot(page, "/?quality=high");
+  await boot(page, "/?quality=high&chunks=off");
   // 200 ms is clamped to a 100 ms sample inside the scaler, which drives the
   // target to the floor. The floor is the assertion.
   await page.evaluate(() => (window as unknown as TestWindow).__cbTest!.setFrameTime(200));

@@ -27,6 +27,7 @@
 //! rather than a comment.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use sim::fixed::yaw_to_rad;
 use sim::input::InputFrame;
@@ -36,6 +37,9 @@ use sim::time::{Tick, TICK_MS};
 use sim::vec::Vec3;
 use sim::world_query::VoxelQuery;
 use wasm_bindgen::prelude::*;
+use world::chunk::Column;
+use world::gen::{WorldGen, MAP_COLS};
+use world::mesh::mesh_with_neighbours;
 
 mod render_buffer;
 
@@ -51,7 +55,7 @@ pub const OK: u32 = 1;
 /// Tuning is compared byte-for-byte when supplied. This is the v1 boundary:
 /// the client ships the same `data/tuning.ron`, and a mismatch is a desync that
 /// should fail at boot instead of producing two different games.
-const ARENA_BYTES: usize = 512 * 1024;
+const ARENA_BYTES: usize = 4 * 1024 * 1024;
 
 /// A tick is 50 ms; catch up at most this many ticks in one frame.
 const MAX_CATCH_UP_TICKS: u32 = 4;
@@ -89,6 +93,8 @@ struct Bridge {
     next_edit_seq: u16,
     ack: Option<(u16, bool)>,
     last_snapshot: (u32, u32),
+    gen: WorldGen,
+    columns: BTreeMap<(i32, i32), Column>,
 }
 
 impl Bridge {
@@ -118,7 +124,81 @@ impl Bridge {
             next_edit_seq: 1,
             ack: None,
             last_snapshot: (0, 0),
+            // The client's terrain must match the server's. T-032 has no room
+            // handshake yet, so the bridge uses the two-base map the milestone
+            // is built around; `cb_init` can grow a layout argument later
+            // without changing any of the 13 signatures.
+            gen: WorldGen::new(u64::from(seed), 2),
+            columns: BTreeMap::new(),
         }
+    }
+
+    /// Generate a column once and keep it. The whole map is 16 x 16 columns,
+    /// so the cache is bounded by the world size, not by how far a player walks.
+    fn ensure_column(&mut self, cx: i32, cz: i32) {
+        if self.columns.contains_key(&(cx, cz)) {
+            return;
+        }
+        let column = self.gen.column(cx, cz);
+        self.columns.insert((cx, cz), column);
+    }
+
+    /// Mesh one column with its four neighbours, as the §8.4 payload.
+    ///
+    /// Layout: `u32 vertex_bytes`, `u32 index_bytes`, the 12-byte vertices,
+    /// then `u32` triangle indices. The header exists because the mesher
+    /// chooses the AO-safe diagonal per quad; regenerating indices in JS from
+    /// vertex order would lose that choice.
+    fn mesh_payload(&mut self, cx: i32, cz: i32) -> Vec<u8> {
+        if !(0..MAP_COLS).contains(&cx) || !(0..MAP_COLS).contains(&cz) {
+            return Vec::new();
+        }
+        for (nx, nz) in [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
+            if (0..MAP_COLS).contains(&nx) && (0..MAP_COLS).contains(&nz) {
+                self.ensure_column(nx, nz);
+            }
+        }
+        self.ensure_column(cx, cz);
+
+        let columns = &self.columns;
+        let Some(center) = columns.get(&(cx, cz)) else {
+            return Vec::new();
+        };
+        let mesh = mesh_with_neighbours(
+            center,
+            columns.get(&(cx - 1, cz)),
+            columns.get(&(cx + 1, cz)),
+            columns.get(&(cx, cz - 1)),
+            columns.get(&(cx, cz + 1)),
+        );
+        if mesh.is_empty() {
+            return Vec::new();
+        }
+
+        let vertices = mesh.as_bytes();
+        let index_bytes = mesh.indices.len() * 4;
+        let mut payload = Vec::with_capacity(8 + vertices.len() + index_bytes);
+        payload.extend_from_slice(&(vertices.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&(index_bytes as u32).to_le_bytes());
+        payload.extend_from_slice(&vertices);
+        for index in mesh.indices {
+            payload.extend_from_slice(&index.to_le_bytes());
+        }
+        payload
+    }
+
+    fn mesh_into(&mut self, cx: i32, cz: i32, out_ptr: u32, out_cap: u32) -> u32 {
+        if out_ptr == 0 {
+            return 0;
+        }
+        let payload = self.mesh_payload(cx, cz);
+        if payload.is_empty() || payload.len() > out_cap as usize {
+            return 0;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), out_ptr as *mut u8, payload.len());
+        }
+        payload.len() as u32
     }
 
     /// Advance at most four 50 ms steps and refresh the render buffer.
@@ -379,12 +459,15 @@ pub fn cb_dirty_chunks() -> u32 {
     with_bridge(|bridge| bridge.buffer.dirty_ptr()).unwrap_or(0)
 }
 
-/// Write one chunk mesh into caller-provided wasm memory. T-032 owns meshing;
-/// T-030 returns 0 (nothing written) with the final signature in place.
+/// Write one chunk mesh into caller-provided wasm memory.
+///
+/// Returns bytes written, or 0 for an empty column, an out-of-map column, or a
+/// buffer that is too small. The payload format is documented on
+/// `Bridge::mesh_payload`: an 8-byte header, 12-byte vertices, then u32 indices.
 #[wasm_bindgen]
 pub fn cb_mesh_chunk(cx: i16, cz: i16, out_ptr: u32, out_cap: u32) -> u32 {
-    let _ = (cx, cz, out_ptr, out_cap);
-    0
+    with_bridge(|bridge| bridge.mesh_into(i32::from(cx), i32::from(cz), out_ptr, out_cap))
+        .unwrap_or(0)
 }
 
 /// Release a mesh generation. T-032 owns generation lifetime; the arena reuses
@@ -463,6 +546,42 @@ mod tests {
 
         cb_tick(50, 0);
         assert!(bridge_desc().expect("bridge initialised").is_valid());
+    }
+
+    #[test]
+    fn mesh_payload_is_well_formed_and_deterministic() {
+        assert_eq!(cb_init(0x00C0_FFEE, 0, 0, 0), OK);
+        let first = with_bridge(|bridge| bridge.mesh_payload(8, 8)).expect("bridge initialised");
+        assert!(first.len() > 8, "the centre column must mesh to something");
+
+        let vertex_bytes = u32::from_le_bytes(first[0..4].try_into().unwrap()) as usize;
+        let index_bytes = u32::from_le_bytes(first[4..8].try_into().unwrap()) as usize;
+        assert_eq!(vertex_bytes % 12, 0, "vertices are 12 bytes each");
+        assert_eq!(index_bytes % 4, 0, "indices are u32");
+        assert_eq!(first.len(), 8 + vertex_bytes + index_bytes);
+        assert!(index_bytes > 0);
+
+        let second = with_bridge(|bridge| bridge.mesh_payload(8, 8)).expect("bridge initialised");
+        assert_eq!(first, second, "meshing one column twice must be identical");
+    }
+
+    #[test]
+    fn mesh_outside_the_map_is_empty() {
+        assert_eq!(cb_init(5, 0, 0, 0), OK);
+        for (cx, cz) in [(-1, 0), (0, -1), (MAP_COLS, 0), (0, MAP_COLS)] {
+            assert!(
+                with_bridge(|bridge| bridge.mesh_payload(cx, cz))
+                    .expect("bridge initialised")
+                    .is_empty(),
+                "column ({cx}, {cz}) is outside the map"
+            );
+        }
+    }
+
+    #[test]
+    fn mesh_refuses_a_short_buffer() {
+        assert_eq!(cb_init(6, 0, 0, 0), OK);
+        assert_eq!(cb_mesh_chunk(8, 8, 1, 8), 0);
     }
 
     #[test]

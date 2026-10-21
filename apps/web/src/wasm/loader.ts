@@ -49,6 +49,87 @@ export const DESC_EVENT_PTR = 48;
 const INPUT_BYTES = 4;
 const OK = 1;
 
+type RawFunction = (...args: number[]) => number;
+
+/**
+ * Instantiate the bridge from the raw `.wasm`.
+ *
+ * The bridge's exports are all numbers, so the wasm-bindgen JS glue is not
+ * needed. Its only imports are four internal helpers (`describe`, a throw
+ * shim, and two externref-table hooks); none is on a numeric path, and the
+ * loader stubs them. This keeps the browser build free of a code-generation
+ * step and makes the wasm artifact the single source of truth.
+ *
+ * Export names carry wasm-bindgen's hash suffix (`cb_tick_ab12...`), so each
+ * function is found by base name. `cb_ack_edit` is the one wrapper: its raw
+ * ABI takes an i32, while the typed interface takes a boolean.
+ */
+export async function loadClientWasm(url: string): Promise<ClientWasmExports> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`failed to fetch wasm from ${url}: HTTP ${response.status}`);
+  }
+  const bytes = await response.arrayBuffer();
+  const module = await WebAssembly.compile(bytes);
+
+  let memory: WebAssembly.Memory | null = null;
+  const imports: WebAssembly.Imports = {};
+  for (const entry of WebAssembly.Module.imports(module)) {
+    if (entry.kind !== "function") {
+      throw new Error(`unsupported wasm import ${entry.kind}: ${entry.module}.${entry.name}`);
+    }
+    const namespace = (imports[entry.module] ??= {}) as Record<
+      string,
+      (...args: number[]) => number
+    >;
+    namespace[entry.name] = (...args: number[]): number => {
+      if (memory !== null && entry.name.includes("throw")) {
+        const ptr = args[0] >>> 0;
+        const len = args[1] >>> 0;
+        const text = new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
+        throw new Error(`wasm trap: ${text}`);
+      }
+      // `describe` and the externref-table hooks are only used by generated
+      // glue or by closures; this bridge has neither.
+      return 0;
+    };
+  }
+
+  const instance = await WebAssembly.instantiate(module, imports);
+  const raw = instance.exports;
+  if (!(raw.memory instanceof WebAssembly.Memory)) {
+    throw new Error("wasm bridge does not export memory");
+  }
+  memory = raw.memory;
+
+  const lookup = (name: string): RawFunction => {
+    for (const [key, value] of Object.entries(raw)) {
+      if (typeof value === "function" && (key === name || key.startsWith(`${name}_`))) {
+        return value as RawFunction;
+      }
+    }
+    throw new Error(`wasm bridge is missing export ${name}`);
+  };
+  const ackEdit = lookup("cb_ack_edit");
+
+  return {
+    memory: raw.memory,
+    cb_protocol_version: lookup("cb_protocol_version"),
+    cb_init: lookup("cb_init"),
+    cb_tick: lookup("cb_tick"),
+    cb_on_snapshot: lookup("cb_on_snapshot"),
+    cb_local_edit: lookup("cb_local_edit"),
+    cb_ack_edit: (seq: number, accepted: boolean) => ackEdit(seq, accepted ? 1 : 0),
+    cb_dirty_chunks: lookup("cb_dirty_chunks"),
+    cb_mesh_chunk: lookup("cb_mesh_chunk"),
+    cb_release_mesh: lookup("cb_release_mesh"),
+    cb_render_desc: lookup("cb_render_desc"),
+    cb_set_quality: lookup("cb_set_quality"),
+    cb_state_hash: lookup("cb_state_hash"),
+    cb_mem_alloc: lookup("cb_mem_alloc"),
+  };
+}
+
 /**
  * The wasm-bindgen exports. Kept structural so tests can pass a fake module;
  * the generated glue satisfies it.
@@ -141,24 +222,25 @@ export class ClientWasm {
    * `cb_init` rather than starting a subtly different game.
    */
   init(seed: number, tuning: Uint8Array | null = null, mode = 0): void {
-    let tuningPtr = 0;
-    let tuningLen = 0;
     if (tuning !== null && tuning.byteLength > 0) {
-      tuningPtr = this.alloc(tuning.byteLength);
-      new Uint8Array(this.wasm.memory.buffer, tuningPtr, tuning.byteLength).set(tuning);
-      tuningLen = tuning.byteLength;
+      // Before cb_init there is no bridge and no arena to copy into. The
+      // embedded table is the only tuning the raw loader can use today; a
+      // caller that really needs an override has to stage it through a future
+      // pre-init allocation export.
+      throw new Error("tuning overrides are not supported by the raw loader; pass null");
     }
 
-    // One input frame lives in wasm memory for the whole session. Allocating it
-    // once is what lets tick() avoid an alloc-and-rebuild on every frame.
-    this.inputPtr = this.alloc(INPUT_BYTES);
-    this.inputView = new Uint8Array(this.wasm.memory.buffer, this.inputPtr, INPUT_BYTES);
-
-    const ok = this.wasm.cb_init(seed >>> 0, tuningPtr, tuningLen, mode) >>> 0;
+    const ok = this.wasm.cb_init(seed >>> 0, 0, 0, mode) >>> 0;
     if (ok !== OK) {
       throw new Error("cb_init failed: tuning mismatch or invalid mode");
     }
     this.initialised = true;
+
+    // One input frame lives in wasm memory for the whole session. Allocating it
+    // once is what lets tick() avoid an alloc-and-rebuild on every frame. The
+    // arena exists only after cb_init, which is why this comes second.
+    this.inputPtr = this.alloc(INPUT_BYTES);
+    this.inputView = new Uint8Array(this.wasm.memory.buffer, this.inputPtr, INPUT_BYTES);
     this.tickIndex = 0;
     this.rebuildViews();
   }
@@ -287,10 +369,16 @@ export class ClientWasm {
     const written = this.wasm.cb_mesh_chunk(cx, cz, ptr, capacity) >>> 0;
     if (written === 0) {
       this.wasm.cb_release_mesh(0);
+      this.rebuildViews();
       return null;
     }
     const copy = new Uint8Array(this.wasm.memory.buffer, ptr, written).slice();
     this.wasm.cb_release_mesh(0);
+    // Meshing builds a column and a mesh Vec on the Rust heap. That is an
+    // allocation path outside cb_mem_alloc, and it can grow wasm memory just
+    // the same, detaching every view. The copy is already out, so rebuilding
+    // here is safe and keeps the next frame's dev assert honest.
+    this.rebuildViews();
     return copy;
   }
 
@@ -317,6 +405,31 @@ export class ClientWasm {
   /** FNV hash of the local state, for desync reports. */
   stateHash(): number {
     return this.wasm.cb_state_hash() >>> 0;
+  }
+
+  /** True when every cached view still points at live memory. */
+  viewsAlive(): boolean {
+    if (this.views === null) {
+      return false;
+    }
+    return Object.values(this.views).every((view) => view.buffer.byteLength > 0);
+  }
+
+  /** Bytes currently reserved by the wasm memory, including the arena. */
+  memoryBytes(): number {
+    return this.wasm.memory.buffer.byteLength;
+  }
+
+  /**
+   * Grow wasm memory (in pages) and rebuild every view.
+   *
+   * The test hook uses this to reproduce the detach trap deliberately; the
+   * rebuild is the same call every `cb_mem_alloc` makes.
+   */
+  growMemory(pages: number): { previousPages: number; bytes: number } {
+    const previousPages = this.wasm.memory.grow(pages);
+    this.rebuildViews();
+    return { previousPages, bytes: this.memoryBytes() };
   }
 
   /** Reserve wasm staging space. Rebuilds views because memory may have grown. */

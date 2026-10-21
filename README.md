@@ -14,10 +14,10 @@ the match ends when a team's core is destroyed.
 > player bodies (P-01), the per-client snapshot encoder (T-021), the block edit
 > pipeline (T-022), the airdrop economy (T-025), the headless match loop (P-02),
 > the bots that play it (T-023), the whole-match invariant harness (T-024), the
-> wasm boundary with its render buffer (T-030) and the three.js renderer with
-> its quality tiers and adaptive resolution (T-031). The chunk manager and the
-> rest of the client follow. See [`docs/PLAN.md`](docs/PLAN.md) for the full
-> 60-task backlog.
+> wasm boundary with its render buffer (T-030), the three.js renderer with its
+> quality tiers and adaptive resolution (T-031) and chunk streaming with real
+> wasm meshing (T-032). The entity renderer and the offline match loop follow.
+> See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
 
@@ -105,9 +105,10 @@ crates/
   host-worker/  Cloudflare Durable Object host         (M4)
   host-axum/    tokio/axum host                        (M4)
 apps/
-  web/src/main.ts          boot benchmark, tier selection, rAF loop (M2)
-  web/src/render/          three.js renderer, adaptive scale, tiers (M2)
-  web/src/wasm/loader.ts   typed views over the render buffer (M2)
+  web/src/main.ts          boot benchmark, wasm init, chunk loop (M2)
+  web/src/render/          renderer, adaptive scale, tiers, chunks (M2)
+  web/src/wasm/loader.ts   raw wasm loader and render views (M2)
+  web/scripts/             wasm bridge build step (M2)
   web/tests/               Playwright specs for the browser contract (M2)
 data/
   tuning.ron    every designer-facing number, single source of truth
@@ -134,13 +135,13 @@ tests use the second without a runtime.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 451 Rust tests
+cargo test --workspace --all-targets              # 454 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 7 Playwright specs
+cd apps/web && npm ci && npm run test:e2e          # 13 Playwright specs
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -194,6 +195,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-024 | whole-match harness: eight invariants per tick, reconnect, three-match leak probe | done |
 | T-030 | wasm boundary: 13 exports, byte-stable render buffer, zero-allocation tick | done |
 | T-031 | three.js WebGL2 bootstrap, exact quality tiers, adaptive resolution, boot benchmark | done |
+| T-032 | chunk streaming: 6/7 hysteresis, neighbour meshing, 88 draw calls, 34 KB leak | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -344,10 +346,9 @@ recorded here rather than quietly skipped:
   `crate-type = ["cdylib", "rlib"]`, creates only the wasm loader, and leaves
   the rest of the app to T-031. Raw wasm export names carry wasm-bindgen's hash
   suffix, so `tools/wasm-exports.mjs` checks the 13 base names and CI runs it.
-  The wasm-bindgen CLI that turns those exports into JS glue could not be built
-  on the pinned 1.87 toolchain; the loader is type-checked with `tsc` and tested
-  against the interface shape instead, and the glue step remains a deploy-time
-  check.
+  The wasm-bindgen CLI is not part of the build: the raw loader instantiates the
+  module directly and stubs its four unused imports. A future export that takes
+  a string or an object would need the glue back; none does today.
 - **T-031 had to build the web scaffold the plan assumed.** T-001's file list
   includes `apps/web/package.json`, but this repo never created it. T-031 adds
   the package manifest, tsconfig, `index.html`, Playwright config and specs,
@@ -356,6 +357,19 @@ recorded here rather than quietly skipped:
   npm build plus Chromium Playwright run instead of a no-op. The T-031 file list
   names three source files; everything else is the minimum needed to execute
   the specs.
+- **T-032's file list omitted the meshing bridge and its build pipeline.** The
+  task names `chunkManager.ts`, but `cb_mesh_chunk` was a T-030 stub returning
+  zero, and the app had no way to build or load the wasm. T-032 adds the
+  worldgen and mesher path in `client-wasm`, a raw wasm loader, a build script
+  that copies the release artifact into `apps/web/src/wasm`, and the streaming
+  specs. The wasm file itself is generated and ignored; the web CI job installs
+  Rust, the wasm target and Node, then runs `npm run build` before Playwright.
+- **The raw loader does not accept a tuning override yet.** `cb_init` still
+  validates the tuning blob when one is supplied, but before init there is no
+  bridge and no arena to copy the blob into, so the JS loader passes 0/0 and
+  uses the embedded table. The app ships the same `data/tuning.ron`, so this is
+  not a behavioural gap today; a pre-init allocation export is the clean fix if
+  overrides become a feature.
 - **`window.__cbTest` ships in the production bundle.** The synthetic
   frame-time injector has to reach the same adaptive code the player runs, so
   gating it to a dev build would test a different path. It only calls renderer
@@ -1132,17 +1146,19 @@ is what lets the loader size every view from one `cb_render_desc()` pointer.
 wrapper calls `cb_mem_alloc` and then `rebuildViews()` unconditionally, because
 a grow detaches every cached `ArrayBuffer`. In dev builds every frame checks
 that each view still has a non-zero buffer and that the magic is present; the
-error names `memory.grow`, the actual cause. The loader was exercised under Node
-with a fake wasm that grows memory, detaches the views, and services a mesh
-handoff; the handoff copies out with `.slice()` before releasing the
-generation.
+error names `memory.grow`, the actual cause.
 
-Until the chunk pipeline lands, `cb_tick` steps one local body against a flat
-floor. That is enough to prove wire input decoding, the 50 ms accumulator (at
-most four catch-up steps per frame) and the render write without pretending to
-be a second match loop. `cb_mesh_chunk` returns zero and `cb_on_snapshot`
-records the payload size for the 4 KB boundary check; T-032 and T-043 fill those
-payloads into the header that is already pinned.
+The browser does not load wasm-bindgen glue. All 13 exports take and return
+numbers, so `loadClientWasm` compiles the raw `.wasm`, stubs the four internal
+imports (`describe`, a throw shim, two externref-table hooks), and maps the
+hash-suffixed export names back to the contract. The wasm artifact is the single
+source of truth; `tools/wasm-exports.mjs` checks the 13 base names in CI.
+
+`cb_tick` still steps one local body against a flat floor. That is enough to
+prove wire input decoding, the 50 ms accumulator (at most four catch-up steps
+per frame) and the render write without pretending to be a second match loop.
+T-032 fills `cb_mesh_chunk` with real neighbour-aware terrain; `cb_on_snapshot`
+records the payload size for the 4 KB boundary check until T-043 decodes it.
 
 ## The renderer: a budget that moves, a ceiling that does not
 
@@ -1189,8 +1205,45 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The production bundle is 530.8 KB raw and 132.5 KB
-gzipped, under §8.10's 450 KB gzip JS target.
+device deterministically. The JS bundle is 539.3 KB raw and 135.5 KB gzipped,
+under §8.10's 450 KB gzip target; the wasm asset is measured in the chunk
+section below.
+
+## Chunks: one mesh per column, a ring that lags
+
+T-032 streams the 16 x 16 column map around the camera. The policy is a
+Chebyshev radius 6 to load and 7 to keep: a loaded column survives until it is
+eight away, so walking back and forth across a boundary does not re-mesh the
+same terrain. Loading is one column per client frame; tests ask for a larger
+budget when they want a steady state without waiting.
+
+| Check | Measured |
+| --- | --- |
+| Loaded at the map centre, radius 6 | 169 columns |
+| Draw calls at the map centre | 88 (gate 120) |
+| Triangles | 104,862 (gate 350k) |
+| 200 load/unload cycles | 34 KB heap growth after GC (gate 5 MB) |
+| 64 MB `memory.grow` | views rebuilt, geometry unchanged, new meshes still work |
+| wasm asset | 321.7 KB raw, 105.9 KB gzipped (target 700 KB) |
+
+The mesher is neighbour-aware: each column is meshed with the four columns
+around it, so interior chunk borders do not draw walls. The payload is an
+8-byte header, 12-byte vertices and `u32` indices. The header exists because the
+mesher chooses the AO-safe diagonal per quad; rebuilding indices from vertex
+order in JS would lose that choice.
+
+Ownership is explicit twice. `cb_mesh_chunk` writes into staging memory, the
+loader copies with `.slice()`, and only then releases. And because the Rust
+meshing allocations can grow wasm memory on their own, the loader rebuilds its
+views after the handoff, not only after `cb_mem_alloc`. A test caught this: the
+first frame meshed, the heap grew, the desc view detached, and the loop stopped.
+The extra rebuild is the fix, and it is why the grow spec passes now.
+
+The chunk manager itself has no wasm dependency; it talks to a `MeshSource`.
+The page uses the real bridge. The streaming unit tests use a fake source: one
+runs the default 6/7 policy and checks a kept column at distance 7 and an
+unloaded one at distance 8, the other runs 2/3 and asserts the whole set,
+including the ring.
 
 ## Content discrepancies, resolved rather than guessed
 

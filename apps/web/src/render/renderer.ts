@@ -37,6 +37,8 @@ export interface RendererInfo {
   readonly fogNear: number;
   readonly fogFar: number;
   readonly cameraFar: number;
+  readonly drawCalls: number;
+  readonly triangles: number;
 }
 
 export interface RendererOptions {
@@ -235,6 +237,8 @@ export class GameRenderer {
       fogNear: fog instanceof THREE.Fog ? fog.near : 0,
       fogFar: fog instanceof THREE.Fog ? fog.far : 0,
       cameraFar: this.camera.far,
+      drawCalls: this.renderer.info.render.calls,
+      triangles: this.renderer.info.render.triangles,
     };
   }
 
