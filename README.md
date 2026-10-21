@@ -19,9 +19,9 @@ the match ends when a team's core is destroyed.
 > wasm meshing (T-032), instanced entities with GPU-lifetime particles
 > (T-033), the block interaction raycast with its previews (T-034), desktop
 > input with pointer lock (T-035), touch input with explicit modes (T-036), the
-> HUD with its 10 Hz store (T-037), the recipe book with Rust near-miss (T-038)
-> and the lobby/settings shell (T-039). Client networking and the offline
-> match loop follow.
+> HUD with its 10 Hz store (T-037), the recipe book with Rust near-miss (T-038),
+> the lobby/settings shell (T-039) and the WebSocket net client with reconnect
+> and RTT (T-040). Client prediction and the offline match loop follow.
 > See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
@@ -112,7 +112,7 @@ crates/
 apps/
   web/src/main.ts          boot benchmark, wasm init, chunk loop (M2)
   web/src/render/          renderer, tiers, chunks, entities, particles (M2)
-  web/src/game/            interaction, desktop and touch input (M2)
+  web/src/game/            interaction, input, and net transport/client (M2)
   web/src/ui/              store, HUD, recipe book, screens, settings (M2)
   web/src/wasm/loader.ts   raw wasm loader and render views (M2)
   web/scripts/             wasm bridge build step (M2)
@@ -148,7 +148,7 @@ cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 41 specs, 1 headed (pointer lock)
+cd apps/web && npm ci && npm run test:e2e          # 48 specs, 1 headed (pointer lock)
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -210,6 +210,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-037 | HUD core: 10 Hz store, transform-only bars, textContent, 5-node feed, measured cost | done |
 | T-038 | recipe book from the wasm table, locked tiers, Rust near-miss, ghost overlay | done |
 | T-039 | shell: Boot/Main/Lobby/Match/Results, room-code validation, persisted settings and remap | done |
+| T-040 | net client: five control frames, reconnect backoff, session token, 1 Hz RTT, fatal screen | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -441,10 +442,11 @@ recorded here rather than quietly skipped:
   files; the panel needs layout styles, so `recipeBook.css` is added. The
   prediction and the ghost are not yet wired to pad state; their APIs are
   exercised by the page specs and T-042/T-048 will feed them.
-- **The lobby is local until T-040.** The room code, copy button and join
-  validation are real and tested; Start enters the demo match because there is
-  no WebSocket client yet. The screen manager is the part T-040 plugs into, not
-  a second networking layer.
+- **The lobby is local until T-045.** The room code, copy button and join
+  validation are real and tested; T-040 supplies the WebSocket client, but
+  there is no authoritative host to connect to yet, so Start enters the demo
+  match. The screen manager is the part the client plugs into, not a second
+  networking layer.
 - **The UI scale applies to menu panels, not the in-match touch controls.** A
   0.8 zoom on a 44 px target would make it 35 px, which contradicts T-036's
   target gate. Menus scale through `--cb-ui-scale`; the in-match controls keep
@@ -457,6 +459,19 @@ recorded here rather than quietly skipped:
   each get one keyboard code; modifier combinations would need an array or a
   chord type. The JSON format is versioned by its own key, so a later chord
   model can migrate without guessing.
+- **T-040 duplicates five control layouts in TypeScript.** The alternative was a
+  wasm codec export for the same handful of frames. The plan's file list for
+  T-040 is TypeScript, and the control messages are fixed data with no rules;
+  the byte-vector test pins the duplication so it cannot drift silently.
+  Snapshots and chunk diffs stay out of this codec.
+- **The net client is not in the lobby path yet.** It has a transport, codec,
+  retry policy, token and RTT, but no host to connect to until T-045. The
+  lobby's Start remains local and the client is tested with a fake transport;
+  wiring it is the first part of the host milestone, not a second client.
+- **Reconnect attempts reset on a successful open.** The six-attempt ceiling is
+  for six consecutive failed connections, not six for the session; an unstable
+  link that opens and closes would otherwise be permanently dead. The token is
+  in sessionStorage, so a tab reload keeps the reconnect identity.
 - **`window.__cbTest` ships in the production bundle.** The synthetic
   frame-time injector has to reach the same adaptive code the player runs, so
   gating it to a dev build would test a different path. It only calls renderer
@@ -1293,7 +1308,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 598.6 KB raw and 152.8 KB gzipped,
+device deterministically. The JS bundle is 601.5 KB raw and 153.8 KB gzipped,
 under §8.10's 450 KB gzip target; the wasm asset is measured in the chunk
 section below.
 
@@ -1420,7 +1435,7 @@ advance by the same amount over 300 ms.
 
 Pointer lock is the one part of the contract the headless browser refuses. That
 spec is a separate Playwright project with `headless: false`; CI installs Xvfb
-and runs the suite under a virtual display. The other 40 specs stay headless,
+and runs the suite under a virtual display. The other 47 specs stay headless,
 and a local full run opens a window for the one headed test.
 
 Sensitivity defaults to 0.25 yaw units per pixel; the plan does not pin it. LMB
@@ -1550,8 +1565,9 @@ so Results is reachable without waiting for a core.
 
 The lobby generates a six-character code from an unambiguous alphabet, shows a
 copy button, and validates a joined code against `[A-Z0-9]{6}` before doing
-anything else. Networking is T-040; Start currently enters the local demo match,
-which is the only part of the lobby that is a placeholder.
+anything else. The net client is T-040; the host is T-045. Start currently
+enters the local demo match, which is the only part of the lobby that is a
+placeholder.
 
 Settings persist quality, sensitivity, invert-Y, UI scale (80-150%), reduced
 motion and a key map for ten actions. The remap buttons capture one key on the
@@ -1567,6 +1583,37 @@ use it and visits every screen through the buttons.
 
 The match screen is still the demo simulation: Results is reached by the leave
 button, not by a core falling, because the host and offline match arrive later.
+
+## Net client: five control frames, six retries
+
+The client speaks the §7.1/§7.2 controls it needs before prediction: `C_HELLO`,
+`C_PING`, `S_WELCOME`, `S_ERROR` and `S_PONG`. The TypeScript codec is pinned to
+byte vectors produced by the Rust protocol encoder; the test fails if either
+side changes a field. Every other server tag stays opaque for T-043.
+
+| Rule | Implementation | Test |
+| --- | --- | --- |
+| One message per frame | `WsTransport.send` issues one `WebSocket.send` | a fake socket sees two calls for two messages |
+| Reconnect | 500 ms doubling to 8 s, ±20%, six attempts | `[500,1000,2000,4000,8000,8000]`, then null |
+| Token | 16-byte welcome token as hex in sessionStorage | the second Hello carries `00..0f` |
+| Protocol mismatch | fatal screen, no retry | fatal message contains "out of date"; zero timers |
+| RTT | `C_PING` every 1 s, `S_PONG` echoes `t` | an injected 40 ms clock reads 40 ms |
+| Source vectors | Rust protocol encoder | Hello, Ping, Welcome, Error and Pong are byte-identical |
+
+The fatal path calls the same `showFatalScreen` that the page spec drives. It is
+a blocking `CONNECTION PROBLEM` screen above the shell with a reload button, not
+a silent disconnect. The RTT readout is a small `PING 42 ms` overlay; both are
+plain `textContent`.
+
+The lobby does not connect yet. T-045 provides the authoritative host and T-041
+the prediction/reconciliation that consumes snapshots; until then Start stays
+local and the `NetClient` is exercised by a fake transport and the page overlay
+test. That boundary is deliberate: the client can be trusted with control frames
+and reconnect policy before it is trusted with the match.
+
+The codec is data, not rules. It does not decide whether a message is valid,
+only whether five fixed layouts decode. Snapshot and chunk decoding remain in
+Rust or T-043's decoder.
 
 ## Content discrepancies, resolved rather than guessed
 

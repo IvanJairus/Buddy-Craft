@@ -32,6 +32,7 @@ import {
   type InputAction,
 } from "./game/inputDesktop";
 import { TouchInput, type TouchState } from "./game/inputTouch";
+import { errorMessage, showFatalScreen, showRttOverlay } from "./game/net/client";
 import { Hud, type HudStats } from "./ui/hud";
 import { RecipeBookUi, type RecipeBookInfo } from "./ui/recipeBook";
 import { LobbyScreen } from "./ui/lobby";
@@ -118,6 +119,8 @@ interface TestApi {
   ghostHide(): GhostInfo;
   screen(): ScreenId;
   showScreen(id: ScreenId): void;
+  netFatal(code: number, detail?: string): string;
+  netRtt(ms: number): void;
 }
 
 declare global {
@@ -448,6 +451,14 @@ async function boot(): Promise<void> {
     },
     screen: () => screens?.current() ?? "match",
     showScreen: (id) => screens?.show(id),
+    netFatal: (code, detail = "") => {
+      const message = errorMessage(code, detail);
+      showFatalScreen(message);
+      return message;
+    },
+    netRtt: (ms) => {
+      showRttOverlay(ms);
+    },
   };
   window.__cbReady = true;
 
