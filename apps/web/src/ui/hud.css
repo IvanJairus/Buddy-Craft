@@ -1,0 +1,169 @@
+.hud {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+  color: #f2f6fa;
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+.hud-top {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: calc(env(safe-area-inset-top, 0px) + 12px) calc(env(safe-area-inset-right, 0px) + 16px)
+    12px calc(env(safe-area-inset-left, 0px) + 16px);
+}
+
+.hud-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.hud-stack-center {
+  align-items: center;
+}
+
+.hud-panel {
+  box-sizing: border-box;
+  min-width: 132px;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 9px;
+  background: rgba(6, 10, 16, 0.62);
+  contain: layout paint;
+}
+
+.hud-label {
+  color: #b7c5d4;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.hud-value {
+  margin-top: 1px;
+  font-size: 15px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-bar {
+  width: 140px;
+  height: 7px;
+  margin-top: 6px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.hud-bar-fill {
+  width: 100%;
+  height: 100%;
+  transform-origin: left center;
+  transform: scaleX(1);
+  background: #63c98a;
+  will-change: transform;
+}
+
+.hud-bar-fill.enemy {
+  background: #e0705a;
+}
+
+.hud-clock {
+  text-align: center;
+}
+
+.hud-timer {
+  font-size: 22px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.hud-sub {
+  margin-top: 2px;
+  color: #b7c5d4;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.hud-cores .hud-label + .hud-bar {
+  margin-bottom: 6px;
+}
+
+.hud-cores .hud-bar:last-child {
+  margin-bottom: 0;
+}
+
+.hud-feed {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 170px);
+  right: calc(env(safe-area-inset-right, 0px) + 16px);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+  max-width: 270px;
+}
+
+.hud-toast {
+  padding: 5px 8px;
+  border-left: 3px solid #6cc0ff;
+  border-radius: 4px;
+  background: rgba(6, 10, 16, 0.72);
+  font-size: 11px;
+  line-height: 1.35;
+  animation: hud-toast 2.6s ease-out forwards;
+}
+
+@keyframes hud-toast {
+  0% {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  10% {
+    opacity: 1;
+    transform: none;
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (max-width: 620px) {
+  .hud-panel {
+    min-width: 112px;
+    padding: 6px 8px;
+  }
+
+  .hud-bar {
+    width: 108px;
+  }
+
+  .hud-timer {
+    font-size: 18px;
+  }
+
+  .hud-feed {
+    top: auto;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 96px);
+    max-width: 190px;
+  }
+}

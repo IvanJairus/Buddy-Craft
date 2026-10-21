@@ -18,8 +18,9 @@ the match ends when a team's core is destroyed.
 > quality tiers and adaptive resolution (T-031) and chunk streaming with real
 > wasm meshing (T-032), instanced entities with GPU-lifetime particles
 > (T-033), the block interaction raycast with its previews (T-034), desktop
-> input with pointer lock (T-035) and touch input with explicit modes (T-036).
-> The HUD and the offline match loop follow.
+> input with pointer lock (T-035), touch input with explicit modes (T-036) and
+> the HUD with its 10 Hz store (T-037). The recipe book and the offline match
+> loop follow.
 > See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
@@ -111,6 +112,7 @@ apps/
   web/src/main.ts          boot benchmark, wasm init, chunk loop (M2)
   web/src/render/          renderer, tiers, chunks, entities, particles (M2)
   web/src/game/            interaction, desktop and touch input (M2)
+  web/src/ui/              reactive store and match HUD (M2)
   web/src/wasm/loader.ts   raw wasm loader and render views (M2)
   web/scripts/             wasm bridge build step (M2)
   web/tests/               Playwright specs for the browser contract (M2)
@@ -145,7 +147,7 @@ cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 33 specs, 1 headed (pointer lock)
+cd apps/web && npm ci && npm run test:e2e          # 36 specs, 1 headed (pointer lock)
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -204,6 +206,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-034 | DDA voxel raycast, 6 m reach, wireframe highlight, ghost preview, pending edits | done |
 | T-035 | desktop input: 4-byte frame, pointer lock, hotbar, blur release, persisted settings | done |
 | T-036 | touch input: stick/look multi-touch, mode taps, 6/s deposit hold, stance, 44 px controls | done |
+| T-037 | HUD core: 10 Hz store, transform-only bars, textContent, 5-node feed, measured cost | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -406,6 +409,18 @@ recorded here rather than quietly skipped:
   because T-037's HUD is later, and `main.ts` gained the touch/desktop switch
   and the touch-to-interaction callbacks. The stance is local until the network
   layer can apply it to every buddy.
+- **T-037 uses a 100 ms timer, not a frame callback.** §8.7 describes the store
+  batching writes into a `requestAnimationFrame`; the acceptance criterion
+  names a 100 ms sample for 20 Hz values and a hard 10 per second ceiling. A
+  frame callback at 60 Hz is a second throttle around the same work, so the
+  timer is the simpler exact bound. The initial paint is excluded from the 1 ms
+  measurement for the reason given in the section above; boot has its own
+  budget.
+- **The HUD is fed demo values until the match stream exists.** HP, crates and
+  core bars initialize to their documented starting values; the clock and drop
+  countdown are local; stance is wired to both input paths. This is the store's
+  contract, not a hidden match implementation, and the test hooks drive the
+  same store a network loop will.
 - **`window.__cbTest` ships in the production bundle.** The synthetic
   frame-time injector has to reach the same adaptive code the player runs, so
   gating it to a dev build would test a different path. It only calls renderer
@@ -1241,7 +1256,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 575.4 KB raw and 145.8 KB gzipped,
+device deterministically. The JS bundle is 580.3 KB raw and 147.4 KB gzipped,
 under §8.10's 450 KB gzip target; the wasm asset is measured in the chunk
 section below.
 
@@ -1368,7 +1383,7 @@ advance by the same amount over 300 ms.
 
 Pointer lock is the one part of the contract the headless browser refuses. That
 spec is a separate Playwright project with `headless: false`; CI installs Xvfb
-and runs the suite under a virtual display. The other 32 specs stay headless,
+and runs the suite under a virtual display. The other 35 specs stay headless,
 and a local full run opens a window for the one headed test.
 
 Sensitivity defaults to 0.25 yaw units per pixel; the plan does not pin it. LMB
@@ -1409,6 +1424,38 @@ refuses them.
 The touch surface lives in `inputTouch.ts` because T-037's HUD does not exist
 yet. It creates its own style element and uses only `textContent`; every control
 has an aria-label and the required 44 px minimum.
+
+## HUD: a sampler, not a render loop
+
+The HUD is eight components behind one store. Writes mark a dirty flag; a
+100 ms interval flushes the latest snapshot to subscribers; the interval stops
+when a flush finds nothing new. A value that changes at 20 Hz is written nine
+times in a second in the test, never eleven.
+
+| Rule | Enforcement | Measured |
+| --- | --- | --- |
+| 10 Hz numeric writes | 100 ms store interval | 9 mutations per field over 1 s of 20 Hz updates |
+| Bars use transform only | fill width is CSS; the script writes `scaleX` | inline style is only `transform: scaleX(...)`, no width |
+| Text goes through `textContent` | typed node writes; CI grep on `src/ui` | an image tag in a toast renders as text and creates no element |
+| HUD cost ≤ 1 ms | `performance.measure("hud")` around each flush | max 0.2 ms over 60 flushes, last 0.1 ms |
+| Event feed ≤ 5 | append, evict oldest | six toasts leave five |
+
+The eight components are health, crates, match clock, next drop, stance,
+buddies, your core and the enemy core; the event feed is the separate append-only
+part. The initial paint is a boot cost and is deliberately outside the frame
+measurement, because charging first layout to a per-frame budget would make the
+number meaningless. CSS containment on the panels keeps a text change from
+invalidating the whole screen.
+
+The app's values are demo numbers until the match stream lands: the clock and
+drop countdown are local, HP and crates start at their full and empty values,
+and the stance is wired to F and the touch button. The store is the seam that
+T-045 and T-048 will feed.
+
+Plan §8.7 says the store batches DOM writes into a `requestAnimationFrame`; the
+acceptance criterion says a 20 Hz value is sampled on a 100 ms timer. The timer
+wins: a 60 Hz frame callback would need a second throttle anyway, and 100 ms is
+the exact bound the criterion names.
 
 ## Content discrepancies, resolved rather than guessed
 

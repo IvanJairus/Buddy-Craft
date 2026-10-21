@@ -28,6 +28,8 @@ import { ParticleSystem, type ParticleInfo } from "./render/particles";
 import { Interaction, type PendingEdit, type RayHit, type VisualState } from "./game/interaction";
 import { DesktopInput, type InputAction } from "./game/inputDesktop";
 import { TouchInput, type TouchState } from "./game/inputTouch";
+import { Hud, type HudStats } from "./ui/hud";
+import { Store, initialHudState, type HudState, type HudStance } from "./ui/store";
 import { GameRenderer } from "./render/renderer";
 import type { RendererInfo } from "./render/renderer";
 import {
@@ -84,6 +86,10 @@ interface TestApi {
   setSensitivity(value: number): void;
   setInvertY(value: boolean): void;
   touch(): TouchState | null;
+  hudUpdate(patch: Partial<HudState>): void;
+  hudState(): HudState;
+  hudStats(): HudStats;
+  hudToast(text: string): void;
 }
 
 declare global {
@@ -113,6 +119,7 @@ let interaction: Interaction | null = null;
 let desktop: DesktopInput | null = null;
 let touch: TouchInput | null = null;
 let tickCalls = 0;
+const stanceOrder: HudStance[] = ["follow", "hold", "assault"];
 
 async function boot(): Promise<void> {
   if (tier === null) {
@@ -147,10 +154,24 @@ async function boot(): Promise<void> {
     });
   }
 
+  const hudStore = new Store<HudState>(initialHudState());
+  const hud = new Hud(document.body, hudStore);
+  let stanceIndex = 0;
+  const advanceStance = (): HudStance => {
+    stanceIndex = (stanceIndex + 1) % stanceOrder.length;
+    const next = stanceOrder[stanceIndex];
+    hudStore.set({ stance: next });
+    return next;
+  };
+
   const touchMode =
     query.get("touch") === "1" || window.matchMedia("(pointer: coarse)").matches;
   if (touchMode) {
     touch = new TouchInput();
+    touch.onStance = (stance) => {
+      stanceIndex = stanceOrder.indexOf(stance);
+      hudStore.set({ stance });
+    };
     if (interaction !== null) {
       touch.onBreak = () => {
         interaction?.breakBlock();
@@ -161,6 +182,11 @@ async function boot(): Promise<void> {
     }
   } else {
     desktop = new DesktopInput({ canvas });
+    desktop.onAction((action) => {
+      if (action === "stance") {
+        advanceStance();
+      }
+    });
   }
   window.__cbTest = {
     info: () => renderer.info(),
@@ -313,6 +339,10 @@ async function boot(): Promise<void> {
     setSensitivity: (value) => desktop?.setSensitivity(value),
     setInvertY: (value) => desktop?.setInvertY(value),
     touch: () => touch?.state() ?? null,
+    hudUpdate: (patch) => hudStore.set(patch),
+    hudState: () => ({ ...hudStore.get() }),
+    hudStats: () => hud.stats(),
+    hudToast: (text) => hud.toast(text),
   };
   window.__cbReady = true;
 
@@ -327,6 +357,13 @@ async function boot(): Promise<void> {
       client.tick(16, frame);
       tickCalls += 1;
     }
+    const seconds = Math.floor(now / 1000);
+    const cycle = seconds % 20;
+    hudStore.set({
+      matchSeconds: seconds,
+      // Demo countdown until the airdrop stream is wired in T-045/T-048.
+      dropSeconds: cycle <= 10 ? 10 - cycle : 20 - cycle,
+    });
     if (interaction !== null) {
       if (desktop !== null && desktop.pointerLock) {
         interaction.aimFromCamera(renderer.camera);

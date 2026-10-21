@@ -189,6 +189,14 @@ jobs:
           cache-dependency-path: apps/web/package-lock.json
       - run: npm ci
       - run: npm run build
+      # T-037: the HUD is the XSS boundary for player-supplied names and chat.
+      # No HTML-string API is allowed under src/ui; text goes through textContent.
+      - name: UI text uses textContent only
+        run: |
+          if grep -R "innerHTML" src/ui; then
+            echo "Forbidden HTML-string API under src/ui"
+            exit 1
+          fi
       # T-031's specs need a real WebGL2 context. Chromium's headless build
       # provides one through SwiftShader; that is relative performance, not a
       # phone (see the §8.10 caveat), but it is enough for the DPR and
