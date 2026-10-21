@@ -34,6 +34,8 @@ import {
 import { TouchInput, type TouchState } from "./game/inputTouch";
 import { errorMessage, showFatalScreen, showRttOverlay } from "./game/net/client";
 import { ChunkSync } from "./game/net/chunkSync";
+import { SnapshotDecoder } from "./game/net/snapshot";
+import { Interpolator } from "./game/interp";
 import { Hud, type HudStats } from "./ui/hud";
 import { RecipeBookUi, type RecipeBookInfo } from "./ui/recipeBook";
 import { LobbyScreen } from "./ui/lobby";
@@ -128,6 +130,10 @@ interface TestApi {
     refreshed: number;
     chunks: ChunkInfo | null;
   };
+  snapshotView(
+    frame: number[],
+    nowMs: number,
+  ): { decoded: number; players: number; buddies: number; entity: EntityInfo | null };
 }
 
 declare global {
@@ -187,6 +193,8 @@ async function boot(): Promise<void> {
     });
   }
   const chunkSync = new ChunkSync();
+  const snapshotDecoder = new SnapshotDecoder();
+  const interpolator = new Interpolator(snapshotDecoder.playerTeam, snapshotDecoder.buddyRole);
   entities = clearScene ? null : new EntityRenderer(renderer.scene);
   particles = clearScene ? null : new ParticleSystem(renderer.scene, 256);
   if (chunks !== null) {
@@ -488,6 +496,27 @@ async function boot(): Promise<void> {
         },
       );
       return { ok, applied: applied.length, refreshed, chunks: chunks?.info() ?? null };
+    },
+    snapshotView: (frame, nowMs) => {
+      const decoded = snapshotDecoder.decode(Uint8Array.from(frame));
+      if (decoded === null) {
+        return {
+          decoded: snapshotDecoder.decoded,
+          players: 0,
+          buddies: 0,
+          entity: null,
+        };
+      }
+      interpolator.push(decoded, nowMs);
+      interpolator.sample(nowMs);
+      const entity =
+        entities?.updateFromInterp(interpolator, renderer.quality.entityAnimation) ?? null;
+      return {
+        decoded: snapshotDecoder.decoded,
+        players: interpolator.playerCount,
+        buddies: interpolator.buddyCount,
+        entity,
+      };
     },
   };
   window.__cbReady = true;

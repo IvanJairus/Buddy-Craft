@@ -72,6 +72,27 @@ export interface EntityInfo {
   lastUpdateMs: number;
 }
 
+/** The pooled output of `Interpolator`, structurally. */
+export interface PooledEntities {
+  playerCount: number;
+  buddyCount: number;
+  readonly playerIds: Uint8Array;
+  readonly playerX: Float32Array;
+  readonly playerY: Float32Array;
+  readonly playerZ: Float32Array;
+  readonly playerYaw: Float32Array;
+  readonly playerFlags: Uint8Array;
+  readonly playerHp: Uint8Array;
+  readonly playerAnim: Float32Array;
+  readonly playerTeam: Uint8Array;
+  readonly buddyIds: Uint8Array;
+  readonly buddyX: Float32Array;
+  readonly buddyY: Float32Array;
+  readonly buddyZ: Float32Array;
+  readonly buddyHp: Uint8Array;
+  readonly buddyRole: Uint8Array;
+}
+
 export function bobOffset(anim: number): number {
   return Math.sin(anim * Math.PI * 2) * BOB_AMPLITUDE;
 }
@@ -215,6 +236,48 @@ export class EntityRenderer {
     }
     for (let i = 0; i < buddyCount; i += 1) {
       copyEntity(buddies[i], this.buddies[i]);
+    }
+    this.apply(playerCount, buddyCount, animate, start);
+    return this.info();
+  }
+
+  /**
+   * Online path: the interpolator's typed-array pools go straight into the
+   * renderer's pools. No per-entity object is created between snapshot decode
+   * and matrix write.
+   */
+  updateFromInterp(source: PooledEntities, animate: boolean): EntityInfo {
+    const start = performance.now();
+    const playerCount = Math.min(source.playerCount, MAX_PLAYERS);
+    const buddyCount = Math.min(source.buddyCount, MAX_BUDDIES);
+    for (let i = 0; i < playerCount; i += 1) {
+      const value = this.players[i];
+      value.id = source.playerIds[i];
+      value.team = source.playerTeam[i];
+      value.flags = source.playerFlags[i];
+      value.x = source.playerX[i];
+      value.y = source.playerY[i];
+      value.z = source.playerZ[i];
+      value.yaw = source.playerYaw[i];
+      value.pitch = 0;
+      value.anim = source.playerAnim[i];
+      value.hp = source.playerHp[i];
+      value.role = 0;
+    }
+    for (let i = 0; i < buddyCount; i += 1) {
+      const value = this.buddies[i];
+      const hp = source.buddyHp[i];
+      value.id = source.buddyIds[i];
+      value.team = 0;
+      value.flags = hp > 0 ? FLAG_ALIVE : 0;
+      value.x = source.buddyX[i];
+      value.y = source.buddyY[i];
+      value.z = source.buddyZ[i];
+      value.yaw = 0;
+      value.pitch = 0;
+      value.anim = 0;
+      value.hp = hp;
+      value.role = source.buddyRole[i];
     }
     this.apply(playerCount, buddyCount, animate, start);
     return this.info();

@@ -357,8 +357,17 @@ impl SnapshotEncoder {
             (events, 0)
         };
 
+        // The client cannot acknowledge a frame it cannot name. The wire
+        // carries this sequence, and the next `C_INPUT` echoes it as the
+        // baseline. Commit the counter only after a successful encode.
+        let seq = if self.seq == u16::MAX {
+            1
+        } else {
+            self.seq + 1
+        };
         let snapshot = Snapshot {
             tick: now,
+            seq,
             baseline_seq: if keyframe { 0 } else { acked_seq },
             keyframe,
             players: wire_players,
@@ -368,15 +377,7 @@ impl SnapshotEncoder {
             events: event_slice.to_vec(),
         };
         let bytes = S2c::Snapshot(snapshot).encode();
-
-        // Hand out the sequence number *after* encoding, so a panic mid-encode
-        // cannot leave a gap the client will wait for.
-        self.seq = if self.seq == u16::MAX {
-            1
-        } else {
-            self.seq + 1
-        };
-        let seq = self.seq;
+        self.seq = seq;
         let players = sent_players.len();
         let buddies = sent_buddies.len();
 
@@ -616,6 +617,7 @@ mod tests {
 
         let snapshot = decode(&encoded);
         assert!(snapshot.keyframe);
+        assert_eq!(snapshot.seq, encoded.seq, "the wire must name the frame");
         assert_eq!(snapshot.baseline_seq, 0);
         for player in &snapshot.players {
             assert_eq!(

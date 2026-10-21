@@ -22,8 +22,9 @@ the match ends when a team's core is destroyed.
 > HUD with its 10 Hz store (T-037), the recipe book with Rust near-miss (T-038),
 > the lobby/settings shell (T-039), the WebSocket net client with reconnect
 > and RTT (T-040), and client prediction with a rollback ring and a smoothed
-> visual residual (T-041), and chunk diff streaming with keyframes and real
-> remeshing (T-042). Snapshot interpolation and the offline match loop follow.
+> visual residual (T-041), chunk diff streaming with keyframes and real
+> remeshing (T-042), and pooled snapshot decode with 100 ms entity interpolation
+> (T-043). The offline match loop and hosts follow.
 > See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
@@ -144,13 +145,13 @@ tests use the second without a runtime.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 469 Rust tests
+cargo test --workspace --all-targets              # 471 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 56 specs, 1 headed (pointer lock)
+cd apps/web && npm ci && npm run test:e2e          # 64 specs, 1 headed (pointer lock)
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -215,6 +216,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-040 | net client: five control frames, reconnect backoff, session token, 1 Hz RTT, fatal screen | done |
 | T-041 | prediction: 128-input rollback ring, 5 cm threshold, 300 ms RTT, clamped exponential residual | done |
 | T-042 | chunk diffs: versioned columns, 1.5 KB splitting, keyframes, real remesh around edits | done |
+| T-043 | snapshots: pooled delta decode, 64-frame baselines, 100 ms interpolation, loss recovery | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -476,9 +478,9 @@ recorded here rather than quietly skipped:
   wiring it is the first part of the host milestone, not a second client.
 - **T-041's predictor is internal to `client-wasm`.** The task lists the two
   files but no export, and T-030's boundary is already at 15. Adding a predictor
-  API before T-043 can feed it a snapshot would freeze the wrong shape. The Rust
-  tests call the predictor directly; T-043 wires it into the tick and render
-  path.
+  API before a host can feed it a snapshot would freeze the wrong shape. The
+  Rust tests call the predictor directly; T-045/T-048 wire it into the tick and
+  render path.
 - **T-042 extended `S_CHUNK_DIFF` with a keyframe.** §6.7 names only sparse
   entries, but the acceptance criterion requires a whole-column replacement.
   The message now has `keyframe: bool` and `runs: Vec<(u8, u32)>`; a sparse
@@ -492,13 +494,29 @@ recorded here rather than quietly skipped:
 - **`cb_on_snapshot` now applies chunk diffs.** No extra export was added: the
   existing server-frame entry point decodes `S_CHUNK_DIFF`, checks the column
   version and mutates the cached column. The loader hands it the bytes after a
-  copy and rebuilds its views. T-043 can route snapshots through the same entry
-  point without changing the ABI.
+  copy and rebuilds its views. Snapshots are decoded in TypeScript because their
+  pooled entity path belongs to the renderer; the wasm entry remains the chunk
+  diff path.
 - **Interaction still reads the height map.** T-042 stores the real edited
   column in wasm and re-meshes the centre plus four neighbours, but the raycast
   has no block-query export. The top surface is exact after a diff; the air
   under a floating crate is not represented. That query is the remaining seam,
   not a second terrain model.
+- **T-043 added `seq` to `S_SNAPSHOT`.** §7.3 lists `tick`, `baseline_seq` and
+  `keyframe` but no sequence for the frame itself. The encoder already had a
+  counter, but the client could not name the snapshot it received, so an
+  acknowledgement could point at a frame it never decoded. The field costs at
+  most two bytes and the worst-case budget still passes.
+- **T-043 decodes in TypeScript, not into the wasm `RenderDesc`.** Remote
+  entities go into pooled typed arrays and then `EntityRenderer`'s instance
+  pools. The wasm buffer remains the local-body path. A wasm decoder would need
+  a hand-written zero-allocation postcard reader and a second copy of the
+  presence rules; the snapshot path has no simulation in it.
+- **The zero-allocation test is structural, not a heap sample.** `snapshot.ts`
+  reuses one reader and 64 preallocated frames, and `interp.ts` only reads those
+  frames and writes fixed output arrays. `no_gc_in_hot_path` pins frame and
+  array identity over 600 decodes; it does not claim to measure V8's young
+  generation.
 - **Reconnect attempts reset on a successful open.** The six-attempt ceiling is
   for six consecutive failed connections, not six for the session; an unstable
   link that opens and closes would otherwise be permanently dead. The token is
@@ -1292,7 +1310,8 @@ source of truth; `tools/wasm-exports.mjs` checks the 15 base names in CI.
 prove wire input decoding, the 50 ms accumulator (at most four catch-up steps
 per frame) and the render write without pretending to be a second match loop.
 T-032 fills `cb_mesh_chunk` with real neighbour-aware terrain; `cb_on_snapshot`
-applies `S_CHUNK_DIFF` and records other frames for T-043.
+applies `S_CHUNK_DIFF`; snapshots are decoded by `snapshot.ts` on the render
+side.
 
 ## The renderer: a budget that moves, a ceiling that does not
 
@@ -1339,7 +1358,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 605.4 KB raw and 153.5 KB gzipped,
+device deterministically. The JS bundle is 612.9 KB raw and 155.7 KB gzipped,
 under §8.10's 450 KB gzip target; the wasm asset is measured in the chunk
 section below.
 
@@ -1358,7 +1377,7 @@ budget when they want a steady state without waiting.
 | Triangles | 104,862 (gate 350k) |
 | 200 load/unload cycles | 34 KB heap growth after GC (gate 5 MB) |
 | 64 MB `memory.grow` | views rebuilt, geometry unchanged, new meshes still work |
-| wasm asset | 415.0 KB raw, 133.5 KB gzipped (target 700 KB) |
+| wasm asset | 415.6 KB raw, 133.5 KB gzipped (target 700 KB) |
 
 The mesher is neighbour-aware: each column is meshed with the four columns
 around it, so interior chunk borders do not draw walls. The payload is a
@@ -1555,7 +1574,7 @@ unlock clock.
 | Near-miss parity | 500 random clusters; every predicted completion matched the matcher |
 | Banner | `SWORD: needs 1 more crate` |
 | Ghost | one `InstancedMesh`, count = recipe cost |
-| wasm asset | 415.0 KB raw, 133.5 KB gzipped |
+| wasm asset | 415.6 KB raw, 133.5 KB gzipped |
 
 `cb_near_miss` runs the Rust canonicaliser over rotations and translations and
 returns `recipe_id << 8 | missing`. Rust maps the missing blocks back into the
@@ -1620,7 +1639,8 @@ button, not by a core falling, because the host and offline match arrive later.
 The client speaks the §7.1/§7.2 controls it needs before prediction: `C_HELLO`,
 `C_PING`, `S_WELCOME`, `S_ERROR` and `S_PONG`. The TypeScript codec is pinned to
 byte vectors produced by the Rust protocol encoder; the test fails if either
-side changes a field. Every other server tag stays opaque for T-043.
+side changes a field. `S_SNAPSHOT` is decoded by `snapshot.ts`, not this control
+codec.
 
 | Rule | Implementation | Test |
 | --- | --- | --- |
@@ -1636,15 +1656,15 @@ a blocking `CONNECTION PROBLEM` screen above the shell with a reload button, not
 a silent disconnect. The RTT readout is a small `PING 42 ms` overlay; both are
 plain `textContent`.
 
-The lobby does not connect yet. T-045 provides the authoritative host and T-043
-feeds decoded snapshots into T-041's predictor; until then Start stays local and
-the `NetClient` is exercised by a fake transport and the page overlay test. That
-boundary is deliberate: the client can be trusted with control frames and
+The lobby does not connect yet. T-045 provides the authoritative host; the
+T-043 decoder and T-041 predictor are ready for it. Until then Start stays local
+and the `NetClient` is exercised by a fake transport and the page overlay test.
+That boundary is deliberate: the client can be trusted with control frames and
 reconnect policy before it is trusted with the match.
 
 The codec is data, not rules. It does not decide whether a message is valid,
-only whether five fixed layouts decode. Snapshot and chunk decoding remain in
-Rust or T-043's decoder.
+only whether five fixed layouts decode. Snapshot and chunk decoding live in the
+net snapshot and chunk-sync modules.
 
 ## Prediction: rollback in Rust, glide in the browser
 
@@ -1680,8 +1700,9 @@ residual; movement and replay remain in Rust, so there is no second physics
 implementation to drift.
 
 Both T-041 files exist, but the bridge still has 15 exports. The predictor stays
-internal until T-043's decoder can feed it a snapshot; exposing a `cb_predict_*`
-API before the snapshot shape exists would freeze the wrong interface.
+internal until a host can feed it a snapshot; T-045/T-048 wire it into the tick
+and render path. Exposing a `cb_predict_*` API before the snapshot shape exists
+would freeze the wrong interface.
 
 ## Chunk diffs: one version per column
 
@@ -1712,6 +1733,43 @@ of column (8, 8), observes the mesh's height rise by one, then applies the next
 version with air and observes the original surface return. The unit specs pin
 the Rust wire vectors, stale-version rejection, nearest-first order and keyframe
 replacement.
+
+## Snapshots: name the frame, keep 64 baselines
+
+T-043 decodes the delta stream without allocating per entity. The wire needed
+one missing field first: the encoder already had a snapshot sequence, but
+`S_SNAPSHOT` did not carry it, so a client could not acknowledge the frame it
+had just decoded. The frame now carries `seq`; the next `C_INPUT` echoes it as
+`acked_seq`.
+
+`SnapshotDecoder` holds 64 preallocated frames. A keyframe starts from zero; a
+delta starts from the frame named by `baseline_seq` and adds the position
+deltas, while yaw, HP, flags and animation are absolute values. Entities absent
+from the new list disappear. If the baseline has been evicted, decode returns
+null and increments `needsKeyframe` instead of inventing a position; the server
+answers with a keyframe when the ack falls out of its own history.
+
+`Interpolator` keeps four frames and renders two ticks (100 ms) in the past. It
+interpolates across a gap instead of snapping, freezes once render time passes
+`newest + 2` ticks, and catches up at 1.35x after a long outage. The
+constant-velocity spec bounds each frame's movement at 0.13 m; a body travelling
+4.5 m/s normally moves 0.075 m per 60 Hz frame. Three lost snapshots freeze and
+recover without a reversal, and the 400 ms outage holds position at the cap.
+
+The output pools go straight into `EntityRenderer.updateFromInterp`. A page spec
+decodes one player, samples it and asserts three draw calls, so the path from
+wire bytes to instance matrices is exercised. Projectiles, structures and events
+are validated and skipped; T-044 owns their presentation.
+
+The zero-allocation claim is structural: the reader is one reused cursor, frames
+and entity arrays are allocated in the constructor, and no decode or sample path
+constructs an array or object. `no_gc_in_hot_path` runs 600 decodes and checks
+that the 64-frame ring reuses the same frame and typed arrays; it is a pool-reuse
+test, not a heap sample.
+
+The wire still has no team or buddy role. The decoder's lookup tables default to
+zero until the lobby supplies them in T-045, and the snapshot stream is not on
+the live net path until that host exists.
 
 ## Content discrepancies, resolved rather than guessed
 

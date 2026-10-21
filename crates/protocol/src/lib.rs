@@ -738,6 +738,9 @@ pub struct SnapshotEvent {
 pub struct Snapshot {
     /// The tick this snapshot describes.
     pub tick: Tick,
+    /// Sequence number of this snapshot. Never 0; the client echoes it in
+    /// `C_INPUT.acked_seq`.
+    pub seq: u16,
     /// The client's last acknowledged snapshot, or 0 for a keyframe.
     pub baseline_seq: u16,
     /// True when every field of every entity is present.
@@ -1341,6 +1344,7 @@ mod tests {
     fn snapshot_worst_case() -> Snapshot {
         Snapshot {
             tick: Tick(56_400),
+            seq: u16::MAX,
             baseline_seq: 65_535,
             keyframe: true,
             players: (0..MAX_PLAYERS as u8)
@@ -1440,6 +1444,105 @@ mod tests {
         assert_eq!(
             keyframe,
             vec![0x87, 0x00, 0x00, 0x02, 0x01, 0x00, 0x02, 0x00, 0xFF, 0xBF, 0x01, 0x13, 0x01]
+        );
+    }
+
+    #[test]
+    fn snapshot_wire_shape() {
+        let keyframe = Snapshot {
+            tick: Tick(5),
+            seq: 1,
+            baseline_seq: 0,
+            keyframe: true,
+            players: vec![SnapshotPlayer {
+                id: 2,
+                presence: presence::ALL,
+                x: 1,
+                y: 0,
+                z: 0,
+                yaw: 64,
+                hp: 100,
+                flags: player_flags::ALIVE,
+                anim: 0,
+            }],
+            buddies: Vec::new(),
+            projectiles: Vec::new(),
+            structures: Vec::new(),
+            events: Vec::new(),
+        };
+        assert_eq!(
+            encode_s2c(&S2c::Snapshot(keyframe)),
+            vec![
+                0x84, 0x05, 0x01, 0x00, 0x01, 0x01, 0x02, 0x1f, 0x02, 0x00, 0x00, 0x40, 0x64, 0x01,
+                0x00, 0x00, 0x00, 0x00, 0x00,
+            ]
+        );
+
+        let delta = Snapshot {
+            tick: Tick(6),
+            seq: 2,
+            baseline_seq: 1,
+            keyframe: false,
+            players: vec![SnapshotPlayer {
+                id: 2,
+                presence: presence::POS,
+                x: 65_536,
+                y: 0,
+                z: 0,
+                ..Default::default()
+            }],
+            buddies: Vec::new(),
+            projectiles: Vec::new(),
+            structures: Vec::new(),
+            events: Vec::new(),
+        };
+        assert_eq!(
+            encode_s2c(&S2c::Snapshot(delta)),
+            vec![
+                0x84, 0x06, 0x02, 0x01, 0x00, 0x01, 0x02, 0x01, 0x80, 0x80, 0x08, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00,
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_extras_wire_shape() {
+        let snapshot = Snapshot {
+            tick: Tick(0),
+            seq: 1,
+            baseline_seq: 0,
+            keyframe: true,
+            players: Vec::new(),
+            buddies: Vec::new(),
+            projectiles: vec![SnapshotProjectile {
+                id: 1,
+                x: 1,
+                y: -1,
+                z: 0,
+                vx: 1,
+                vy: -1,
+                vz: 0,
+            }],
+            structures: vec![SnapshotStructure {
+                id: 1,
+                hp: 50,
+                x: 2,
+                y: 0,
+                z: -2,
+            }],
+            events: vec![SnapshotEvent {
+                kind: 5,
+                a: 1,
+                b: -1,
+                c: 0,
+            }],
+        };
+        assert_eq!(
+            encode_s2c(&S2c::Snapshot(snapshot)),
+            vec![
+                0x84, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x01, 0x02, 0x01, 0x00, 0x01, 0xff,
+                0x00, 0x01, 0x01, 0x32, 0x04, 0x00, 0x03, 0x01, 0x05, 0x02, 0x01, 0x00,
+            ]
         );
     }
 

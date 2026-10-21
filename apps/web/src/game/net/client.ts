@@ -4,7 +4,7 @@
  * The wire codec here covers the control messages this client needs today:
  * `C_HELLO` and `C_PING` out, and `S_WELCOME`, `S_ERROR` and `S_PONG` in.
  * Postcard is a varint format, so the encoder handles exactly those fields and
- * leaves every other server tag opaque for T-043's snapshot decoder.
+ * leaves other server tags opaque; `snapshot.ts` decodes `S_SNAPSHOT`.
  *
  * Reconnect policy is a pure `ReconnectBackoff`: 500 ms doubling to 8 s, ±20%
  * jitter, six attempts. The client resets it on a successful open and stops
