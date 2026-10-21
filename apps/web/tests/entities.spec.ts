@@ -147,7 +147,7 @@ test("the real renderer compiles the entity and particle shaders", async ({ page
     }
   });
 
-  await page.goto("/?quality=high");
+  await page.goto("/?quality=high&screen=match");
   await page.waitForFunction(() => (window as unknown as TestWindow).__cbReady === true, null, {
     timeout: 30_000,
   });

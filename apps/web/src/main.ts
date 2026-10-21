@@ -26,10 +26,23 @@ import {
 } from "./render/entities";
 import { ParticleSystem, type ParticleInfo } from "./render/particles";
 import { Interaction, type PendingEdit, type RayHit, type VisualState } from "./game/interaction";
-import { DesktopInput, type InputAction } from "./game/inputDesktop";
+import {
+  DesktopInput,
+  loadKeyMap,
+  type InputAction,
+} from "./game/inputDesktop";
 import { TouchInput, type TouchState } from "./game/inputTouch";
 import { Hud, type HudStats } from "./ui/hud";
 import { RecipeBookUi, type RecipeBookInfo } from "./ui/recipeBook";
+import { LobbyScreen } from "./ui/lobby";
+import {
+  ScreenManager,
+  buildBoot,
+  buildMainMenu,
+  buildResults,
+  type ScreenId,
+} from "./ui/screens";
+import { SettingsScreen } from "./ui/settings";
 import { Store, initialHudState, type HudState, type HudStance } from "./ui/store";
 import { GhostOverlay, type GhostInfo } from "./render/ghostOverlay";
 import type { RecipeRow } from "./wasm/loader";
@@ -103,6 +116,8 @@ interface TestApi {
   clearNearMiss(): void;
   ghostShow(recipeId: number, origin: [number, number, number]): GhostInfo | null;
   ghostHide(): GhostInfo;
+  screen(): ScreenId;
+  showScreen(id: ScreenId): void;
 }
 
 declare global {
@@ -131,6 +146,7 @@ let particles: ParticleSystem | null = null;
 let interaction: Interaction | null = null;
 let desktop: DesktopInput | null = null;
 let touch: TouchInput | null = null;
+let screens: ScreenManager | null = null;
 let tickCalls = 0;
 let elapsedSeconds = 0;
 const stanceOrder: HudStance[] = ["follow", "hold", "assault"];
@@ -198,17 +214,54 @@ async function boot(): Promise<void> {
       };
     }
   } else {
-    desktop = new DesktopInput({ canvas });
+    desktop = new DesktopInput({ canvas, keyMap: loadKeyMap(window.localStorage) });
     desktop.onAction((action) => {
       if (action === "stance") {
         advanceStance();
       } else if (action === "recipes") {
-        recipeBook.toggle(elapsedSeconds);
+        if (screens?.current() === "match") {
+          recipeBook.toggle(elapsedSeconds);
+        }
       } else if (action === "menu") {
         recipeBook.close();
+        screens?.show("main");
       }
     });
   }
+
+  screens = new ScreenManager(document.body, () => screens?.show("results"));
+  screens.register("boot", buildBoot(() => screens?.show("main")));
+  screens.register(
+    "main",
+    buildMainMenu({
+      onOnline: () => screens?.show("lobby"),
+      onOffline: () => screens?.show("match"),
+      onSettings: () => screens?.show("settings"),
+    }),
+  );
+  const lobby = new LobbyScreen({
+    onBack: () => screens?.show("main"),
+    onStart: () => screens?.show("match"),
+  });
+  screens.register("lobby", lobby.element);
+  const settings = new SettingsScreen({
+    onQuality: (tier) => renderer.setTier(tier),
+    onSensitivity: (value) => desktop?.setSensitivity(value),
+    onInvertY: (value) => desktop?.setInvertY(value),
+    onKeyMap: (map) => desktop?.setKeyMap(map),
+    onBack: () => screens?.show("main"),
+  });
+  screens.register("settings", settings.element);
+  screens.register(
+    "results",
+    buildResults({
+      onMain: () => screens?.show("main"),
+      onRematch: () => screens?.show("match"),
+    }),
+  );
+  const initialScreen: ScreenId = query.get("screen") === "match" ? "match" : "boot";
+  screens.show(initialScreen);
+
   window.__cbTest = {
     info: () => renderer.info(),
     chunks: () => chunks?.info() ?? null,
@@ -393,6 +446,8 @@ async function boot(): Promise<void> {
       ghost.hide();
       return ghost.info();
     },
+    screen: () => screens?.current() ?? "match",
+    showScreen: (id) => screens?.show(id),
   };
   window.__cbReady = true;
 

@@ -130,7 +130,7 @@ test("one mesh per call unless the caller asks for more", () => {
 });
 
 test("169 columns stay under the 120 draw-call gate", async ({ page }) => {
-  await boot(page, "/?quality=high");
+  await boot(page, "/?quality=high&screen=match");
   await waitForChunks(page, 169);
   await page.waitForTimeout(100);
 
@@ -142,7 +142,7 @@ test("169 columns stay under the 120 draw-call gate", async ({ page }) => {
 });
 
 test("geometry survives a forced 64 MB memory.grow", async ({ page }) => {
-  await boot(page, "/?quality=high");
+  await boot(page, "/?quality=high&screen=match");
   await waitForChunks(page, 169);
   const before = await chunks(page);
   const beforeMemory = await page.evaluate(
@@ -172,7 +172,7 @@ test("geometry survives a forced 64 MB memory.grow", async ({ page }) => {
 });
 
 test("200 load/unload cycles leak under 5 MB", async ({ page }) => {
-  await boot(page, "/?quality=high");
+  await boot(page, "/?quality=high&screen=match");
   await waitForChunks(page, 169);
 
   const session = await page.context().newCDPSession(page);

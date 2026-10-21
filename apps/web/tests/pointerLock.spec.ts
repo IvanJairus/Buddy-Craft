@@ -26,7 +26,7 @@ interface TestWindow {
 test.use({ headless: false });
 
 test("pointer lock on click, mouse look and fire button", async ({ page }) => {
-  await page.goto("/?quality=high&scene=clear");
+  await page.goto("/?quality=high&scene=clear&screen=match");
   await page.waitForFunction(() => (window as unknown as TestWindow).__cbReady === true, null, {
     timeout: 30_000,
   });

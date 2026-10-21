@@ -29,20 +29,64 @@ export const CROUCH = 1 << 4;
 
 export const SENSITIVITY_KEY = "buddycraft.sensitivity";
 export const INVERT_Y_KEY = "buddycraft.invertY";
+export const KEY_MAP_STORAGE = "buddycraft.keys";
 export const DEFAULT_SENSITIVITY = 0.25;
 export const MIN_SENSITIVITY = 0.02;
 export const MAX_SENSITIVITY = 2;
 
-const MOVE_KEYS = new Set([
-  "KeyW",
-  "KeyA",
-  "KeyS",
-  "KeyD",
-  "ArrowUp",
-  "ArrowLeft",
-  "ArrowDown",
-  "ArrowRight",
-]);
+export interface KeyMap {
+  forward: string;
+  back: string;
+  left: string;
+  right: string;
+  jump: string;
+  stance: string;
+  recipes: string;
+  scoreboard: string;
+  drop: string;
+  menu: string;
+}
+
+export const DEFAULT_KEY_MAP: KeyMap = {
+  forward: "KeyW",
+  back: "KeyS",
+  left: "KeyA",
+  right: "KeyD",
+  jump: "Space",
+  stance: "KeyF",
+  recipes: "KeyE",
+  scoreboard: "Tab",
+  drop: "KeyQ",
+  menu: "Escape",
+};
+
+export function loadKeyMap(storage: Pick<Storage, "getItem">): KeyMap {
+  try {
+    const raw = storage.getItem(KEY_MAP_STORAGE);
+    if (raw === null) {
+      return { ...DEFAULT_KEY_MAP };
+    }
+    const parsed = JSON.parse(raw) as Partial<KeyMap>;
+    const map = { ...DEFAULT_KEY_MAP };
+    for (const key of Object.keys(DEFAULT_KEY_MAP) as Array<keyof KeyMap>) {
+      const value = parsed[key];
+      if (typeof value === "string" && value.length > 0) {
+        map[key] = value;
+      }
+    }
+    return map;
+  } catch {
+    return { ...DEFAULT_KEY_MAP };
+  }
+}
+
+export function saveKeyMap(storage: Pick<Storage, "setItem">, map: KeyMap): void {
+  try {
+    storage.setItem(KEY_MAP_STORAGE, JSON.stringify(map));
+  } catch {
+    // Private mode: the current session still uses the map.
+  }
+}
 
 export type InputAction =
   | "drop"
@@ -62,6 +106,7 @@ export interface DesktopInputOptions {
   storage?: InputSettingsStore;
   window?: Window;
   document?: Document;
+  keyMap?: KeyMap;
 }
 
 /** The state that becomes one 4-byte frame. Exported for tests. */
@@ -119,6 +164,7 @@ export class DesktopInput {
   private pitch = 0;
   private sensitivity = DEFAULT_SENSITIVITY;
   private invertY = false;
+  private keyMap: KeyMap = { ...DEFAULT_KEY_MAP };
   private slot = 0;
   private pollCount = 0;
   private lastAction: InputAction | null = null;
@@ -145,12 +191,7 @@ export class DesktopInput {
     if (event.code === "Tab") {
       event.preventDefault();
     }
-    if (MOVE_KEYS.has(event.code)) {
-      event.preventDefault();
-      this.held.add(event.code);
-      return;
-    }
-    if (event.code === "Space") {
+    if (this.isMoveKey(event.code) || event.code === this.keyMap.jump) {
       event.preventDefault();
       this.held.add(event.code);
       return;
@@ -158,38 +199,24 @@ export class DesktopInput {
     if (event.repeat) {
       return;
     }
-    switch (event.code) {
-      case "Digit1":
-      case "Digit2":
-      case "Digit3":
-      case "Digit4":
-      case "Digit5":
-      case "Digit6":
-      case "Digit7":
-      case "Digit8":
-      case "Digit9": {
-        const index = Number(event.code.slice(5)) - 1;
+    if (event.code.startsWith("Digit") && event.code.length === 6) {
+      const index = Number(event.code.slice(5)) - 1;
+      if (index >= 0 && index < 9) {
         this.setSlot(index);
         return;
       }
-      case "KeyQ":
-        this.emit("drop");
-        return;
-      case "Tab":
-        this.emit("scoreboard");
-        return;
-      case "KeyE":
-        this.emit("recipes");
-        return;
-      case "KeyF":
-        this.held.add(event.code);
-        this.emit("stance");
-        return;
-      case "Escape":
-        this.emit("menu");
-        return;
-      default:
-        return;
+    }
+    if (event.code === this.keyMap.drop) {
+      this.emit("drop");
+    } else if (event.code === this.keyMap.scoreboard) {
+      this.emit("scoreboard");
+    } else if (event.code === this.keyMap.recipes) {
+      this.emit("recipes");
+    } else if (event.code === this.keyMap.stance) {
+      this.held.add(event.code);
+      this.emit("stance");
+    } else if (event.code === this.keyMap.menu) {
+      this.emit("menu");
     }
   };
   private readonly onKeyUp = (event: KeyboardEvent): void => {
@@ -253,6 +280,7 @@ export class DesktopInput {
       this.sensitivity = clamp(storedSensitivity, MIN_SENSITIVITY, MAX_SENSITIVITY);
     }
     this.invertY = this.storage.getItem(INVERT_Y_KEY) === "true";
+    this.keyMap = options.keyMap ?? loadKeyMap(this.storage);
 
     this.canvas.addEventListener("click", this.onCanvasClick);
     this.document.addEventListener("pointerlockchange", this.onPointerLockChange);
@@ -269,18 +297,20 @@ export class DesktopInput {
   /** Fill and return the 4-byte frame. Call exactly once per tick. */
   poll(): Uint8Array {
     this.pollCount += 1;
-    const forward = Number(this.held.has("KeyW") || this.held.has("ArrowUp")) -
-      Number(this.held.has("KeyS") || this.held.has("ArrowDown"));
-    const strafe = Number(this.held.has("KeyD") || this.held.has("ArrowRight")) -
-      Number(this.held.has("KeyA") || this.held.has("ArrowLeft"));
+    const forward =
+      Number(this.held.has(this.keyMap.forward) || this.held.has("ArrowUp")) -
+      Number(this.held.has(this.keyMap.back) || this.held.has("ArrowDown"));
+    const strafe =
+      Number(this.held.has(this.keyMap.right) || this.held.has("ArrowRight")) -
+      Number(this.held.has(this.keyMap.left) || this.held.has("ArrowLeft"));
     return packFrame(
       {
         forward,
         strafe,
-        jump: this.held.has("Space"),
+        jump: this.held.has(this.keyMap.jump),
         fire: this.left,
         use: this.right,
-        stance: this.held.has("KeyF"),
+        stance: this.held.has(this.keyMap.stance),
         crouch: false,
         yaw: this.yaw,
         pitch: this.pitch,
@@ -301,6 +331,11 @@ export class DesktopInput {
     const pressed = this.secondaryPressed;
     this.secondaryPressed = false;
     return pressed;
+  }
+
+  setKeyMap(map: KeyMap): void {
+    this.keyMap = { ...map };
+    this.releaseAll();
   }
 
   setSensitivity(value: number): void {
@@ -351,6 +386,10 @@ export class DesktopInput {
     return this.invertY;
   }
 
+  get keyMapValue(): KeyMap {
+    return { ...this.keyMap };
+  }
+
   get lastActionValue(): InputAction | null {
     return this.lastAction;
   }
@@ -381,6 +420,15 @@ export class DesktopInput {
     this.window.removeEventListener("contextmenu", this.onContextMenu);
     this.window.removeEventListener("blur", this.onBlur);
     this.releaseAll();
+  }
+
+  private isMoveKey(code: string): boolean {
+    return (
+      code === this.keyMap.forward ||
+      code === this.keyMap.back ||
+      code === this.keyMap.left ||
+      code === this.keyMap.right
+    );
   }
 
   private emit(action: InputAction, value?: number): void {

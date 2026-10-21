@@ -323,7 +323,7 @@ test("highlight and ghost follow the hit and edit lifecycle", () => {
 });
 
 async function boot(page: Page): Promise<void> {
-  await page.goto("/?quality=high");
+  await page.goto("/?quality=high&screen=match");
   await page.waitForFunction(() => (window as unknown as TestWindow).__cbReady === true, null, {
     timeout: 30_000,
   });

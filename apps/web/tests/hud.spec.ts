@@ -27,7 +27,7 @@ interface TestWindow {
 }
 
 async function boot(page: Page): Promise<void> {
-  await page.goto("/?quality=high&scene=clear");
+  await page.goto("/?quality=high&scene=clear&screen=match");
   await page.waitForFunction(() => (window as unknown as TestWindow).__cbReady === true, null, {
     timeout: 30_000,
   });

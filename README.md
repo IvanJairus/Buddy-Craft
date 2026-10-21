@@ -19,8 +19,9 @@ the match ends when a team's core is destroyed.
 > wasm meshing (T-032), instanced entities with GPU-lifetime particles
 > (T-033), the block interaction raycast with its previews (T-034), desktop
 > input with pointer lock (T-035), touch input with explicit modes (T-036), the
-> HUD with its 10 Hz store (T-037) and the recipe book with Rust near-miss
-> (T-038). The lobby/screens and the offline match loop follow.
+> HUD with its 10 Hz store (T-037), the recipe book with Rust near-miss (T-038)
+> and the lobby/settings shell (T-039). Client networking and the offline
+> match loop follow.
 > See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
@@ -112,7 +113,7 @@ apps/
   web/src/main.ts          boot benchmark, wasm init, chunk loop (M2)
   web/src/render/          renderer, tiers, chunks, entities, particles (M2)
   web/src/game/            interaction, desktop and touch input (M2)
-  web/src/ui/              store, HUD, recipe book (M2)
+  web/src/ui/              store, HUD, recipe book, screens, settings (M2)
   web/src/wasm/loader.ts   raw wasm loader and render views (M2)
   web/scripts/             wasm bridge build step (M2)
   web/tests/               Playwright specs for the browser contract (M2)
@@ -147,7 +148,7 @@ cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 39 specs, 1 headed (pointer lock)
+cd apps/web && npm ci && npm run test:e2e          # 41 specs, 1 headed (pointer lock)
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -208,6 +209,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-036 | touch input: stick/look multi-touch, mode taps, 6/s deposit hold, stance, 44 px controls | done |
 | T-037 | HUD core: 10 Hz store, transform-only bars, textContent, 5-node feed, measured cost | done |
 | T-038 | recipe book from the wasm table, locked tiers, Rust near-miss, ghost overlay | done |
+| T-039 | shell: Boot/Main/Lobby/Match/Results, room-code validation, persisted settings and remap | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -439,6 +441,22 @@ recorded here rather than quietly skipped:
   files; the panel needs layout styles, so `recipeBook.css` is added. The
   prediction and the ghost are not yet wired to pad state; their APIs are
   exercised by the page specs and T-042/T-048 will feed them.
+- **The lobby is local until T-040.** The room code, copy button and join
+  validation are real and tested; Start enters the demo match because there is
+  no WebSocket client yet. The screen manager is the part T-040 plugs into, not
+  a second networking layer.
+- **The UI scale applies to menu panels, not the in-match touch controls.** A
+  0.8 zoom on a 44 px target would make it 35 px, which contradicts T-036's
+  target gate. Menus scale through `--cb-ui-scale`; the in-match controls keep
+  their physical size until the accessibility pass can scale targets and layout
+  together.
+- **The match and results are not connected to a real outcome.** LEAVE MATCH is
+  a deliberate route so the Results screen is reachable and the shell has no
+  dead end. T-048 will replace the leave action with the match-end event.
+- **The key map is one code per action, not a chord model.** The ten controls
+  each get one keyboard code; modifier combinations would need an array or a
+  chord type. The JSON format is versioned by its own key, so a later chord
+  model can migrate without guessing.
 - **`window.__cbTest` ships in the production bundle.** The synthetic
   frame-time injector has to reach the same adaptive code the player runs, so
   gating it to a dev build would test a different path. It only calls renderer
@@ -1275,7 +1293,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 586.8 KB raw and 149.5 KB gzipped,
+device deterministically. The JS bundle is 598.6 KB raw and 152.8 KB gzipped,
 under §8.10's 450 KB gzip target; the wasm asset is measured in the chunk
 section below.
 
@@ -1402,7 +1420,7 @@ advance by the same amount over 300 ms.
 
 Pointer lock is the one part of the contract the headless browser refuses. That
 spec is a separate Playwright project with `headless: false`; CI installs Xvfb
-and runs the suite under a virtual display. The other 38 specs stay headless,
+and runs the suite under a virtual display. The other 40 specs stay headless,
 and a local full run opens a window for the one headed test.
 
 Sensitivity defaults to 0.25 yaw units per pixel; the plan does not pin it. LMB
@@ -1512,6 +1530,43 @@ never decides whether a recipe matches, so porting the canonicaliser into
 TypeScript was not an option. The two new exports are read-only data and
 prediction helpers; the state exports are unchanged and the export check now
 pins 15.
+
+## Shell: one manager and no dead ends
+
+Boot to Main to Lobby to Match to Results, with Settings branching from Main. A
+single `ScreenManager` writes `body[data-screen]`; CSS hides the canvas, HUD,
+recipe book and touch surface whenever the attribute is not `match`. Every
+screen has a button that leaves it, and the match carries a LEAVE MATCH button,
+so Results is reachable without waiting for a core.
+
+| Screen | Exits |
+| --- | --- |
+| Boot | Continue to Main |
+| Main | Online, Offline, Settings |
+| Lobby | Create or Join, Start to Match, Back to Main |
+| Settings | Back to Main |
+| Match | Leave to Results |
+| Results | Rematch, Main |
+
+The lobby generates a six-character code from an unambiguous alphabet, shows a
+copy button, and validates a joined code against `[A-Z0-9]{6}` before doing
+anything else. Networking is T-040; Start currently enters the local demo match,
+which is the only part of the lobby that is a placeholder.
+
+Settings persist quality, sensitivity, invert-Y, UI scale (80-150%), reduced
+motion and a key map for ten actions. The remap buttons capture one key on the
+window in the capture phase, so assigning a key cannot also fire the game
+action. The persistence test changes all six, reloads, then presses the
+remapped forward key and reads the packed frame's forward nibble. The game
+inputs never parse settings; they read the same storage at construction.
+
+The UI scale is applied to menu panels through a CSS variable; the in-match
+touch controls keep their 44 px targets. `?screen=match` is a test entry point
+that bypasses the shell; production starts at Boot. The traversal spec does not
+use it and visits every screen through the buttons.
+
+The match screen is still the demo simulation: Results is reached by the leave
+button, not by a core falling, because the host and offline match arrive later.
 
 ## Content discrepancies, resolved rather than guessed
 
