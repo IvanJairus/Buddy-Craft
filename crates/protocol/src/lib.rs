@@ -227,6 +227,16 @@ pub mod event_kind {
     pub const ELIMINATION: u8 = 3;
     /// An airdrop landed. `a` = x, `b` = z, `c` = crate count.
     pub const AIRDROP: u8 = 4;
+    /// A non-lethal hit. `a` = entity id, `b` = damage, `c` = attacker id.
+    pub const HIT: u8 = 5;
+    /// Crates were picked up. `a` = player id, `b` = count, `c` = unused.
+    pub const PICKUP: u8 = 6;
+    /// A crate was placed. `a` = x, `b` = y, `c` = z.
+    pub const DEPOSIT: u8 = 7;
+    /// A drop was announced. `a` = x, `b` = y, `c` = z.
+    pub const AIRDROP_TELEGRAPH: u8 = 8;
+    /// A player crossed below 30% HP. `a` = player id, `b` = hp, `c` = max hp.
+    pub const LOW_HP: u8 = 9;
 }
 
 // ---------------------------------------------------------------------------

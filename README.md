@@ -23,8 +23,10 @@ the match ends when a team's core is destroyed.
 > the lobby/settings shell (T-039), the WebSocket net client with reconnect
 > and RTT (T-040), and client prediction with a rollback ring and a smoothed
 > visual residual (T-041), chunk diff streaming with keyframes and real
-> remeshing (T-042), and pooled snapshot decode with 100 ms entity interpolation
-> (T-043). The offline match loop and hosts follow.
+> remeshing (T-042), pooled snapshot decode with 100 ms entity interpolation
+> (T-043), and event-driven presentation juice with hitstop, shake, damage
+> numbers and reduced-motion gating (T-044). The offline match loop and hosts
+> follow.
 > See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
@@ -145,13 +147,13 @@ tests use the second without a runtime.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 471 Rust tests
+cargo test --workspace --all-targets              # 472 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 64 specs, 1 headed (pointer lock)
+cd apps/web && npm ci && npm run test:e2e          # 71 specs, 1 headed (pointer lock)
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -217,6 +219,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-041 | prediction: 128-input rollback ring, 5 cm threshold, 300 ms RTT, clamped exponential residual | done |
 | T-042 | chunk diffs: versioned columns, 1.5 KB splitting, keyframes, real remesh around edits | done |
 | T-043 | snapshots: pooled delta decode, 64-frame baselines, 100 ms interpolation, loss recovery | done |
+| T-044 | juice: event driven, hit flash/stop, shake, 32 damage numbers, telegraph, reduced-motion gate | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -517,6 +520,21 @@ recorded here rather than quietly skipped:
   frames and writes fixed output arrays. `no_gc_in_hot_path` pins frame and
   array identity over 600 decodes; it does not claim to measure V8's young
   generation.
+- **T-044 extended `event_kind` with five triggers.** §4.9 needs hit, pickup,
+  deposit, airdrop telegraph and low HP, none of which existed in the wire
+  vocabulary. They are values on the existing 16-byte event slot, not new
+  messages.
+- **Audio rows belong to T-049.** Hit flash, shake, damage numbers, the
+  telegraph and the vignette are real; the clack, chord, sub-bass and heartbeat
+  are not faked with placeholders. T-049 owns the audio graph.
+- **Knockback is still a simulation gap.** §4.9 describes a 2.5 m/s impulse,
+  but `sim::combat` currently emits damage without an impulse and T-044 does not
+  move authoritative bodies from the renderer. The catalog names the effect;
+  the implementation waits for the sim change.
+- **The craft beam has no pad coordinate.** `S_EVENT(CRAFT)` carries team and
+  recipe, not a world point, so the beam appears four metres in front of the
+  camera rather than on the pad. A host can extend the event with a pad origin
+  without changing the juice API.
 - **Reconnect attempts reset on a successful open.** The six-attempt ceiling is
   for six consecutive failed connections, not six for the session; an unstable
   link that opens and closes would otherwise be permanently dead. The token is
@@ -1358,7 +1376,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 612.9 KB raw and 155.7 KB gzipped,
+device deterministically. The JS bundle is 627.5 KB raw and 160.0 KB gzipped,
 under §8.10's 450 KB gzip target; the wasm asset is measured in the chunk
 section below.
 
@@ -1377,7 +1395,7 @@ budget when they want a steady state without waiting.
 | Triangles | 104,862 (gate 350k) |
 | 200 load/unload cycles | 34 KB heap growth after GC (gate 5 MB) |
 | 64 MB `memory.grow` | views rebuilt, geometry unchanged, new meshes still work |
-| wasm asset | 415.6 KB raw, 133.5 KB gzipped (target 700 KB) |
+| wasm asset | 417.4 KB raw, 133.9 KB gzipped (target 700 KB) |
 
 The mesher is neighbour-aware: each column is meshed with the four columns
 around it, so interior chunk borders do not draw walls. The payload is a
@@ -1574,7 +1592,7 @@ unlock clock.
 | Near-miss parity | 500 random clusters; every predicted completion matched the matcher |
 | Banner | `SWORD: needs 1 more crate` |
 | Ghost | one `InstancedMesh`, count = recipe cost |
-| wasm asset | 415.6 KB raw, 133.5 KB gzipped |
+| wasm asset | 417.4 KB raw, 133.9 KB gzipped |
 
 `cb_near_miss` runs the Rust canonicaliser over rotations and translations and
 returns `recipe_id << 8 | missing`. Rust maps the missing blocks back into the
@@ -1759,7 +1777,8 @@ recover without a reversal, and the 400 ms outage holds position at the cap.
 The output pools go straight into `EntityRenderer.updateFromInterp`. A page spec
 decodes one player, samples it and asserts three draw calls, so the path from
 wire bytes to instance matrices is exercised. Projectiles, structures and events
-are validated and skipped; T-044 owns their presentation.
+are validated and skipped by the TypeScript decoder; the wasm bridge copies
+snapshot events into `RenderDesc` for T-044.
 
 The zero-allocation claim is structural: the reader is one reused cursor, frames
 and entity arrays are allocated in the constructor, and no decode or sample path
@@ -1770,6 +1789,36 @@ test, not a heap sample.
 The wire still has no team or buddy role. The decoder's lookup tables default to
 zero until the lobby supplies them in T-045, and the snapshot stream is not on
 the live net path until that host exists.
+
+## Juice: an event packet, not a poll
+
+T-044 adds a 16-byte event slot path. The wasm bridge copies a snapshot's events
+into `RenderDesc`, and the next tick drains them, so an event is delivered
+exactly once. `Juice.consumeEvents` reads those slots and never decides that a
+hit happened from HP or a position.
+
+The event vocabulary now covers the §4.9 triggers: hit, pickup, deposit, airdrop
+telegraph and low HP join craft, kill, base hit, elimination and landing. Hit
+flash is an 80 ms white tint in the entity pools. Camera shake is a deterministic
+damped oscillation capped at 6 cm, with amplitude derived from damage. Damage
+numbers are a 32-slot canvas ring; the 33rd evicts the oldest. The airdrop
+telegraph has a world marker, a descending shadow and a smoke flare, landing
+spawns a dust ring, craft spawns a beam and 12 particles, and a base hit pulses a
+red vignette. Low HP keeps a desaturated edge.
+
+Presentation time is separate from the room tick. Hitstop sets it to zero for
+60 ms and the victory/defeat slow motion sets 0.35x for 1.5 s; `cb_tick` keeps
+advancing throughout. The spec proves ticks rise while presented seconds do not.
+
+Reduced motion disables shake, the vignette pulse and slow motion. It leaves hit
+flash and damage numbers untouched because they carry the information that a
+hit landed. The page spec checks both halves.
+
+The update costs **0.052 ms on average over 60 frames** with 18 flashing
+entities and 32 damage numbers on this machine, against the 1.5 ms gate. Audio
+rows in §4.9 belong to T-049 and are not faked here. Knockback is authoritative
+simulation, not presentation; the current sim has no impulse, so T-044 does not
+invent one in the renderer.
 
 ## Content discrepancies, resolved rather than guessed
 

@@ -94,6 +94,9 @@ struct Bridge {
     next_edit_seq: u16,
     ack: Option<(u16, bool)>,
     last_snapshot: (u32, u32),
+    /// Events from the last snapshot, written once into the render buffer.
+    queued_events: [[u32; 4]; MAX_RENDER_EVENTS],
+    queued_event_count: u32,
     buttons: u8,
     gen: WorldGen,
     columns: BTreeMap<(i32, i32), Column>,
@@ -129,6 +132,8 @@ impl Bridge {
             next_edit_seq: 1,
             ack: None,
             last_snapshot: (0, 0),
+            queued_events: [[0; 4]; MAX_RENDER_EVENTS],
+            queued_event_count: 0,
             buttons: 0,
             // The client's terrain must match the server's. T-032 has no room
             // handshake yet, so the bridge uses the two-base map the milestone
@@ -211,6 +216,20 @@ impl Bridge {
     fn on_server_message(&mut self, bytes: &[u8]) -> bool {
         match protocol::decode_s2c(bytes) {
             Ok(protocol::S2c::ChunkDiff(diff)) => self.apply_chunk_diff(diff),
+            Ok(protocol::S2c::Snapshot(snapshot)) => {
+                let count = snapshot.events.len().min(MAX_RENDER_EVENTS);
+                for (slot, event) in self.queued_events.iter_mut().zip(&snapshot.events) {
+                    *slot = [
+                        u32::from(event.kind),
+                        event.a as u32,
+                        event.b as u32,
+                        event.c as u32,
+                    ];
+                }
+                self.queued_event_count = count as u32;
+                self.last_snapshot = (0, bytes.len() as u32);
+                true
+            }
             Ok(_) => {
                 self.last_snapshot = (0, bytes.len() as u32);
                 true
@@ -332,8 +351,12 @@ impl Bridge {
         desc.buddy_count = 0;
         desc.proj_count = 0;
         desc.particle_count = 0;
-        desc.event_count = 0;
+        desc.event_count = self.queued_event_count;
         desc.dirty_count = 0;
+        for i in 0..self.queued_event_count as usize {
+            self.buffer.events[i] = self.queued_events[i];
+        }
+        self.queued_event_count = 0;
 
         let body = &self.body;
         let mut flags = 0u8;
@@ -961,6 +984,42 @@ mod tests {
             before,
             "removing the crate restores the generated mesh"
         );
+    }
+
+    #[test]
+    fn snapshot_events_reach_the_render_buffer_once() {
+        assert_eq!(cb_init(0xC0FFEE, 0, 0, 0), OK);
+        let frame = protocol::encode_s2c(&protocol::S2c::Snapshot(protocol::Snapshot {
+            tick: Tick(1),
+            seq: 1,
+            baseline_seq: 0,
+            keyframe: true,
+            players: Vec::new(),
+            buddies: Vec::new(),
+            projectiles: Vec::new(),
+            structures: Vec::new(),
+            events: vec![protocol::SnapshotEvent {
+                kind: protocol::event_kind::HIT,
+                a: 7,
+                b: 25,
+                c: 2,
+            }],
+        }));
+        assert!(with_bridge(|bridge| bridge.on_server_message(&frame)).expect("initialised"));
+        with_bridge(|bridge| {
+            bridge.tick(TICK_MS, None);
+            assert_eq!(bridge.buffer.desc.event_count, 1);
+            assert_eq!(
+                bridge.buffer.events[0],
+                [u32::from(protocol::event_kind::HIT), 7, 25, 2]
+            );
+            bridge.tick(TICK_MS, None);
+            assert_eq!(
+                bridge.buffer.desc.event_count, 0,
+                "an event must be delivered exactly once"
+            );
+        })
+        .expect("initialised");
     }
 
     #[test]

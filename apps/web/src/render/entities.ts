@@ -171,6 +171,7 @@ export class EntityRenderer {
   private readonly buddies: EntityValue[] = [];
   private readonly color = new THREE.Color();
   private readonly headColor = new THREE.Color();
+  private readonly flashUntil = new Map<number, number>();
   private playerCount = 0;
   private buddyCount = 0;
   private lastUpdateMs = 0;
@@ -283,6 +284,31 @@ export class EntityRenderer {
     return this.info();
   }
 
+  /** A one-event hit flash on one network id. Duration is presentation-only. */
+  flash(id: number, nowMs = performance.now(), durationMs = 80): void {
+    this.flashUntil.set(id, nowMs + durationMs);
+  }
+
+  /** Number of entity ids still inside a flash window. */
+  flashCount(nowMs = performance.now()): number {
+    let count = 0;
+    for (const until of this.flashUntil.values()) {
+      if (until > nowMs) count += 1;
+    }
+    return count;
+  }
+
+  /** One pooled entity by network id, for projectile or effect positioning. */
+  positionOf(id: number): EntityValue | null {
+    for (let i = 0; i < this.playerCount; i += 1) {
+      if (this.players[i].id === id) return this.players[i];
+    }
+    for (let i = 0; i < this.buddyCount; i += 1) {
+      if (this.buddies[i].id === id) return this.buddies[i];
+    }
+    return null;
+  }
+
   info(): EntityInfo {
     let drawCalls = 0;
     if (this.playerCount > 0) {
@@ -325,10 +351,12 @@ export class EntityRenderer {
   private apply(playerCount: number, buddyCount: number, animate: boolean, start: number): void {
     this.playerCount = playerCount;
     this.buddyCount = buddyCount;
+    const now = performance.now();
 
     for (let i = 0; i < playerCount; i += 1) {
       const value = this.players[i];
-      this.color.setHex(PLAYER_COLORS[value.team & 1] ?? PLAYER_COLORS[0]);
+      const base = PLAYER_COLORS[value.team & 1] ?? PLAYER_COLORS[0];
+      this.color.setHex((this.flashUntil.get(value.id) ?? 0) > now ? 0xffffff : base);
       this.writeEntity(this.playerParts, i, value, animate);
     }
     this.finishParts(this.playerParts, playerCount);
@@ -341,7 +369,9 @@ export class EntityRenderer {
         if (value.role !== role) {
           continue;
         }
-        this.color.setHex(ROLE_COLORS[role]);
+        this.color.setHex(
+          (this.flashUntil.get(value.id) ?? 0) > now ? 0xffffff : ROLE_COLORS[role],
+        );
         this.writeEntity(parts, slot, value, animate);
         slot += 1;
       }

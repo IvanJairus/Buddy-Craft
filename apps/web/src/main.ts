@@ -25,6 +25,7 @@ import {
   type EntityValue,
 } from "./render/entities";
 import { ParticleSystem, type ParticleInfo } from "./render/particles";
+import { Juice, EVENT_HIT, type JuiceStats } from "./render/juice";
 import { Interaction, type PendingEdit, type RayHit, type VisualState } from "./game/interaction";
 import {
   DesktopInput,
@@ -50,6 +51,7 @@ import { SettingsScreen } from "./ui/settings";
 import { Store, initialHudState, type HudState, type HudStance } from "./ui/store";
 import { GhostOverlay, type GhostInfo } from "./render/ghostOverlay";
 import type { RecipeRow } from "./wasm/loader";
+import { DESC_EVENT_COUNT } from "./wasm/loader";
 import { GameRenderer } from "./render/renderer";
 import type { RendererInfo } from "./render/renderer";
 import {
@@ -134,6 +136,12 @@ interface TestApi {
     frame: number[],
     nowMs: number,
   ): { decoded: number; players: number; buddies: number; entity: EntityInfo | null };
+  juiceStats(): JuiceStats;
+  juiceEvent(kind: number, a: number, b: number, c: number): JuiceStats;
+  juiceHitstop(ms?: number): JuiceStats;
+  juiceDamage(amount: number, x: number, y: number, z: number): JuiceStats;
+  juiceBenchmark(frames?: number): { averageMs: number; stats: JuiceStats };
+  serverMessage(frame: number[]): boolean;
 }
 
 declare global {
@@ -197,6 +205,14 @@ async function boot(): Promise<void> {
   const interpolator = new Interpolator(snapshotDecoder.playerTeam, snapshotDecoder.buddyRole);
   entities = clearScene ? null : new EntityRenderer(renderer.scene);
   particles = clearScene ? null : new ParticleSystem(renderer.scene, 256);
+  const juice = new Juice({
+    camera: renderer.camera,
+    scene: renderer.scene,
+    entities,
+    particles,
+    reducedMotion: () => document.body.classList.contains("cb-reduced-motion"),
+    surfaceAt: (x, z) => chunks?.surfaceAt(x, z) ?? 40,
+  });
   if (chunks !== null) {
     interaction = new Interaction(renderer.scene, chunks.voxelSource(), {
       localEdit: (x, y, z, block, action) => wasmClient.localEdit(x, y, z, block, action),
@@ -518,9 +534,46 @@ async function boot(): Promise<void> {
         entity,
       };
     },
+    juiceStats: () => juice.stats(performance.now()),
+    juiceEvent: (kind, a, b, c) => {
+      juice.handleEvent(kind, a, b, c, performance.now());
+      return juice.stats(performance.now());
+    },
+    juiceHitstop: (ms = 60) => {
+      juice.hitstop(performance.now(), ms);
+      return juice.stats(performance.now());
+    },
+    juiceDamage: (amount, x, y, z) => {
+      juice.addDamage(amount, x, y, z, performance.now());
+      return juice.stats(performance.now());
+    },
+    juiceBenchmark: (frames = 60) => {
+      const now = performance.now();
+      for (let i = 0; i < 18; i += 1) {
+        juice.handleEvent(EVENT_HIT, i, 20, 0, now);
+      }
+      for (let i = 0; i < 40; i += 1) {
+        juice.addDamage(20, 128 + (i % 8), 42, 128 + Math.floor(i / 8), now);
+      }
+      renderer.camera.updateMatrixWorld();
+      let total = 0;
+      let stats = juice.stats(now);
+      for (let frame = 0; frame < frames; frame += 1) {
+        stats = juice.update(now + frame * 16.7, 16.7);
+        total += stats.lastUpdateMs;
+      }
+      return { averageMs: total / Math.max(1, frames), stats };
+    },
+    serverMessage: (frame) => {
+      if (client === null) {
+        throw new Error("wasm is not initialised");
+      }
+      return client.onServerMessage(Uint8Array.from(frame));
+    },
   };
   window.__cbReady = true;
 
+  let lastJuiceAt = 0;
   const loop = (now: number): void => {
     const frame =
       desktop !== null
@@ -556,13 +609,25 @@ async function boot(): Promise<void> {
     }
     const views = client?.renderViews ?? null;
     if (views !== null) {
-      entities?.update(views, renderer.quality.entityAnimation);
+      juice.consumeEvents(
+        views.events,
+        views.desc.getUint32(DESC_EVENT_COUNT, true),
+        now,
+      );
     }
-    particles?.update(now / 1000);
+    const dt = lastJuiceAt === 0 ? 16 : Math.min(100, Math.max(0, now - lastJuiceAt));
+    lastJuiceAt = now;
+    juice.update(now, dt);
+    if (views !== null) {
+      entities?.update(views, renderer.quality.entityAnimation && juice.timeScale > 0);
+    }
+    particles?.update(juice.presentationSeconds);
     if (chunks !== null) {
       chunks.update(renderer.camera.position.x, renderer.camera.position.z, 1);
     }
+    juice.applyCamera();
     renderer.frame(now);
+    juice.restoreCamera();
     window.requestAnimationFrame(loop);
   };
   window.requestAnimationFrame(loop);
