@@ -116,6 +116,11 @@ impl GpuPlayer {
     pub const FLAG_ALIVE: u8 = 1 << 0;
     /// Bit 1 of [`GpuPlayer::flags`].
     pub const FLAG_ON_GROUND: u8 = 1 << 1;
+    /// Bit 2: the entity fired this frame or within the attack pulse window.
+    ///
+    /// T-033 reads it to scale the weapon sub-mesh; the 32-byte layout has no
+    /// room for another float, and a flag costs one bit.
+    pub const FLAG_ATTACKING: u8 = 1 << 2;
 }
 
 /// The whole render buffer: one header followed by every array it points at.

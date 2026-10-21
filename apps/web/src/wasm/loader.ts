@@ -415,6 +415,11 @@ export class ClientWasm {
     return Object.values(this.views).every((view) => view.buffer.byteLength > 0);
   }
 
+  /** The current frame's typed views, or null before `init`. */
+  get renderViews(): RenderViews | null {
+    return this.views;
+  }
+
   /** Bytes currently reserved by the wasm memory, including the arena. */
   memoryBytes(): number {
     return this.wasm.memory.buffer.byteLength;

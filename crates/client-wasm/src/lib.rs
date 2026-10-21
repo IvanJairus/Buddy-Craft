@@ -93,6 +93,7 @@ struct Bridge {
     next_edit_seq: u16,
     ack: Option<(u16, bool)>,
     last_snapshot: (u32, u32),
+    buttons: u8,
     gen: WorldGen,
     columns: BTreeMap<(i32, i32), Column>,
 }
@@ -124,6 +125,7 @@ impl Bridge {
             next_edit_seq: 1,
             ack: None,
             last_snapshot: (0, 0),
+            buttons: 0,
             // The client's terrain must match the server's. T-032 has no room
             // handshake yet, so the bridge uses the two-base map the milestone
             // is built around; `cb_init` can grow a layout argument later
@@ -210,6 +212,7 @@ impl Bridge {
                 ..InputFrame::default()
             },
         };
+        self.buttons = frame.buttons;
 
         self.accum_ms = self.accum_ms.saturating_add(dt_ms.min(TICK_MS * 5));
         let mut steps = 0;
@@ -248,6 +251,9 @@ impl Bridge {
         }
         if body.state.on_ground {
             flags |= GpuPlayer::FLAG_ON_GROUND;
+        }
+        if self.buttons & sim::input::buttons::FIRE != 0 {
+            flags |= GpuPlayer::FLAG_ATTACKING;
         }
         let player = &mut self.buffer.players[0];
         player.id = 0;

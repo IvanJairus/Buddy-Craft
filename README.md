@@ -16,7 +16,8 @@ the match ends when a team's core is destroyed.
 > the bots that play it (T-023), the whole-match invariant harness (T-024), the
 > wasm boundary with its render buffer (T-030), the three.js renderer with its
 > quality tiers and adaptive resolution (T-031) and chunk streaming with real
-> wasm meshing (T-032). The entity renderer and the offline match loop follow.
+> wasm meshing (T-032) and instanced entities with GPU-lifetime particles
+> (T-033). The interaction layer and the offline match loop follow.
 > See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
@@ -106,7 +107,7 @@ crates/
   host-axum/    tokio/axum host                        (M4)
 apps/
   web/src/main.ts          boot benchmark, wasm init, chunk loop (M2)
-  web/src/render/          renderer, adaptive scale, tiers, chunks (M2)
+  web/src/render/          renderer, tiers, chunks, entities, particles (M2)
   web/src/wasm/loader.ts   raw wasm loader and render views (M2)
   web/scripts/             wasm bridge build step (M2)
   web/tests/               Playwright specs for the browser contract (M2)
@@ -141,7 +142,7 @@ cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 13 Playwright specs
+cd apps/web && npm ci && npm run test:e2e          # 18 Playwright specs
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -195,7 +196,8 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-024 | whole-match harness: eight invariants per tick, reconnect, three-match leak probe | done |
 | T-030 | wasm boundary: 13 exports, byte-stable render buffer, zero-allocation tick | done |
 | T-031 | three.js WebGL2 bootstrap, exact quality tiers, adaptive resolution, boot benchmark | done |
-| T-032 | chunk streaming: 6/7 hysteresis, neighbour meshing, 88 draw calls, 34 KB leak | done |
+| T-032 | chunk streaming: 6/7 hysteresis, neighbour meshing, 88 chunk draws, 34 KB leak | done |
+| T-033 | instanced 3-part entities, float-driven animation, 256 GPU-lifetime particles | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -370,6 +372,13 @@ recorded here rather than quietly skipped:
   uses the embedded table. The app ships the same `data/tuning.ron`, so this is
   not a behavioural gap today; a pre-init allocation export is the clean fix if
   overrides become a feature.
+- **T-033's file list omitted the bridge flag and the app wiring.** The task
+  names `entities.ts` and `particles.ts`, but the attack window needed a bit in
+  `GpuPlayer` (bit 2, no layout change), and the renderer needed construction
+  and test hooks in `main.ts`. Death dissolve also reuses `anim` rather than
+  adding the extra float §8.3 mentions: the 32-byte stride is pinned by offset
+  tests, and adding a seventh float would move every field after it. The
+  convention is stated in both the section above and the module docs.
 - **`window.__cbTest` ships in the production bundle.** The synthetic
   frame-time injector has to reach the same adaptive code the player runs, so
   gating it to a dev build would test a different path. It only calls renderer
@@ -1205,7 +1214,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 539.3 KB raw and 135.5 KB gzipped,
+device deterministically. The JS bundle is 548.7 KB raw and 138.5 KB gzipped,
 under §8.10's 450 KB gzip target; the wasm asset is measured in the chunk
 section below.
 
@@ -1220,11 +1229,11 @@ budget when they want a steady state without waiting.
 | Check | Measured |
 | --- | --- |
 | Loaded at the map centre, radius 6 | 169 columns |
-| Draw calls at the map centre | 88 (gate 120) |
+| Draw calls at the map centre | 92 total: 88 chunks + 3 player + 1 particle (gate 120) |
 | Triangles | 104,862 (gate 350k) |
 | 200 load/unload cycles | 34 KB heap growth after GC (gate 5 MB) |
 | 64 MB `memory.grow` | views rebuilt, geometry unchanged, new meshes still work |
-| wasm asset | 321.7 KB raw, 105.9 KB gzipped (target 700 KB) |
+| wasm asset | 321.8 KB raw, 105.9 KB gzipped (target 700 KB) |
 
 The mesher is neighbour-aware: each column is meshed with the four columns
 around it, so interior chunk borders do not draw walls. The payload is an
@@ -1244,6 +1253,44 @@ The page uses the real bridge. The streaming unit tests use a fake source: one
 runs the default 6/7 policy and checks a kept column at distance 7 and an
 unloaded one at distance 8, the other runs 2/3 and asserts the whole set,
 including the ring.
+
+## Entities: three boxes and a float contract
+
+Players and buddies are three instanced boxes: body, head and weapon. Six
+players cost 3 draw calls; each buddy role costs 3 more. The 18-entity mix
+used by the test, 6 players and 12 buddies, costs 21 draw calls, and the whole
+scene at the map centre with 169 chunks is 92 draw calls and 105,410 triangles.
+
+| Behaviour | Source | Rule |
+| --- | --- | --- |
+| Bob | `anim` | `sin(anim * 2π) * 0.06`, off on the LOW tier |
+| Tilt | `pitch` | clamped to ±0.25 rad |
+| Attack pulse | `flags` bit 2 | weapon scales up to 1.35 |
+| Death dissolve | `hp`, `flags` bit 0, `anim` | alpha is `1 - anim` while dead |
+
+The 32-byte `GpuPlayer` has exactly six floats and no spare one, so `anim`
+carries the bob phase while alive and the death progress while dead, and the
+attack window is a flag bit. Both are conventions, not free interpretation:
+the bridge and T-041 must keep them, and this is the paragraph a future reader
+should find before adding a seventh float.
+
+The alpha is a per-instance attribute injected into one shared
+`MeshBasicMaterial`; a single shader edit multiplies each fragment by the
+instance alpha. That is why death can dissolve instead of popping without a
+material per role. Projectiles and siege structures are later tasks; the plan's
+27-draw-call line has room for them.
+
+18 entities update in **0.025 ms on average** over 120 frames (gate 3 ms); the
+first measured update was 0.1 ms. Pools and scratch objects are allocated at
+construction, so the frame path only writes matrices, colors and alpha in
+place.
+
+Particles are one `InstancedMesh` of 256 billboarded quads, one draw call. The
+CPU writes origin, velocity, spawn time and life when a particle is born; the
+vertex shader computes age, position and alpha from `uTime`. `update()` writes
+one uniform, and the test asserts the attribute-write counter stays at 256
+after 120 frames. The tier's particle cap changes `instanceCount` without
+reallocating the pool.
 
 ## Content discrepancies, resolved rather than guessed
 

@@ -17,6 +17,14 @@ import * as THREE from "three";
 import wasmUrl from "./wasm/client_wasm.wasm?url";
 import { ClientWasm, loadClientWasm } from "./wasm/loader";
 import { ChunkManager, clientMeshSource, type ChunkInfo } from "./render/chunkManager";
+import {
+  EntityRenderer,
+  FLAG_ALIVE,
+  FLAG_ATTACKING,
+  type EntityInfo,
+  type EntityValue,
+} from "./render/entities";
+import { ParticleSystem, type ParticleInfo } from "./render/particles";
 import { GameRenderer } from "./render/renderer";
 import type { RendererInfo } from "./render/renderer";
 import {
@@ -45,6 +53,10 @@ interface TestApi {
   growWasm(pages: number): GrowResult;
   leakCycle(cycles: number): void;
   wasm(): { viewsAlive: boolean; memoryBytes: number };
+  entities(): EntityInfo | null;
+  entityBenchmark(frames?: number): (EntityInfo & { averageMs: number }) | null;
+  particles(): ParticleInfo | null;
+  particleBenchmark(): { spawned: ParticleInfo; after: ParticleInfo } | null;
 }
 
 declare global {
@@ -61,11 +73,14 @@ if (canvas === null) {
 
 const query = new URLSearchParams(window.location.search);
 const queryTier = parseTier(query.get("quality"));
-const chunksEnabled = query.get("chunks") !== "off";
+const clearScene = query.get("scene") === "clear";
+const chunksEnabled = !clearScene && query.get("chunks") !== "off";
 let tier: QualityTier | null = queryTier ?? readStoredTier(window.localStorage);
 const renderer = new GameRenderer({ canvas, tier: tier ?? "MED" });
 let client: ClientWasm | null = null;
 let chunks: ChunkManager | null = null;
+let entities: EntityRenderer | null = null;
+let particles: ParticleSystem | null = null;
 
 async function boot(): Promise<void> {
   if (tier === null) {
@@ -92,6 +107,8 @@ async function boot(): Promise<void> {
       keepRadius: 7,
     });
   }
+  entities = clearScene ? null : new EntityRenderer(renderer.scene);
+  particles = clearScene ? null : new ParticleSystem(renderer.scene, 256);
 
   const input = new Uint8Array(4);
   window.__cbTest = {
@@ -132,11 +149,78 @@ async function boot(): Promise<void> {
       viewsAlive: client?.viewsAlive() ?? false,
       memoryBytes: client?.memoryBytes() ?? 0,
     }),
+    entities: () => entities?.info() ?? null,
+    entityBenchmark: (frames = 60) => {
+      if (entities === null) {
+        return null;
+      }
+      const players: EntityValue[] = [];
+      const buddies: EntityValue[] = [];
+      for (let i = 0; i < 6; i += 1) {
+        players.push({
+          id: i,
+          team: i % 2,
+          flags: FLAG_ALIVE | (i === 0 ? FLAG_ATTACKING : 0),
+          x: 128 + i,
+          y: 40,
+          z: 128,
+          yaw: i * 0.5,
+          pitch: i === 0 ? 0.4 : 0,
+          anim: i / 6,
+          hp: 100,
+          role: 0,
+        });
+      }
+      for (let i = 0; i < 12; i += 1) {
+        buddies.push({
+          id: 18 + i,
+          team: i % 2,
+          flags: i === 11 ? 0 : FLAG_ALIVE,
+          x: 128 - i,
+          y: 40,
+          z: 126,
+          yaw: 0,
+          pitch: 0,
+          anim: i === 11 ? 0.5 : i / 12,
+          hp: i === 11 ? 0 : 80,
+          role: i % 6,
+        });
+      }
+      let total = 0;
+      let last = entities.updateFromValues(players, buddies, true);
+      for (let frame = 0; frame < frames; frame += 1) {
+        last = entities.updateFromValues(players, buddies, true);
+        total += last.lastUpdateMs;
+      }
+      return { ...last, averageMs: total / Math.max(1, frames) };
+    },
+    particles: () => particles?.info() ?? null,
+    particleBenchmark: () => {
+      if (particles === null) {
+        return null;
+      }
+      particles.update(0);
+      const origin = new THREE.Vector3(128, 42, 128);
+      const velocity = new THREE.Vector3(0, 2, 0);
+      for (let i = 0; i < 256; i += 1) {
+        particles.spawn(origin, velocity, 1, 0.12, 0xffffff);
+      }
+      const spawned = particles.info();
+      for (let frame = 0; frame < 120; frame += 1) {
+        particles.update(frame / 60);
+      }
+      return { spawned, after: particles.info() };
+    },
   };
   window.__cbReady = true;
 
   const loop = (now: number): void => {
     client?.tick(16, input);
+    const views = client?.renderViews ?? null;
+    if (views !== null) {
+      entities?.update(views, renderer.quality.entityAnimation);
+    }
+    particles?.update(now / 1000);
     if (chunks !== null) {
       chunks.update(renderer.camera.position.x, renderer.camera.position.z, 1);
     }
