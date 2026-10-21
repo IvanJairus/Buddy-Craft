@@ -225,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn brute_force_lockout() {
+    fn t10_room_code_brute_force() {
         let mut registry = Registry::new(10_000);
         for _ in 0..MAX_FAILURES {
             assert_eq!(

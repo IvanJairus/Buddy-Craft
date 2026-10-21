@@ -1070,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn crates_are_conserved() {
+    fn t5_crate_duplication_is_conserved() {
         let mut airdrops = air(4);
         let mut carried_total = 0;
         let mut placed_total = 0;

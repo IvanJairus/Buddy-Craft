@@ -353,7 +353,7 @@ mod tests {
     // -- frame-level rules --------------------------------------------------
 
     #[test]
-    fn rejects_oversize() {
+    fn t8_message_size_dos() {
         // Rule 1. 4,097 bytes is the first size that fails; 4,096 is the last
         // that does not.
         let frame = vec![0u8; MAX_FRAME_BYTES + 1];
@@ -445,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn name_sanitisation_is_idempotent() {
+    fn t11_xss_name_sanitisation() {
         let once = checked(&hello("ivan")).unwrap();
         let twice = decode_checked(&once.encode(), Bounds::STANDARD).unwrap();
         assert_eq!(once, twice);
@@ -596,7 +596,7 @@ mod tests {
     // -- the token bucket ---------------------------------------------------
 
     #[test]
-    fn burst_then_rate_limit() {
+    fn t7_snapshot_flood_rate_limit() {
         let mut bucket = RateLimiter::messages();
         // 60 back to back at tick 0: all allowed.
         for i in 0..MESSAGE_BURST {
@@ -688,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn mutated_valid_frames_never_panic() {
+    fn t13_postcard_mutations_never_panic() {
         // Every byte of every message replaced by every interesting value, plus
         // single-bit flips. This is the corpus that actually finds decoder bugs,
         // because it starts from bytes that are almost valid.

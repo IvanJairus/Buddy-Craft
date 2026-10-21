@@ -729,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn max_speed_is_enforced() {
+    fn t1_speed_hack_is_clamped() {
         // The horizontal velocity is `wish_direction * speed`, and the
         // direction is clamped to unit length, so no input sequence can exceed
         // `speed`. The tolerance covers Q16.16 rounding in the sin/cos table

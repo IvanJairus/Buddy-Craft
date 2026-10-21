@@ -5,7 +5,9 @@
  */
 
 import { expect, test, type Page } from "@playwright/test";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 async function boot(page: Page): Promise<string[]> {
@@ -67,7 +69,24 @@ test("an inline script is blocked by the policy", async ({ page }: { page: Page 
   expect(result.fired).toBeGreaterThan(0);
 });
 
-test("no_innerhtml or executable HTML sinks exist in the client source", () => {
+test("t12_secret_scan_rejects_a_planted_key", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cb-secret-"));
+  const tool = join(process.cwd(), "../../tools/secret-scan.mjs");
+  try {
+    writeFileSync(join(dir, "bundle.js"), "const SESSION_SIGNING_KEY = 'leak';");
+    expect(() =>
+      execFileSync(process.execPath, [tool, dir], { stdio: "pipe" }),
+    ).toThrow();
+    writeFileSync(join(dir, "bundle.js"), "const answer = 42;");
+    expect(() =>
+      execFileSync(process.execPath, [tool, dir], { stdio: "pipe" }),
+    ).not.toThrow();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("t11_no_innerhtml_or_executable_html_sinks", () => {
   const sources = sourceFiles("src");
   const offenders = sources.filter((file) => {
     const text = readFileSync(file, "utf8");

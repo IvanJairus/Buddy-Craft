@@ -21,6 +21,7 @@ pub mod input;
 pub mod lifecycle;
 pub mod play;
 pub mod snapshot;
+pub mod validate;
 
 pub use bot::{Bot, BotOutput, BotView};
 pub use edit::{
@@ -32,6 +33,7 @@ pub use play::{Match, MatchEvent};
 pub use snapshot::{
     Encoded, SnapshotEncoder, AOI_HYSTERESIS, AOI_RADIUS, BASELINE_HISTORY, KEYFRAME_INTERVAL,
 };
+pub use validate::{ConnectionBudget, TokenBook, MAX_CONNECTIONS_PER_IP};
 
 use sim::{
     ring_pad_origins, InputFrame, Layout, MatchState, Outcome, PlayerId, RoomSetup, SetupError,

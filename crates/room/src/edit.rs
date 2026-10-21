@@ -705,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn reach_hack_rejected() {
+    fn t2_reach_hack_rejected() {
         let (mut world, mut pads, origin) = fixture();
         let mut pipeline = EditPipeline::new();
         // A legal cell exactly seven metres away: the pad's opposite corner,
@@ -721,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn same_tick_race() {
+    fn t6_block_edit_race_duping() {
         // Two edits on one cell in the same tick: the first wins, the second is
         // validated against the post-first state and refused. Last-write-wins is
         // deliberately not used — it produces ghost blocks on clients that
@@ -749,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_rate_limited() {
+    fn t4_edit_spam_rate_limited() {
         // Nine placements in one tick: eight fit in the bucket, the ninth does
         // not, and the ninth must not have touched the world.
         let (mut world, mut pads, origin) = fixture();

@@ -1557,6 +1557,37 @@ mod tests {
     }
 
     #[test]
+    fn t3_damage_spoofing_has_no_message() {
+        let source = include_str!("lib.rs");
+        let start = source.find("C2s {").expect("C2s declaration");
+        let end = source[start..]
+            .find("wire_enum!")
+            .map(|offset| start + offset)
+            .expect("next enum");
+        let block = source[start..end].to_ascii_lowercase();
+        assert!(!block.contains("damage"), "no client damage message exists");
+        assert!(
+            !block.contains("position"),
+            "the client cannot claim a position"
+        );
+    }
+
+    #[test]
+    fn no_client_position_acceptance() {
+        let source = include_str!("lib.rs");
+        let start = source.find("C2s {").expect("C2s declaration");
+        let end = source[start..]
+            .find("wire_enum!")
+            .map(|offset| start + offset)
+            .expect("next enum");
+        let block = &source[start..end];
+        assert!(block.contains("Input"));
+        assert!(block.contains("Edit"));
+        assert!(!block.contains("damage"));
+        assert!(!block.contains("Position"));
+    }
+
+    #[test]
     fn roundtrip_all() {
         for message in c2s_worst_cases() {
             let bytes = message.encode();
