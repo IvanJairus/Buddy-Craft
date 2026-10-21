@@ -148,13 +148,13 @@ tests use the second without a runtime.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 486 Rust tests
+cargo test --workspace --all-targets              # 491 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 89 specs, 1 headed (pointer lock)
+cd apps/web && npm ci && npm run test:e2e          # 90 specs, 1 headed (pointer lock)
 
 # Host (local dev). `CB_ADDR`, `CB_ALLOWED_ORIGINS` and `CB_SUMMARY_DIR` override defaults.
 cargo run -p host-axum                            # ws://127.0.0.1:8080/ws?room=DEV001
@@ -231,7 +231,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-047 | Crockford codes, registry collision, lockout and quota policy | partial: HTTP/DO blocked behind T-046 |
 | T-048 | offline Web Worker match with bots and the online wire frames | done |
 | T-049 | audio graph, 24 voices, 30 procedural cues, rumble worklet | partial: WebKit/iOS and recorded assets not verified |
-| T-050 | anti-cheat T1–T15 matrix and cheat client | not started |
+| T-050 | anti-cheat: 15 named threat tests, connection cap, token revocation | partial: cheat-client and host wiring missing |
 | T-051 | art atlas and GLB models | not started: no art assets |
 | T-052 | content pass and recipe editor | not started |
 | T-053 | 20-room bot swarm load test | not started |
@@ -1926,8 +1926,9 @@ T-054 needs the online host path plus Firefox/WebKit, and T-062/T-063/T-064 need
 physical devices, six humans on production and a week of telemetry. Those are
 not marked done.
 
-The current gates are 486 Rust tests, 89 Playwright specs, clippy/fmt clean, and
-20 wasm exports. The last full-browser run is Chromium plus the headed pointer
+The current gates are 491 Rust tests, 90 Playwright specs, clippy/fmt clean, and
+20 wasm exports. T-050 has the 15 named threat tests, but `tools/cheat-client`
+and host wiring for the new connection/token guards are still missing. The last full-browser run is Chromium plus the headed pointer
 lock project; Firefox and WebKit are not installed on this machine.
 
 ## Content discrepancies, resolved rather than guessed
