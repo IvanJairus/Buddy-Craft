@@ -42,8 +42,11 @@ const ARRIVE_RADIUS: sim::Fixed = sim::Fixed::from_int(2);
 /// How far a bot will engage a player that is not its current goal.
 const ENGAGE_RADIUS: sim::Fixed = sim::Fixed::from_int(2);
 
-/// Ticks between path recomputations. Thirty is the buddy AI's cadence and is
-/// slow enough that six bots do not pathfind on every tick.
+/// Ticks between path recomputations.
+///
+/// Forty is fast enough that a changed goal, a new pickup or a blocked path is
+/// picked up within two seconds, and slow enough that six bots do not pathfind
+/// on every tick.
 const REPATH_TICKS: u32 = 40;
 
 /// How far from the pad's corner a bot stands while building.
@@ -601,6 +604,20 @@ fn nearest_pickup(view: &BotView<'_>, me: PlayerId) -> Option<Vec3> {
     let body = view.body;
     let mut best: Option<(sim::Fixed, u32, Vec3)> = None;
     for pickup in view.airdrops.pickups() {
+        // A stand is at most one pickup radius away from the crate, so a crate
+        // whose horizontal distance already loses by more than that cannot win.
+        // Without this filter every bot runs a nine-cell terrain-height search
+        // for every pickup on the floor, every tick, and that dominates a full
+        // match: 120 pickups x 6 bots x 28,000 ticks is tens of millions of
+        // noise evaluations for a choice that is usually made by the first
+        // handful of candidates.
+        let direct = body.state.pos.horizontal_distance(pickup.pos);
+        if let Some((best_distance, _, _)) = best {
+            const STAND_SLACK: sim::Fixed = sim::Fixed::from_int(2);
+            if direct > best_distance + STAND_SLACK {
+                continue;
+            }
+        }
         let Some(stand) = pickup_stand(view, pickup.pos) else {
             continue;
         };

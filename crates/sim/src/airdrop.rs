@@ -205,12 +205,20 @@ pub struct Audit {
     pub carried: u64,
     /// Crates on the ground.
     pub on_ground: u64,
+    /// Crates still in the air.
+    ///
+    /// A drop is booked as `dropped` when it spawns, six to seven seconds
+    /// before it lands. Without this bucket the books fail to balance for every
+    /// tick of every descent, which is exactly the window a conservation test
+    /// that only samples the ground would miss.
+    pub falling: u64,
 }
 
 impl Audit {
     /// True when the books balance: everything dropped is accounted for.
     pub fn balances(&self) -> bool {
-        self.dropped == self.destroyed + self.deposited + self.carried + self.on_ground
+        self.dropped
+            == self.destroyed + self.deposited + self.carried + self.on_ground + self.falling
     }
 }
 
@@ -314,6 +322,7 @@ impl Airdrops {
             deposited: self.deposited,
             carried: self.carried.iter().map(|c| u64::from(*c)).sum(),
             on_ground: self.pickups.len() as u64,
+            falling: self.falling.iter().map(|drop| u64::from(drop.crates)).sum(),
         }
     }
 
@@ -501,6 +510,11 @@ impl Airdrops {
         if self.pickups.is_empty() || bodies.is_empty() {
             return;
         }
+        // Squared radius, so the inner loop is comparisons and multiplies. The
+        // inner loop runs pickups x bodies every tick; a square root there was
+        // 17% of a full match's wall time.
+        let radius_sq = self.rules.pickup_radius * self.rules.pickup_radius;
+        let vertical_slack = Fixed::from_int(2);
         let mut taken = vec![0u32; bodies.len()];
         let mut index = 0;
         while index < self.pickups.len() {
@@ -510,9 +524,8 @@ impl Airdrops {
                 if self.carried(*player) + taken[slot] >= self.rules.carry_cap {
                     continue;
                 }
-                if pos.horizontal_distance(pickup.pos) <= self.rules.pickup_radius
-                    && (pos.y - pickup.pos.y).abs() <= Fixed::from_int(2)
-                {
+                let offset = *pos - pickup.pos;
+                if offset.horizontal_length_sq() <= radius_sq && offset.y.abs() <= vertical_slack {
                     taken[slot] += 1;
                     consumed = true;
                     break;

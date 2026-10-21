@@ -243,7 +243,7 @@ impl Match {
     /// Apply raw damage to a core, through the same 0.35 multiplier the rest
     /// of the game uses. Siege structures and tests both enter here.
     pub fn damage_core(&mut self, team: TeamId, raw: i32) -> i32 {
-        self.state.damage_core(team, raw)
+        self.state.damage_core_at(team, raw, self.now)
     }
 
     /// Whether the match is over.
@@ -503,7 +503,7 @@ impl Match {
             return;
         }
         if let Some(victim) = self.core_in_reach(team, eye, &weapon) {
-            let removed = self.state.damage_core(victim, weapon.damage);
+            let removed = self.state.damage_core_at(victim, weapon.damage, self.now);
             if removed > 0 {
                 self.events.push(MatchEvent::CoreHit {
                     team: victim,

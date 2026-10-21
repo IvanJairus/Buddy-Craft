@@ -119,6 +119,24 @@ jobs:
           echo "running $wasm"
           node tools/wasm-golden.mjs "$wasm" airdrop::tests::site_selection_is_portable
 
+  match-sim:
+    name: full match wall-time gate (T-024)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.87.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: match-sim
+      # The debug job above already runs this file and checks every invariant.
+      # The 2 s wall-clock budget is a release number: an unoptimised build is
+      # roughly twenty times slower, and turning the gate off in debug would
+      # hide exactly the profile a host runs.
+      - name: full match in two seconds
+        run: cargo test --release -p room --test match_sim
+
   bench:
     name: budget (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}

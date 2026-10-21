@@ -374,14 +374,24 @@ impl MatchState {
     }
 
     /// Apply raw damage to a team's core, settling the outcome if it falls.
+    ///
+    /// Stamps the hit with the state clock. A caller that runs a tick whose
+    /// clock has not advanced yet, such as the room's match loop, uses
+    /// [`MatchState::damage_core_at`] so the elimination is stamped with the
+    /// tick the event is reported on.
     pub fn damage_core(&mut self, team: TeamId, raw: i32) -> i32 {
+        self.damage_core_at(team, raw, self.elapsed)
+    }
+
+    /// Apply raw damage at an explicit tick.
+    pub fn damage_core_at(&mut self, team: TeamId, raw: i32, now: Tick) -> i32 {
         if self.outcome.is_over() {
             return 0;
         }
         let Some(state) = self.teams.get_mut(team.0 as usize) else {
             return 0;
         };
-        let removed = state.base.damage(raw, self.elapsed);
+        let removed = state.base.damage(raw, now);
         if state.base.is_destroyed() {
             self.settle();
         }

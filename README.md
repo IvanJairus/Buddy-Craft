@@ -12,10 +12,10 @@ the match ends when a team's core is destroyed.
 > the determinism harness (T-015) — are done. M2 has the wire contract and its
 > validation (T-017, T-018), the room lifecycle and tick loop (T-019, T-020),
 > player bodies (P-01), the per-client snapshot encoder (T-021), the block edit
-> pipeline (T-022), the airdrop economy (T-025), the headless match loop (P-02)
-> and the bots that play it (T-023). The `match_sim` integration harness
-> (T-024) is next, then the web client. See [`docs/PLAN.md`](docs/PLAN.md) for
-> the full 60-task backlog.
+> pipeline (T-022), the airdrop economy (T-025), the headless match loop (P-02),
+> the bots that play it (T-023) and the whole-match invariant harness (T-024).
+> The offline client and its wasm bridge are next. See
+> [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
 
@@ -98,7 +98,7 @@ crates/
                 scenario                                        (compiled twice)
   world/        voxel storage, worldgen, mesher, chunk diffs
   protocol/     wire messages, tags, size budgets        (M2)
-  room/         pure room state machine and the headless match loop (M2)
+  room/         pure room state machine, match loop and bots (M2)
   client-wasm/  wasm bridge for the browser            (M3)
   host-worker/  Cloudflare Durable Object host         (M4)
   host-axum/    tokio/axum host                        (M4)
@@ -126,7 +126,7 @@ tests use the second without a runtime.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 438 tests
+cargo test --workspace --all-targets              # 441 tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
@@ -180,6 +180,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-025 | airdrops: schedule, integer site pick, carry, deposit, conservation | done |
 | P-02 | match loop: joins airdrops, edits, combat, crafting, buddies and elimination | done |
 | T-023 | bots: collect, build, fight, push a core, driven only by inputs and edits | done |
+| T-024 | whole-match harness: eight invariants per tick, reconnect, three-match leak probe | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -316,7 +317,17 @@ recorded here rather than quietly skipped:
   consumed − destroyed == carried + on ground + placed" subtracts consumption
   and then adds placement, which is the same crate twice. The shipped ledger
   puts each crate in exactly one bucket: `dropped == destroyed + deposited +
-  carried + on_ground`.
+  carried + on_ground + falling`. T-024 adds a separate reconciliation that
+  does check the plan's intent, after crafting and pad sweeps.
+- **T-024's entity ceiling is read as actors, not as every prop.**
+  `18 + 24 + 4` maps to the networked actor budget, the buddy ceiling and the
+  drops in the air. The 120 floor pickups have their own cap in §4.4.3 and are
+  counted separately; folding them into 46 would make the two rules
+  contradict each other for no benefit.
+- **`no_entity_leak` runs the same seed three times, not three seeds.** A
+  growing entity count would show up in any run, but a leaked global shows up
+  only as a *divergence* between two runs of the same input. Three identical
+  hash sequences are the stronger proof, so that is what the test asserts.
 - **`protocol::DiffEntry.index`'s doc comment was wrong and is fixed.**
   It said `x | y << 4 | z << 12`; `world::Column::index` — the only producer of
   these entries — packs `x + 16 * (z + 16 * y)`. Both are permutations of the
@@ -948,9 +959,13 @@ the rest as pickups; that is the anti-snowball lever, and the reason a loaded
 player is worth killing. Pickups expire at 180 s and the world holds at most 120.
 
 The module keeps a ledger: `dropped == destroyed + deposited + carried +
-on_ground`. Every path that removes a crate names its bucket, including the
-120-pickup eviction and the 180 s despawn, so "where did that crate go?" is a
-one-line query rather than a hunt through five systems.
+on_ground + falling`. The `falling` bucket was added in T-024: a drop is booked
+as dropped when it spawns, six or seven seconds before it lands, and without
+that bucket every descent made the books fail to balance. Only a test that
+samples every tick could see it.
+
+Pickup distance is compared squared. The inner loop runs pickups × bodies on
+every tick, and the square root alone measured 17% of a full match's wall time.
 
 **What this module does not own:** pad ownership. `deposit` takes
 `inside_own_pad` from the caller; the candidate set comes from worldgen, which
@@ -997,10 +1012,62 @@ and five bots ends with `winner: None` and `EndReason::NoHumans` on the tick the
 human's core falls, before last-team-standing can hand the win to a bot.
 `d05_ends_a_bot_match_when_the_last_human_dies` is that test.
 
-The full 3v3, six bot-driven bodies, finishes in **44.5 s debug and 2.23 s
+The full 3v3, six bot-driven bodies, finishes in **41.1 s debug and 1.77 s
 release**, inside the 30,000-tick (25 simulated minute) bound. Wall time is
-dominated by pathfinding, which is why the same match costs twenty times more
-in an unoptimised build.
+dominated by pathfinding and terrain queries, which is why the same match costs
+twenty times more in an unoptimised build.
+
+## A full match: eight promises, checked every tick
+
+T-024 runs the real `room::play::Match` loop with six bots driving every seat,
+for **28,490 ticks (23.7 simulated minutes)**, and checks all eight §12.4
+invariants after every one:
+
+| Invariant | How it is checked |
+| --- | --- |
+| HP stays in bounds | player, buddy and core HP compared with its own maximum every tick |
+| Entity count is bounded | players + buddies + falling drops ≤ 46, pickups ≤ 120 |
+| A dead buddy never returns | every buddy id that leaves the roster is retired; a return is a failure |
+| Core HP never rises | compared with the previous tick's value |
+| Buddy caps hold | per team and per role, against the cap matrix and the roster table |
+| Crates are conserved | the airdrop ledger balances, and deposits reconcile with pad blocks after crafting and elimination sweeps |
+| The match always ends | the loop is bounded at 30,000 ticks and asserts `is_over` |
+| Elimination is idempotent | a second hit on a fallen core removes zero HP and leaves `state_hash` unchanged |
+
+Two of those checks found real bugs that the unit tests could not see:
+
+- **The ledger had no bucket for a falling drop.** `dropped` was incremented at
+  spawn, but `destroyed + deposited + carried + on_ground` only described
+  crates on the ground, so the books failed to balance for 6.7 seconds of every
+  drop. `Audit::falling` is that bucket now, and `balances` includes it.
+- **The core's elimination stamp was one tick behind the event.** The match
+  clock advanced after actions ran, so damage used the state's previous tick
+  while the `Eliminated` event was reported on the match's current tick.
+  `MatchState::damage_core_at` takes the tick explicitly; the match loop passes
+  its own, and a host no longer sees two tick numbers for one hit.
+
+The conservation check needs care because §12.4's equation double-counts a
+placed crate (see the discrepancy list). The harness proves the ledger the game
+actually keeps: `audit.deposited` equals the blocks still on pads plus the
+blocks recipes consumed plus the blocks a sealed pad swept. It is checked every
+tick, not just at the end, so a phantom block cannot hide between checkpoints.
+
+`no_entity_leak` runs three matches in one process from the same seed and
+requires all three hash sequences to match. That turns "no global state" into a
+test: a leaked cache or RNG would make the second run diverge. `reconnect_mid_match`
+drops a human for 600 ticks, asserts the seat is still exactly one entity with
+the same body and no drift, then proves the next jump moves it.
+
+**The two-second gate is a release number.** The same match takes about 41
+seconds unoptimised, because pathfinding and terrain queries are the hot paths.
+Debug still checks all eight invariants; CI runs this file in both profiles and
+only the optimised run enforces the wall clock.
+
+The gate uses a 3v3. A 2v2 and a three-way FFA were tried first, and in 25
+simulated minutes neither pushed a core to zero: a lone bot spends its time
+collecting and dying rather than assembling a push. That is a bot-quality
+limit, not a harness limitation, and it is why T-023's acceptance test is a
+full six-bot room.
 
 ## Content discrepancies, resolved rather than guessed
 
