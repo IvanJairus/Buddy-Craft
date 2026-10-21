@@ -1,0 +1,38 @@
+/*
+ * Accessibility layer (task T-061).
+ *
+ * Focus rings are visible on every interactive screen. Reduced motion cuts
+ * animation and transition duration; gameplay effects are gated in the juice
+ * layer, not hidden here. Team colours are blue/orange, which stays separable
+ * for the common red-green deficiencies.
+ */
+
+:focus-visible {
+  outline: 3px solid #ffd166;
+  outline-offset: 3px;
+}
+
+.screen-button,
+.settings-control,
+.lobby-input {
+  outline-offset: 3px;
+}
+
+.cb-reduced-motion *,
+.cb-reduced-motion *::before,
+.cb-reduced-motion *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

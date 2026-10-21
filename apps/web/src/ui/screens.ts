@@ -9,6 +9,7 @@
  */
 
 import "./screens.css";
+import "./a11y.css";
 
 export type ScreenId = "boot" | "main" | "lobby" | "settings" | "match" | "results";
 
