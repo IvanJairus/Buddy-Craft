@@ -78,13 +78,10 @@ export interface PackedState {
 }
 
 function axisNibble(value: number): number {
-  if (value > 0) {
-    return 7;
-  }
-  if (value < 0) {
-    return 8;
-  }
-  return 0;
+  // Desktop passes -1..1; the touch stick passes its analogue fraction. Scale
+  // to the signed 4-bit range and keep -8 as full back, matching the decoder.
+  const scaled = Math.max(-8, Math.min(7, Math.round(value * 8)));
+  return scaled < 0 ? (scaled + 16) & 0x0f : scaled;
 }
 
 /** Pack the state into the §7.1 frame. Axes are 4-bit two's complement. */

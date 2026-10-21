@@ -27,6 +27,7 @@ import {
 import { ParticleSystem, type ParticleInfo } from "./render/particles";
 import { Interaction, type PendingEdit, type RayHit, type VisualState } from "./game/interaction";
 import { DesktopInput, type InputAction } from "./game/inputDesktop";
+import { TouchInput, type TouchState } from "./game/inputTouch";
 import { GameRenderer } from "./render/renderer";
 import type { RendererInfo } from "./render/renderer";
 import {
@@ -82,6 +83,7 @@ interface TestApi {
   };
   setSensitivity(value: number): void;
   setInvertY(value: boolean): void;
+  touch(): TouchState | null;
 }
 
 declare global {
@@ -108,6 +110,8 @@ let chunks: ChunkManager | null = null;
 let entities: EntityRenderer | null = null;
 let particles: ParticleSystem | null = null;
 let interaction: Interaction | null = null;
+let desktop: DesktopInput | null = null;
+let touch: TouchInput | null = null;
 let tickCalls = 0;
 
 async function boot(): Promise<void> {
@@ -143,7 +147,21 @@ async function boot(): Promise<void> {
     });
   }
 
-  const input = new DesktopInput({ canvas });
+  const touchMode =
+    query.get("touch") === "1" || window.matchMedia("(pointer: coarse)").matches;
+  if (touchMode) {
+    touch = new TouchInput();
+    if (interaction !== null) {
+      touch.onBreak = () => {
+        interaction?.breakBlock();
+      };
+      touch.onPlace = (block) => {
+        interaction?.place(block);
+      };
+    }
+  } else {
+    desktop = new DesktopInput({ canvas });
+  }
   window.__cbTest = {
     info: () => renderer.info(),
     chunks: () => chunks?.info() ?? null,
@@ -263,36 +281,63 @@ async function boot(): Promise<void> {
       client?.ackEdit(seq, accepted);
       return known;
     },
-    input: () => ({
-      polls: input.polls,
-      ticks: tickCalls,
-      frame: input.frameBytes(),
-      yaw: input.yawValue,
-      pitch: input.pitchValue,
-      slot: input.selectedSlot,
-      pointerLocked: input.pointerLock,
-      sensitivity: input.sensitivityValue,
-      invertY: input.invertYValue,
-      lastAction: input.lastActionValue,
-    }),
-    setSensitivity: (value) => input.setSensitivity(value),
-    setInvertY: (value) => input.setInvertY(value),
+    input: () => {
+      if (desktop !== null) {
+        return {
+          polls: desktop.polls,
+          ticks: tickCalls,
+          frame: desktop.frameBytes(),
+          yaw: desktop.yawValue,
+          pitch: desktop.pitchValue,
+          slot: desktop.selectedSlot,
+          pointerLocked: desktop.pointerLock,
+          sensitivity: desktop.sensitivityValue,
+          invertY: desktop.invertYValue,
+          lastAction: desktop.lastActionValue,
+        };
+      }
+      const state = touch?.state() ?? null;
+      return {
+        polls: state?.polls ?? 0,
+        ticks: tickCalls,
+        frame: state?.frame ?? [0, 0, 0, 0],
+        yaw: state?.yaw ?? 0,
+        pitch: state?.pitch ?? 0,
+        slot: state?.selectedSlot ?? 0,
+        pointerLocked: false,
+        sensitivity: 0,
+        invertY: false,
+        lastAction: null,
+      };
+    },
+    setSensitivity: (value) => desktop?.setSensitivity(value),
+    setInvertY: (value) => desktop?.setInvertY(value),
+    touch: () => touch?.state() ?? null,
   };
   window.__cbReady = true;
 
   const loop = (now: number): void => {
-    const frame = input.poll();
+    const frame =
+      desktop !== null
+        ? desktop.poll()
+        : touch !== null
+          ? touch.poll()
+          : new Uint8Array(4);
     if (client !== null) {
       client.tick(16, frame);
       tickCalls += 1;
     }
-    if (interaction !== null && input.pointerLock) {
-      interaction.aimFromCamera(renderer.camera);
-      if (input.consumePrimary()) {
-        interaction.breakBlock();
-      }
-      if (input.consumeSecondary()) {
-        interaction.place(1);
+    if (interaction !== null) {
+      if (desktop !== null && desktop.pointerLock) {
+        interaction.aimFromCamera(renderer.camera);
+        if (desktop.consumePrimary()) {
+          interaction.breakBlock();
+        }
+        if (desktop.consumeSecondary()) {
+          interaction.place(1);
+        }
+      } else if (touch !== null) {
+        interaction.aimFromCamera(renderer.camera);
       }
     }
     const views = client?.renderViews ?? null;

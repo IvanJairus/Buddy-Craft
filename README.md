@@ -17,9 +17,9 @@ the match ends when a team's core is destroyed.
 > wasm boundary with its render buffer (T-030), the three.js renderer with its
 > quality tiers and adaptive resolution (T-031) and chunk streaming with real
 > wasm meshing (T-032), instanced entities with GPU-lifetime particles
-> (T-033), the block interaction raycast with its previews (T-034) and desktop
-> input with pointer lock (T-035). Touch input and the offline match loop
-> follow.
+> (T-033), the block interaction raycast with its previews (T-034), desktop
+> input with pointer lock (T-035) and touch input with explicit modes (T-036).
+> The HUD and the offline match loop follow.
 > See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
@@ -110,7 +110,7 @@ crates/
 apps/
   web/src/main.ts          boot benchmark, wasm init, chunk loop (M2)
   web/src/render/          renderer, tiers, chunks, entities, particles (M2)
-  web/src/game/            interaction and desktop input (M2)
+  web/src/game/            interaction, desktop and touch input (M2)
   web/src/wasm/loader.ts   raw wasm loader and render views (M2)
   web/scripts/             wasm bridge build step (M2)
   web/tests/               Playwright specs for the browser contract (M2)
@@ -145,7 +145,7 @@ cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 29 specs, 1 headed (pointer lock)
+cd apps/web && npm ci && npm run test:e2e          # 33 specs, 1 headed (pointer lock)
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -203,6 +203,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-033 | instanced 3-part entities, float-driven animation, 256 GPU-lifetime particles | done |
 | T-034 | DDA voxel raycast, 6 m reach, wireframe highlight, ghost preview, pending edits | done |
 | T-035 | desktop input: 4-byte frame, pointer lock, hotbar, blur release, persisted settings | done |
+| T-036 | touch input: stick/look multi-touch, mode taps, 6/s deposit hold, stance, 44 px controls | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -397,6 +398,14 @@ recorded here rather than quietly skipped:
   other specs stay headless. The task's file list also names only
   `inputDesktop.ts`; the loop wiring and the poll/tick counters live in
   `main.ts`.
+- **T-036's "place button" is the block-mode world tap.** The plan names a
+  place button, but §8.6's control table has no separate tap-to-place button:
+  the selected slot is the mode and a tap on the world acts. Holding that same
+  touch repeats at the deposit rate, so one gesture means one thing. The task's
+  file list also names only `inputTouch.ts`; the control surface lives there
+  because T-037's HUD is later, and `main.ts` gained the touch/desktop switch
+  and the touch-to-interaction callbacks. The stance is local until the network
+  layer can apply it to every buddy.
 - **`window.__cbTest` ships in the production bundle.** The synthetic
   frame-time injector has to reach the same adaptive code the player runs, so
   gating it to a dev build would test a different path. It only calls renderer
@@ -1232,7 +1241,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 562.4 KB raw and 142.6 KB gzipped,
+device deterministically. The JS bundle is 575.4 KB raw and 145.8 KB gzipped,
 under §8.10's 450 KB gzip target; the wasm asset is measured in the chunk
 section below.
 
@@ -1359,7 +1368,7 @@ advance by the same amount over 300 ms.
 
 Pointer lock is the one part of the contract the headless browser refuses. That
 spec is a separate Playwright project with `headless: false`; CI installs Xvfb
-and runs the suite under a virtual display. The other 28 specs stay headless,
+and runs the suite under a virtual display. The other 32 specs stay headless,
 and a local full run opens a window for the one headed test.
 
 Sensitivity defaults to 0.25 yaw units per pixel; the plan does not pin it. LMB
@@ -1367,6 +1376,39 @@ sets FIRE and asks the interaction to break, RMB sets USE and asks it to place,
 both only while locked. The wire frame has no slot or edit fields, so hotbar
 actions are local callbacks and edits travel through `cb_local_edit`, not
 through the 4-byte frame.
+
+## Touch: the mode is the gesture
+
+The mobile controls solve break-vs-place by making the selected hotbar slot the
+mode. Slot 0 is the pickaxe; slots 1-8 are blocks. A tap on the world breaks in
+pickaxe mode and places in block mode. There is no long-press to disambiguate.
+
+| Control | Behaviour |
+| --- | --- |
+| Move | a stick spawns where the left thumb lands; drag distance maps to the two signed axes |
+| Look | drag on the right half; 0.35 degrees per pixel, independent of the stick |
+| Break and place | a tap, selected by the hotbar mode |
+| Deposit | holding a block-mode touch repeats placements at 6/s |
+| Jump | 64 px button, held jump bit |
+| Stance | 56 px button; cycles Follow, Hold and Assault and shows the current one |
+| Hotbar | nine 44 px slots, pickaxe plus eight block colours |
+
+The two-finger spec sends both touches through CDP `Input.dispatchTouchEvent`,
+because Playwright's `touchscreen.tap` is single-touch. It asserts both flags
+active, nonzero stick axes, a changed yaw and a nonzero packed move nibble, then
+both flags cleared on release. A separate hold test leaves one finger stationary
+for 750 ms and requires 3-6 placement requests; a drag past 8 px cancels the
+hold and becomes look, so the two gestures cannot both fire.
+
+The stance button cycles local state and emits the new stance; applying it to
+every buddy is the server's job (D-03) and arrives with the network layer. The
+deposit repeat is also a request rate: the room's edit pipeline enforces 6/s and
+pad ownership, so a hold outside the pad sends the same requests and the server
+refuses them.
+
+The touch surface lives in `inputTouch.ts` because T-037's HUD does not exist
+yet. It creates its own style element and uses only `textContent`; every control
+has an aria-label and the required 44 px minimum.
 
 ## Content discrepancies, resolved rather than guessed
 
