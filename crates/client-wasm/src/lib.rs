@@ -520,6 +520,108 @@ pub fn cb_set_quality(level: u8) -> u32 {
     .unwrap_or(0)
 }
 
+/// Serialise the embedded recipe table for the recipe book.
+///
+/// Layout: `u16 count`, then per recipe `u16 id`, `u16 unlock_s`, `u16
+/// cooldown_s`, `u8 output_kind`, `u8 buddy_kind`, `u16 cost`, `u8 name_len`,
+/// name bytes, `u16 block_count`, and `block_count` triples of `i8`.
+///
+/// The table is Rust's `RecipeBook::embedded()`, so the UI renders the same
+/// rows the matcher uses. No shape data is duplicated in TypeScript.
+#[wasm_bindgen]
+pub fn cb_recipes(out_ptr: u32, out_cap: u32) -> u32 {
+    if out_ptr == 0 {
+        return 0;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // A 64-bit native pointer does not fit the u32 ABI; the serializer is
+        // covered through `recipe_table_bytes` in the unit tests.
+        let _ = (out_ptr, out_cap);
+        0
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let bytes = recipe_table_bytes();
+        if bytes.len() > out_cap as usize {
+            return 0;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr as *mut u8, bytes.len());
+        }
+        bytes.len() as u32
+    }
+}
+
+/// Pack the nearest unlocked recipe within two missing blocks.
+///
+/// Returns `0xFFFF_FFFF` for no prediction, otherwise `recipe_id << 8 |
+/// missing`. The cluster is `count` triples of `i8` at `ptr`.
+#[wasm_bindgen]
+pub fn cb_near_miss(ptr: u32, count: u32, elapsed_s: u32) -> u32 {
+    if ptr == 0 || count == 0 || count as usize > sim::recipe::MAX_CLUSTER {
+        return u32::MAX;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = elapsed_s;
+        u32::MAX
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let raw = unsafe { core::slice::from_raw_parts(ptr as *const i8, count as usize * 3) };
+        let mut blocks = Vec::with_capacity(count as usize);
+        for i in 0..count as usize {
+            blocks.push([
+                i32::from(raw[i * 3]),
+                i32::from(raw[i * 3 + 1]),
+                i32::from(raw[i * 3 + 2]),
+            ]);
+        }
+        match sim::recipe::near_miss(&blocks, sim::recipe::RecipeBook::embedded(), elapsed_s) {
+            Some(near) => (u32::from(near.recipe.0) << 8) | near.missing(),
+            None => u32::MAX,
+        }
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn recipe_table_bytes() -> Vec<u8> {
+    use sim::recipe::RecipeOutput;
+    let book = sim::recipe::RecipeBook::embedded();
+    let mut out = Vec::new();
+    out.extend_from_slice(&(book.len() as u16).to_le_bytes());
+    for recipe in book.recipes() {
+        let (kind, buddy) = match recipe.output {
+            RecipeOutput::Sword => (0u8, 0u8),
+            RecipeOutput::Bow => (1, 0),
+            RecipeOutput::Bandage => (2, 0),
+            RecipeOutput::Spear => (3, 0),
+            RecipeOutput::Tower => (4, 0),
+            RecipeOutput::Ram => (5, 0),
+            RecipeOutput::Catapult => (6, 0),
+            RecipeOutput::Ward => (7, 0),
+            RecipeOutput::Buddy(kind) => (8, kind as u8),
+        };
+        out.extend_from_slice(&recipe.id.0.to_le_bytes());
+        out.extend_from_slice(&(recipe.unlock_s as u16).to_le_bytes());
+        out.extend_from_slice(&(recipe.cooldown_s as u16).to_le_bytes());
+        out.push(kind);
+        out.push(buddy);
+        out.extend_from_slice(&(recipe.cost() as u16).to_le_bytes());
+        let name = recipe.name.as_bytes();
+        out.push(name.len() as u8);
+        out.extend_from_slice(name);
+        out.extend_from_slice(&(recipe.blocks.len() as u16).to_le_bytes());
+        for block in &recipe.blocks {
+            out.push(block[0] as i8 as u8);
+            out.push(block[1] as i8 as u8);
+            out.push(block[2] as i8 as u8);
+        }
+    }
+    out
+}
+
 /// Cheap FNV hash of the local state, for desync diagnostics.
 #[wasm_bindgen]
 pub fn cb_state_hash() -> u32 {
@@ -569,6 +671,19 @@ mod tests {
 
         cb_tick(50, 0);
         assert!(bridge_desc().expect("bridge initialised").is_valid());
+    }
+
+    #[test]
+    fn recipe_table_has_fourteen_rows() {
+        let bytes = recipe_table_bytes();
+        assert!(bytes.len() > 2);
+        let count = u16::from_le_bytes([bytes[0], bytes[1]]);
+        assert_eq!(count, 14, "section 4.5.3 lists 14 recipes");
+    }
+
+    #[test]
+    fn near_miss_export_rejects_an_empty_cluster() {
+        assert_eq!(cb_near_miss(0, 0, 0), u32::MAX);
     }
 
     #[test]

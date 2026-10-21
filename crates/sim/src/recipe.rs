@@ -367,6 +367,138 @@ impl RecipeBook {
     }
 }
 
+/// A recipe a placed cluster is close to.
+///
+/// The missing blocks are what the player still has to add; the count is the
+/// "needs N more" number in the HUD. Keeping the blocks (not just the count)
+/// lets the test complete the shape and ask the real matcher whether the
+/// prediction was true.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct NearMiss {
+    /// The recipe that would match once the missing blocks are placed.
+    pub recipe: RecipeId,
+    /// The blocks the recipe has and the cluster does not.
+    pub missing_blocks: Vec<BlockPos>,
+}
+
+impl NearMiss {
+    /// How many more crates the completion needs.
+    pub fn missing(&self) -> u32 {
+        self.missing_blocks.len() as u32
+    }
+}
+
+/// The nearest unlocked recipe within two missing blocks, or `None`.
+///
+/// This is the same canonicaliser the matcher uses, run over rotations and
+/// translations of the placed cluster. A cluster that already matches returns
+/// `None`: exact matches are the matcher's answer, not a near miss.
+///
+/// The prediction is one-sided on purpose. A cluster with an extra block is not
+/// reported as "needs one more", because adding the missing block would still
+/// leave the extra in place and would not craft. Only a cluster that is a
+/// subset of a recipe can be completed by adding blocks, so only that case is
+/// predicted.
+pub fn near_miss(blocks: &[BlockPos], book: &RecipeBook, elapsed_s: u32) -> Option<NearMiss> {
+    if blocks.is_empty() || blocks.len() > MAX_CLUSTER {
+        return None;
+    }
+
+    let mut cluster = blocks.to_vec();
+    cluster.sort_unstable();
+    let before = cluster.len();
+    cluster.dedup();
+    if cluster.len() != before {
+        return None;
+    }
+    if cluster.iter().map(|b| b[1]).min() != Some(0) || !is_connected(&cluster) {
+        return None;
+    }
+    if book.match_key(&canonicalize(&cluster)).is_some() {
+        return None;
+    }
+
+    let mut best: Option<(u32, RecipeId, Vec<BlockPos>)> = None;
+    for recipe in book.recipes() {
+        if !recipe.unlocked_at(elapsed_s) {
+            continue;
+        }
+        let cost = recipe.cost() as usize;
+        if cluster.len() >= cost || cost - cluster.len() > 2 {
+            continue;
+        }
+        let mut recipe_sorted = recipe.blocks.clone();
+        recipe_sorted.sort_unstable();
+
+        for turns in 0..YAW_STEPS {
+            let rotated = rotate_y(&cluster, turns);
+            for anchor in &recipe_sorted {
+                if anchor[1] != 0 {
+                    // The cluster's lowest layer is y = 0; a vertical shift
+                    // would make the completion float.
+                    continue;
+                }
+                for first in rotated.iter().filter(|b| b[1] == 0) {
+                    let dx = anchor[0] - first[0];
+                    let dz = anchor[2] - first[2];
+                    let mut placed = Vec::with_capacity(rotated.len());
+                    let mut inside = true;
+                    for b in &rotated {
+                        let p = [b[0] + dx, b[1], b[2] + dz];
+                        if recipe_sorted.binary_search(&p).is_err() {
+                            inside = false;
+                            break;
+                        }
+                        placed.push(p);
+                    }
+                    if !inside {
+                        continue;
+                    }
+                    placed.sort_unstable();
+                    if placed.windows(2).any(|pair| pair[0] == pair[1]) {
+                        continue;
+                    }
+                    let missing: Vec<BlockPos> = recipe_sorted
+                        .iter()
+                        .copied()
+                        .filter(|p| placed.binary_search(p).is_err())
+                        .collect();
+                    if missing.is_empty() {
+                        continue;
+                    }
+                    // Return the missing blocks in the cluster's own frame, so
+                    // adding them to the original placement completes the
+                    // shape. The UI only needs the count, but the parity test
+                    // completes the cluster and asks the matcher.
+                    let undo = (YAW_STEPS - turns) % YAW_STEPS;
+                    let missing_local: Vec<BlockPos> = missing
+                        .iter()
+                        .map(|p| {
+                            let unshifted = [p[0] - dx, p[1], p[2] - dz];
+                            rotate_y(&[unshifted], undo)[0]
+                        })
+                        .collect();
+                    let better = match &best {
+                        None => true,
+                        Some((current, id, _)) => {
+                            missing_local.len() < *current as usize
+                                || (missing_local.len() == *current as usize && recipe.id < *id)
+                        }
+                    };
+                    if better {
+                        best = Some((missing_local.len() as u32, recipe.id, missing_local));
+                    }
+                }
+            }
+        }
+    }
+
+    best.map(|(_, recipe, missing_blocks)| NearMiss {
+        recipe,
+        missing_blocks,
+    })
+}
+
 /// Raw embedded RON, exposed so tests can re-parse and doctor it.
 pub const EMBEDDED_RON: &str = include_str!("../../../data/recipes.ron");
 
@@ -706,6 +838,78 @@ mod tests {
             [1, 0, 1],
             [2, 0, 1],
         ]
+    }
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0 >> 33
+        }
+    }
+
+    #[test]
+    fn near_miss_never_lies() {
+        let book = RecipeBook::embedded();
+        let mut rng = Lcg(0x5EED_1234);
+        let mut positives = 0;
+
+        for _ in 0..500 {
+            let recipe = &book.recipes()[(rng.next() as usize) % book.recipes().len()];
+            let turns = (rng.next() % YAW_STEPS as u64) as u32;
+            let rotated = rotate_y(&recipe.blocks, turns);
+            let min_x = rotated.iter().map(|b| b[0]).min().unwrap();
+            let max_x = rotated.iter().map(|b| b[0]).max().unwrap();
+            let min_z = rotated.iter().map(|b| b[2]).min().unwrap();
+            let max_z = rotated.iter().map(|b| b[2]).max().unwrap();
+            let span_x = (max_x - min_x) as u64;
+            let span_z = (max_z - min_z) as u64;
+            let dx = (rng.next() % (8 - span_x)) as i32 - min_x;
+            let dz = (rng.next() % (8 - span_z)) as i32 - min_z;
+
+            let mut placed: Vec<BlockPos> = rotated
+                .iter()
+                .map(|b| [b[0] + dx, b[1], b[2] + dz])
+                .collect();
+            let remove = (rng.next() % 4) as usize;
+            for _ in 0..remove {
+                let index = (rng.next() as usize) % placed.len();
+                placed.swap_remove(index);
+            }
+            if placed.is_empty() {
+                continue;
+            }
+
+            let exact = book.match_key(&canonicalize(&placed));
+            let predicted = near_miss(&placed, book, u32::MAX);
+
+            if let Some(near) = predicted {
+                positives += 1;
+                assert!(
+                    exact.is_none(),
+                    "near miss predicted for an exact match: {placed:?}"
+                );
+                assert!(near.missing() <= 2);
+                let mut completed = placed.clone();
+                completed.extend(near.missing_blocks.iter().copied());
+                assert_eq!(
+                    book.match_key(&canonicalize(&completed)),
+                    Some(near.recipe),
+                    "completing a near miss did not match the predicted recipe: {placed:?}"
+                );
+            } else if let Some(id) = exact {
+                assert!(book.get(id).is_some());
+            }
+        }
+
+        assert!(
+            positives >= 50,
+            "the fixture must exercise near misses; got {positives}"
+        );
     }
 
     #[test]

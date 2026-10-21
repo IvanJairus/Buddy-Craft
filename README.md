@@ -18,9 +18,9 @@ the match ends when a team's core is destroyed.
 > quality tiers and adaptive resolution (T-031) and chunk streaming with real
 > wasm meshing (T-032), instanced entities with GPU-lifetime particles
 > (T-033), the block interaction raycast with its previews (T-034), desktop
-> input with pointer lock (T-035), touch input with explicit modes (T-036) and
-> the HUD with its 10 Hz store (T-037). The recipe book and the offline match
-> loop follow.
+> input with pointer lock (T-035), touch input with explicit modes (T-036), the
+> HUD with its 10 Hz store (T-037) and the recipe book with Rust near-miss
+> (T-038). The lobby/screens and the offline match loop follow.
 > See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
@@ -105,14 +105,14 @@ crates/
   world/        voxel storage, worldgen, mesher, chunk diffs
   protocol/     wire messages, tags, size budgets        (M2)
   room/         pure room state machine, match loop and bots (M2)
-  client-wasm/  wasm boundary: 13 exports and the render buffer (M2)
+  client-wasm/  wasm boundary: state exports, recipe helpers, buffer (M2)
   host-worker/  Cloudflare Durable Object host         (M4)
   host-axum/    tokio/axum host                        (M4)
 apps/
   web/src/main.ts          boot benchmark, wasm init, chunk loop (M2)
   web/src/render/          renderer, tiers, chunks, entities, particles (M2)
   web/src/game/            interaction, desktop and touch input (M2)
-  web/src/ui/              reactive store and match HUD (M2)
+  web/src/ui/              store, HUD, recipe book (M2)
   web/src/wasm/loader.ts   raw wasm loader and render views (M2)
   web/scripts/             wasm bridge build step (M2)
   web/tests/               Playwright specs for the browser contract (M2)
@@ -141,13 +141,13 @@ tests use the second without a runtime.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 454 Rust tests
+cargo test --workspace --all-targets              # 457 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 36 specs, 1 headed (pointer lock)
+cd apps/web && npm ci && npm run test:e2e          # 39 specs, 1 headed (pointer lock)
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -199,7 +199,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | P-02 | match loop: joins airdrops, edits, combat, crafting, buddies and elimination | done |
 | T-023 | bots: collect, build, fight, push a core, driven only by inputs and edits | done |
 | T-024 | whole-match harness: eight invariants per tick, reconnect, three-match leak probe | done |
-| T-030 | wasm boundary: 13 exports, byte-stable render buffer, zero-allocation tick | done |
+| T-030 | wasm boundary: state exports, byte-stable render buffer, zero-allocation tick | done |
 | T-031 | three.js WebGL2 bootstrap, exact quality tiers, adaptive resolution, boot benchmark | done |
 | T-032 | chunk streaming: 6/7 hysteresis, neighbour meshing, 88 chunk draws, 34 KB leak | done |
 | T-033 | instanced 3-part entities, float-driven animation, 256 GPU-lifetime particles | done |
@@ -207,6 +207,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-035 | desktop input: 4-byte frame, pointer lock, hotbar, blur release, persisted settings | done |
 | T-036 | touch input: stick/look multi-touch, mode taps, 6/s deposit hold, stance, 44 px controls | done |
 | T-037 | HUD core: 10 Hz store, transform-only bars, textContent, 5-node feed, measured cost | done |
+| T-038 | recipe book from the wasm table, locked tiers, Rust near-miss, ghost overlay | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -356,7 +357,7 @@ recorded here rather than quietly skipped:
   created (T-001's web skeleton was skipped). The bridge adds the dependency and
   `crate-type = ["cdylib", "rlib"]`, creates only the wasm loader, and leaves
   the rest of the app to T-031. Raw wasm export names carry wasm-bindgen's hash
-  suffix, so `tools/wasm-exports.mjs` checks the 13 base names and CI runs it.
+  suffix, so `tools/wasm-exports.mjs` checks the 15 base names and CI runs it.
   The wasm-bindgen CLI is not part of the build: the raw loader instantiates the
   module directly and stubs its four unused imports. A future export that takes
   a string or an object would need the glue back; none does today.
@@ -389,8 +390,8 @@ recorded here rather than quietly skipped:
   tests, and adding a seventh float would move every field after it. The
   convention is stated in both the section above and the module docs.
 - **T-034 needed a voxel source the bridge does not provide.** The task's file
-  list names only `interaction.ts`, but T-030 pins the bridge at 13 exports and
-  none of them answers "what block is at (x, y, z)?". The mesh payload grew a
+  list names only `interaction.ts`, but none of the bridge exports answers
+  "what block is at (x, y, z)?". The mesh payload grew a
   256-byte height map per column, and the chunk manager implements
   `VoxelSource` over it. That is a surface, not a full column mirror: caves and
   the air under a canopy are approximate. T-042 owns the real voxel state; the
@@ -421,6 +422,23 @@ recorded here rather than quietly skipped:
   countdown are local; stance is wired to both input paths. This is the store's
   contract, not a hidden match implementation, and the test hooks drive the
   same store a network loop will.
+- **T-038 grew the wasm bridge to 15 exports.** T-030's criterion pinned the
+  bridge at exactly 13, and that was true when T-030 shipped. The recipe book
+  needs the same table and the same near-miss logic the matcher uses, and §5.1
+  forbids reimplementing recipe matching in JS, so `cb_recipes` and
+  `cb_near_miss` are two read-only helpers. The state API is unchanged;
+  `tools/wasm-exports.mjs`, CI and this README now pin 15.
+- **Near-miss is "missing blocks ≤ 2", not byte Hamming distance.** A byte
+  comparison of canonical keys does not yield a "needs N" count, and a cluster
+  with an extra block cannot be fixed by adding a missing one. The implemented
+  metric is the useful subset: the placed cluster is a subset of a recipe and
+  is 1 or 2 blocks short. `near_miss_never_lies` completes the prediction and
+  runs the real matcher over 500 random clusters, so a false "needs N" cannot
+  pass.
+- **The recipe book's CSS is a third file.** The task names two TypeScript
+  files; the panel needs layout styles, so `recipeBook.css` is added. The
+  prediction and the ghost are not yet wired to pad state; their APIs are
+  exercised by the page specs and T-042/T-048 will feed them.
 - **`window.__cbTest` ships in the production bundle.** The synthetic
   frame-time injector has to reach the same adaptive code the player runs, so
   gating it to a dev build would test a different path. It only calls renderer
@@ -1172,12 +1190,13 @@ collecting and dying rather than assembling a push. That is a bot-quality
 limit, not a harness limitation, and it is why T-023's acceptance test is a
 full six-bot room.
 
-## The wasm boundary: one buffer, thirteen exports
+## The wasm boundary: one buffer, fifteen exports
 
 The client does not parse a scene graph out of wasm. It reads one `#[repr(C)]`
-buffer: a 52-byte header followed by the arrays it points at. Thirteen exports
+buffer: a 52-byte header followed by the arrays it points at. Fifteen exports
 are the whole API, each returning a `u32` pointer or status, so no `JsValue` is
-created on the frame path.
+created on the frame path. T-030 shipped 13; T-038 added two read-only recipe
+helpers, described below.
 
 | Piece | Size or rule | Why |
 | --- | --- | --- |
@@ -1199,11 +1218,11 @@ a grow detaches every cached `ArrayBuffer`. In dev builds every frame checks
 that each view still has a non-zero buffer and that the magic is present; the
 error names `memory.grow`, the actual cause.
 
-The browser does not load wasm-bindgen glue. All 13 exports take and return
+The browser does not load wasm-bindgen glue. All 15 exports take and return
 numbers, so `loadClientWasm` compiles the raw `.wasm`, stubs the four internal
 imports (`describe`, a throw shim, two externref-table hooks), and maps the
 hash-suffixed export names back to the contract. The wasm artifact is the single
-source of truth; `tools/wasm-exports.mjs` checks the 13 base names in CI.
+source of truth; `tools/wasm-exports.mjs` checks the 15 base names in CI.
 
 `cb_tick` still steps one local body against a flat floor. That is enough to
 prove wire input decoding, the 50 ms accumulator (at most four catch-up steps
@@ -1256,7 +1275,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 580.3 KB raw and 147.4 KB gzipped,
+device deterministically. The JS bundle is 586.8 KB raw and 149.5 KB gzipped,
 under §8.10's 450 KB gzip target; the wasm asset is measured in the chunk
 section below.
 
@@ -1275,7 +1294,7 @@ budget when they want a steady state without waiting.
 | Triangles | 104,862 (gate 350k) |
 | 200 load/unload cycles | 34 KB heap growth after GC (gate 5 MB) |
 | 64 MB `memory.grow` | views rebuilt, geometry unchanged, new meshes still work |
-| wasm asset | 322.8 KB raw, 106.4 KB gzipped (target 700 KB) |
+| wasm asset | 376.0 KB raw, 121.6 KB gzipped (target 700 KB) |
 
 The mesher is neighbour-aware: each column is meshed with the four columns
 around it, so interior chunk borders do not draw walls. The payload is a
@@ -1383,7 +1402,7 @@ advance by the same amount over 300 ms.
 
 Pointer lock is the one part of the contract the headless browser refuses. That
 spec is a separate Playwright project with `headless: false`; CI installs Xvfb
-and runs the suite under a virtual display. The other 35 specs stay headless,
+and runs the suite under a virtual display. The other 38 specs stay headless,
 and a local full run opens a window for the one headed test.
 
 Sensitivity defaults to 0.25 yaw units per pixel; the plan does not pin it. LMB
@@ -1456,6 +1475,43 @@ Plan §8.7 says the store batches DOM writes into a `requestAnimationFrame`; the
 acceptance criterion says a 20 Hz value is sampled on a 100 ms timer. The timer
 wins: a 60 Hz frame callback would need a second throttle anyway, and 100 ms is
 the exact bound the criterion names.
+
+## Recipes: the table and the prediction come from Rust
+
+The client does not carry a second recipe list. At boot it calls `cb_recipes`,
+which serialises `RecipeBook::embedded()`; the book decodes 14 rows and draws
+each top-down grid from that row's blocks. Locked rows are visible with their
+unlock clock.
+
+| Check | Result |
+| --- | --- |
+| Cards built from the wasm table | 14 |
+| Locked cards | visible, each with `Unlocks m:ss` |
+| Near-miss parity | 500 random clusters; every predicted completion matched the matcher |
+| Banner | `SWORD: needs 1 more crate` |
+| Ghost | one `InstancedMesh`, count = recipe cost |
+| wasm asset | 376.0 KB raw, 121.6 KB gzipped |
+
+`cb_near_miss` runs the Rust canonicaliser over rotations and translations and
+returns `recipe_id << 8 | missing`. Rust maps the missing blocks back into the
+cluster's frame, so `near_miss_never_lies` can add them to the original cluster
+and ask the real matcher; every positive prediction matched. The UI only needs
+the count. The prediction is one-sided: a cluster with an extra block is not
+reported as "needs one more", because adding the missing block would not craft.
+That is the Hamming-distance-2 intent without a false promise on a shape that
+also has an extra crate.
+
+The ghost is one translucent instanced copy of a recipe row. The book opens from
+E on desktop and from its own 44 px button on touch; the near-miss banner is
+driven by the same Rust call. The pad state that will feed an anchor and a live
+cluster is T-042/T-048's job; the prediction and overlay APIs are already
+tested.
+
+This task is why the wasm boundary grew from 13 to 15 exports. §5.1 says JS
+never decides whether a recipe matches, so porting the canonicaliser into
+TypeScript was not an option. The two new exports are read-only data and
+prediction helpers; the state exports are unchanged and the export check now
+pins 15.
 
 ## Content discrepancies, resolved rather than guessed
 

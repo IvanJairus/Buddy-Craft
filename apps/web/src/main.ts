@@ -29,7 +29,10 @@ import { Interaction, type PendingEdit, type RayHit, type VisualState } from "./
 import { DesktopInput, type InputAction } from "./game/inputDesktop";
 import { TouchInput, type TouchState } from "./game/inputTouch";
 import { Hud, type HudStats } from "./ui/hud";
+import { RecipeBookUi, type RecipeBookInfo } from "./ui/recipeBook";
 import { Store, initialHudState, type HudState, type HudStance } from "./ui/store";
+import { GhostOverlay, type GhostInfo } from "./render/ghostOverlay";
+import type { RecipeRow } from "./wasm/loader";
 import { GameRenderer } from "./render/renderer";
 import type { RendererInfo } from "./render/renderer";
 import {
@@ -90,6 +93,16 @@ interface TestApi {
   hudState(): HudState;
   hudStats(): HudStats;
   hudToast(text: string): void;
+  recipeRows(): RecipeRow[];
+  recipesInfo(): RecipeBookInfo;
+  toggleRecipes(elapsed?: number): void;
+  showNearMiss(
+    blocks: Array<[number, number, number]>,
+    elapsed: number,
+  ): { recipeId: number; name: string; missing: number } | null;
+  clearNearMiss(): void;
+  ghostShow(recipeId: number, origin: [number, number, number]): GhostInfo | null;
+  ghostHide(): GhostInfo;
 }
 
 declare global {
@@ -119,6 +132,7 @@ let interaction: Interaction | null = null;
 let desktop: DesktopInput | null = null;
 let touch: TouchInput | null = null;
 let tickCalls = 0;
+let elapsedSeconds = 0;
 const stanceOrder: HudStance[] = ["follow", "hold", "assault"];
 
 async function boot(): Promise<void> {
@@ -154,6 +168,9 @@ async function boot(): Promise<void> {
     });
   }
 
+  const recipes = wasmClient.recipes();
+  const recipeBook = new RecipeBookUi(document.body, recipes);
+  const ghost = new GhostOverlay(renderer.scene);
   const hudStore = new Store<HudState>(initialHudState());
   const hud = new Hud(document.body, hudStore);
   let stanceIndex = 0;
@@ -185,6 +202,10 @@ async function boot(): Promise<void> {
     desktop.onAction((action) => {
       if (action === "stance") {
         advanceStance();
+      } else if (action === "recipes") {
+        recipeBook.toggle(elapsedSeconds);
+      } else if (action === "menu") {
+        recipeBook.close();
       }
     });
   }
@@ -343,6 +364,35 @@ async function boot(): Promise<void> {
     hudState: () => ({ ...hudStore.get() }),
     hudStats: () => hud.stats(),
     hudToast: (text) => hud.toast(text),
+    recipeRows: () => recipes,
+    recipesInfo: () => recipeBook.info(),
+    toggleRecipes: (seconds = elapsedSeconds) => recipeBook.toggle(seconds),
+    showNearMiss: (blocks, elapsed) => {
+      const near = wasmClient.nearMiss(blocks, elapsed);
+      if (near === null) {
+        recipeBook.clearNearMiss();
+        return null;
+      }
+      const row = recipes.find((candidate) => candidate.id === near.recipeId);
+      if (row === undefined) {
+        recipeBook.clearNearMiss();
+        return null;
+      }
+      recipeBook.showNearMiss(row, near.missing);
+      return { recipeId: row.id, name: row.name, missing: near.missing };
+    },
+    clearNearMiss: () => recipeBook.clearNearMiss(),
+    ghostShow: (recipeId, origin) => {
+      const row = recipeBook.row(recipeId);
+      if (row === undefined) {
+        return null;
+      }
+      return ghost.show(row.blocks, origin);
+    },
+    ghostHide: () => {
+      ghost.hide();
+      return ghost.info();
+    },
   };
   window.__cbReady = true;
 
@@ -358,6 +408,8 @@ async function boot(): Promise<void> {
       tickCalls += 1;
     }
     const seconds = Math.floor(now / 1000);
+    elapsedSeconds = seconds;
+    recipeBook.setElapsed(seconds);
     const cycle = seconds % 20;
     hudStore.set({
       matchSeconds: seconds,

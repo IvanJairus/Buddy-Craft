@@ -32,8 +32,8 @@ test("pointer lock on click, mouse look and fire button", async ({ page }) => {
   });
   await page.bringToFront();
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    await page.mouse.click(640, 360);
-    await page.waitForTimeout(200);
+    await page.locator("#game").click({ position: { x: 640, y: 360 } });
+    await page.waitForTimeout(250);
     const locked = await page.evaluate(
       () => (window as unknown as TestWindow).__cbTest!.input().pointerLocked,
     );

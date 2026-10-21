@@ -127,7 +127,52 @@ export async function loadClientWasm(url: string): Promise<ClientWasmExports> {
     cb_set_quality: lookup("cb_set_quality"),
     cb_state_hash: lookup("cb_state_hash"),
     cb_mem_alloc: lookup("cb_mem_alloc"),
+    cb_recipes: lookup("cb_recipes"),
+    cb_near_miss: lookup("cb_near_miss"),
   };
+}
+
+function parseRecipeTable(bytes: Uint8Array): RecipeRow[] {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const decoder = new TextDecoder();
+  let at = 0;
+  const need = (count: number): void => {
+    if (at + count > bytes.byteLength) {
+      throw new Error("recipe table is truncated");
+    }
+  };
+  need(2);
+  const count = view.getUint16(at, true);
+  at += 2;
+  const rows: RecipeRow[] = [];
+  for (let i = 0; i < count; i += 1) {
+    need(11);
+    const id = view.getUint16(at, true);
+    const unlockSeconds = view.getUint16(at + 2, true);
+    const cooldownSeconds = view.getUint16(at + 4, true);
+    const output = view.getUint8(at + 6);
+    const buddy = view.getUint8(at + 7);
+    const cost = view.getUint16(at + 8, true);
+    const nameLength = view.getUint8(at + 10);
+    at += 11;
+    need(nameLength + 2);
+    const name = decoder.decode(bytes.subarray(at, at + nameLength));
+    at += nameLength;
+    const blockCount = view.getUint16(at, true);
+    at += 2;
+    need(blockCount * 3);
+    const blocks: Array<[number, number, number]> = [];
+    for (let b = 0; b < blockCount; b += 1) {
+      blocks.push([
+        view.getInt8(at) as number,
+        view.getInt8(at + 1) as number,
+        view.getInt8(at + 2) as number,
+      ]);
+      at += 3;
+    }
+    rows.push({ id, name, output, buddy, unlockSeconds, cooldownSeconds, cost, blocks });
+  }
+  return rows;
 }
 
 /**
@@ -149,6 +194,20 @@ export interface ClientWasmExports {
   cb_set_quality(level: number): number;
   cb_state_hash(): number;
   cb_mem_alloc(size: number): number;
+  cb_recipes(outPtr: number, outCap: number): number;
+  cb_near_miss(ptr: number, count: number, elapsedSeconds: number): number;
+}
+
+/** One recipe row, decoded from the wasm table. */
+export interface RecipeRow {
+  id: number;
+  name: string;
+  output: number;
+  buddy: number;
+  unlockSeconds: number;
+  cooldownSeconds: number;
+  cost: number;
+  blocks: Array<[number, number, number]>;
 }
 
 /** Live views into one wasm memory generation. */
@@ -418,6 +477,48 @@ export class ClientWasm {
   /** The current frame's typed views, or null before `init`. */
   get renderViews(): RenderViews | null {
     return this.views;
+  }
+
+  /** Decode the embedded recipe table once at boot. */
+  recipes(): RecipeRow[] {
+    let capacity = 16 * 1024;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const ptr = this.alloc(capacity);
+      const length = this.wasm.cb_recipes(ptr, capacity) >>> 0;
+      if (length > 0) {
+        const copy = new Uint8Array(this.wasm.memory.buffer, ptr, length).slice();
+        this.rebuildViews();
+        return parseRecipeTable(copy);
+      }
+      capacity *= 4;
+    }
+    throw new Error("cb_recipes did not fit its staging buffer");
+  }
+
+  /**
+   * Ask Rust for the nearest unlocked recipe within two missing blocks.
+   * Returns null when the cluster is exact or too far from any recipe.
+   */
+  nearMiss(
+    blocks: ReadonlyArray<readonly [number, number, number]>,
+    elapsedSeconds: number,
+  ): { recipeId: number; missing: number } | null {
+    if (blocks.length === 0 || blocks.length > 32) {
+      return null;
+    }
+    const ptr = this.alloc(blocks.length * 3);
+    const bytes = new Uint8Array(this.wasm.memory.buffer, ptr, blocks.length * 3);
+    for (let i = 0; i < blocks.length; i += 1) {
+      bytes[i * 3] = blocks[i][0] & 0xff;
+      bytes[i * 3 + 1] = blocks[i][1] & 0xff;
+      bytes[i * 3 + 2] = blocks[i][2] & 0xff;
+    }
+    const packed = this.wasm.cb_near_miss(ptr, blocks.length, elapsedSeconds) >>> 0;
+    this.rebuildViews();
+    if (packed === 0xffff_ffff) {
+      return null;
+    }
+    return { recipeId: packed >>> 8, missing: packed & 0xff };
   }
 
   /** Bytes currently reserved by the wasm memory, including the arena. */
