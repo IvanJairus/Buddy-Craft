@@ -148,13 +148,13 @@ tests use the second without a runtime.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 480 Rust tests
+cargo test --workspace --all-targets              # 484 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 71 specs, 1 headed (pointer lock)
+cd apps/web && npm ci && npm run test:e2e          # 85 specs, 1 headed (pointer lock)
 
 # Host (local dev). `CB_ADDR`, `CB_ALLOWED_ORIGINS` and `CB_SUMMARY_DIR` override defaults.
 cargo run -p host-axum                            # ws://127.0.0.1:8080/ws?room=DEV001
@@ -227,6 +227,25 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-043 | snapshots: pooled delta decode, 64-frame baselines, 100 ms interpolation, loss recovery | done |
 | T-044 | juice: event driven, hit flash/stop, shake, 32 damage numbers, telegraph, reduced-motion gate | done |
 | T-045 | axum host: WS upgrade, Origin gate, 20 Hz room task, health, graceful summaries | done |
+| T-046 | Durable Object adapter and `wrangler deploy` | blocked: deploy/runtime verification |
+| T-047 | Crockford codes, registry collision, lockout and quota policy | partial: HTTP/DO blocked behind T-046 |
+| T-048 | offline Web Worker match | not started |
+| T-049 | audio graph, 24 voices, 30 procedural cues, rumble worklet | partial: WebKit/iOS and recorded assets not verified |
+| T-050 | anti-cheat T1–T15 matrix and cheat client | not started |
+| T-051 | art atlas and GLB models | not started: no art assets |
+| T-052 | content pass and recipe editor | not started |
+| T-053 | 20-room bot swarm load test | not started |
+| T-054 | cross-browser two-client E2E suite | not started: needs T-048 |
+| T-055 | CI performance gates | not started |
+| T-056 | telemetry, kill switches, runbook | not started |
+| T-057 | Vercel/Cloudflare deployment pipelines | not started: live deploy not authorized |
+| T-058 | generated protocol/architecture docs | not started |
+| T-059 | CSP, no-innerHTML guard, bundle secret scan | done locally; headers live in T-057 |
+| T-060 | balance instrumentation and report | not started |
+| T-061 | focus, reduced motion, HUD contrast, A11Y doc | done |
+| T-062 | physical device matrix | blocked: manual devices |
+| T-063 | production launch checklist | blocked: live six-human match |
+| T-064 | first-week triage | blocked: needs a launched week |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -1397,7 +1416,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 627.5 KB raw and 160.0 KB gzipped,
+device deterministically. The JS bundle is 636.2 KB raw and 162.4 KB gzipped,
 under §8.10's 450 KB gzip target; the wasm asset is measured in the chunk
 section below.
 
@@ -1870,6 +1889,20 @@ Origin rejected with 403.
 The browser does not connect yet. Start still enters the demo match, and every
 WebSocket client shares the single human seat. T-048 owns the lobby/offline loop
 that turns this host into a playable browser session.
+
+## Where this batch stops
+
+The batch reached T-061 only partially. T-047's registry policy and Crockford
+codes are native-tested, but its HTTP/DO surface is blocked behind T-046.
+T-049 has a real graph and 30 procedural cues, but no recorded OGG assets and no
+WebKit/iOS run. T-059 and T-061 are complete locally. T-046 and T-057 need a
+live Cloudflare/Vercel deployment, T-051 needs art, T-048 and T-054 need the
+playable worker loop, and T-062/T-063/T-064 need physical devices, six humans on
+production and a week of telemetry. Those are not marked done.
+
+The current gates are 484 Rust tests, 85 Playwright specs, clippy/fmt clean, and
+15 wasm exports. The last full-browser run is Chromium plus the headed pointer
+lock project; Firefox and WebKit are not installed on this machine.
 
 ## Content discrepancies, resolved rather than guessed
 
