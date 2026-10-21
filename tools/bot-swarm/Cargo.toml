@@ -1,0 +1,12 @@
+[package]
+name = "bot-swarm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+room.workspace = true
+sim.workspace = true
+protocol.workspace = true
+libc = "0.2"

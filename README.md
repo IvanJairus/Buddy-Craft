@@ -160,6 +160,7 @@ cd apps/web && npm ci && npm run test:e2e          # 90 specs, 1 headed (pointer
 cargo run -p host-axum                            # ws://127.0.0.1:8080/ws?room=DEV001
 curl -s http://127.0.0.1:8080/healthz
 cargo test --release -p host-axum tick_interval_p99   # 55 ms gate, release codegen
+cargo run --release -p bot-swarm                   # 20 rooms x 6 bots, writes tools/bot-swarm/report.md
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -234,7 +235,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-050 | anti-cheat: 15 named threat tests, connection cap, token revocation | partial: cheat-client and host wiring missing |
 | T-051 | art atlas and GLB models | not started: no art assets |
 | T-052 | content pass and recipe editor | not started |
-| T-053 | 20-room bot swarm load test | not started |
+| T-053 | 20-room bot swarm: p99 0.455 ms, 27 MB RSS, 240-player Oracle estimate | done |
 | T-054 | cross-browser two-client E2E suite | not started: needs T-048 |
 | T-055 | CI performance gates | not started |
 | T-056 | telemetry, kill switches, runbook | not started |
@@ -1914,6 +1915,16 @@ Not yet covered: a mode selector in the menu (Teams is the default), and a
 scripted human mine-craft-buddy-core walkthrough. Bots perform the craft and
 core loop in the full-match test; the human can move, break, place and follow
 the same wire path.
+
+## Swarm: 20 rooms on one core
+
+T-053 runs twenty `room::Match` instances with six bots each for three simulated
+minutes. On this machine the tick body is **0.455 ms p99** over 72,000 room
+ticks, snapshot bytes are **67 B p95** and **127 B max**, RSS is **27 MB**, and
+the process uses one core. That is about 20 rooms or 120 players per core; two
+Oracle cores carry about 40 rooms, or 240 players, inside the plan's 150-300
+concurrent-player assumption. The probe is in-process, so socket framing stays
+T-045's measurement; the room code is the same.
 
 ## Where this batch stops
 

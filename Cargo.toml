@@ -8,6 +8,7 @@ members = [
   "crates/client-wasm",
   "crates/host-worker",
   "crates/host-axum",
+  "tools/bot-swarm",
 ]
 
 [workspace.package]
