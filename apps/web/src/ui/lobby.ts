@@ -1,11 +1,16 @@
 /**
- * Online lobby shell (task T-039).
+ * Online lobby shell (task T-039, room codes T-047).
  *
  * Networking arrives in T-040; this screen owns the part that must not depend
- * on it: a six-character room code, a copy button, and join validation before
- * any connection is attempted. The start button enters the local match until
- * the net client can replace it with a real room.
+ * on it: a six-character Crockford room code, a copy button, and join
+ * validation before any connection is attempted.
  */
+
+import {
+  generateRoomCode,
+  isValidRoomCode,
+  normaliseRoomCode,
+} from "./roomCode";
 
 function make<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -18,22 +23,8 @@ function make<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-
-function generateCode(): string {
-  const values = new Uint8Array(6);
-  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
-    crypto.getRandomValues(values);
-  } else {
-    for (let i = 0; i < values.length; i += 1) {
-      values[i] = Math.floor(Math.random() * 256);
-    }
-  }
-  return Array.from(values, (value) => CODE_ALPHABET[value % CODE_ALPHABET.length]).join("");
-}
-
 export function validRoomCode(value: string): boolean {
-  return /^[A-Z0-9]{6}$/.test(value.trim().toUpperCase());
+  return isValidRoomCode(value);
 }
 
 export interface LobbyCallbacks {
@@ -122,15 +113,15 @@ export class LobbyScreen {
   }
 
   createRoom(): string {
-    this.code = generateCode();
+    this.code = generateRoomCode();
     this.showCode();
     this.errorText.textContent = "";
     return this.code;
   }
 
   joinRoom(): boolean {
-    const value = this.joinInput.value.trim().toUpperCase();
-    if (!validRoomCode(value)) {
+    const value = normaliseRoomCode(this.joinInput.value);
+    if (!isValidRoomCode(value)) {
       this.errorText.textContent = "Enter a 6-character room code";
       return false;
     }
