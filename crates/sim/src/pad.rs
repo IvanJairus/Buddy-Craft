@@ -402,23 +402,25 @@ impl Pads {
         })
     }
 
-    /// Place (`occupied = true`) or remove a crate on `team`'s pad.
+    /// Whether `team` may write `world` at all, without writing it.
     ///
-    /// Returns `Ok(true)` when the pad changed, `Ok(false)` when it was
-    /// already in that state, and `Err(_)` when the position is not writable
-    /// by this team at all.
-    pub fn place(
-        &mut self,
-        team: TeamId,
-        world: [i32; 3],
-        occupied: bool,
-    ) -> Result<bool, PlaceError> {
+    /// The read-only half of [`Pads::place`], split out because the edit
+    /// pipeline (§6.6) validates *before* it mutates: reach, existence,
+    /// protection and rate are all decided first, and only an edit that passes
+    /// every check is allowed to touch the world. Doing the protection check by
+    /// calling `place` and undoing it on a later refusal would mean a rejected
+    /// edit had already changed the pad — briefly, but observably in the tick
+    /// that reads it.
+    ///
+    /// `occupied` is the *intent*: placing into the core's protected volume is
+    /// refused, removing a crate from it is not (nothing can be there).
+    pub fn check(&self, team: TeamId, world: [i32; 3], occupied: bool) -> Result<(), PlaceError> {
         match self.owner_of(world) {
             None => return Err(PlaceError::Outside),
             Some(owner) if owner != team => return Err(PlaceError::NotYours),
             Some(_) => {}
         }
-        let Some(pad) = self.pads.get_mut(team.0 as usize) else {
+        let Some(pad) = self.pads.get(team.0 as usize) else {
             return Err(PlaceError::Outside);
         };
         if pad.is_sealed() {
@@ -434,7 +436,28 @@ impl Pads {
         if occupied && pad.is_blocked(local) {
             return Err(PlaceError::Protected);
         }
-        Ok(pad.set(local, occupied))
+        Ok(())
+    }
+
+    /// Place (`occupied = true`) or remove a crate on `team`'s pad.
+    ///
+    /// Returns `Ok(true)` when the pad changed, `Ok(false)` when it was
+    /// already in that state, and `Err(_)` when the position is not writable
+    /// by this team at all.
+    pub fn place(
+        &mut self,
+        team: TeamId,
+        world: [i32; 3],
+        occupied: bool,
+    ) -> Result<bool, PlaceError> {
+        // Re-checked rather than assumed: `place` is public, and a caller that
+        // skipped `check` must still get the same rules.
+        self.check(team, world, occupied)?;
+        let pad = self
+            .pads
+            .get_mut(team.0 as usize)
+            .ok_or(PlaceError::Outside)?;
+        Ok(pad.set(pad.to_local(world), occupied))
     }
 }
 

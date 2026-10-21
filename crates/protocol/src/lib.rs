@@ -909,7 +909,15 @@ pub struct EditBroadcast {
 /// One entry in a chunk diff (§6.7).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct DiffEntry {
-    /// Local cell index, packed as `x | y << 4 | z << 12` for a 16×96×16 column.
+    /// Local cell index, packed as `x + 16 * (z + 16 * y)` for a 16×96×16
+    /// column.
+    ///
+    /// That is `world::Column::index`, which is the only thing that ever
+    /// produces these entries — X varies fastest so the mesher and the diff
+    /// encoder both walk contiguous memory. An earlier version of this comment
+    /// said `x | y << 4 | z << 12`, which is a different permutation and would
+    /// have decoded every crate to the wrong cell; the encoder is the authority,
+    /// and this comment now matches it.
     pub index: u16,
     /// The new block id.
     pub block: u8,

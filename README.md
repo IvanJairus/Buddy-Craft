@@ -11,9 +11,9 @@ the match ends when a team's core is destroyed.
 > buddy AI (T-012), base damage and elimination (T-013), match rules (T-014) and
 > the determinism harness (T-015) — are done. M2 has the wire contract and its
 > validation (T-017, T-018), the room lifecycle and tick loop (T-019, T-020),
-> player bodies (P-01) and the per-client snapshot encoder (T-021). The block
-> edit pipeline, airdrops, bots and the `match_sim` harness are next, then the web
-> client. See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
+> player bodies (P-01), the per-client snapshot encoder (T-021) and the block edit
+> pipeline (T-022). Airdrops, bots and the `match_sim` harness are next, then the
+> web client. See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
 
@@ -170,6 +170,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-020 | tick loop, per-player input queue, 200 ms AFK timeout | done |
 | P-01 | player bodies: spawn search, input application, death, respawn | done |
 | T-021 | per-client snapshots: 48 m AOI, acked-baseline deltas, 2 KB budget | done |
+| T-022 | edit pipeline: reach/existence/protection/rate, diff log, pad+voxel in sync | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -254,6 +255,18 @@ recorded here rather than quietly skipped:
   exactly that, so the encoder gives every entity one rule. The cost is a few
   bytes per frame; the benefit is that the client has no special case for its own
   body, which is the entity prediction depends on.
+- **The edit token bucket holds 8, not §11.3's burst of 12.** T-022's criterion
+  says the ninth edit in one tick is refused, which only holds with a capacity of
+  8. The stricter number wins: a burst of 12 in a 50 ms tick is an instantaneous
+  240/s, nothing in the game needs it, and the only thing a wider burst buys is a
+  wider hole in the flood defence. The refill rate is 8/s either way.
+- **`protocol::DiffEntry.index`'s doc comment was wrong and is fixed.**
+  It said `x | y << 4 | z << 12`; `world::Column::index` — the only producer of
+  these entries — packs `x + 16 * (z + 16 * y)`. Both are permutations of the
+  same three fields, so the wire format never changed, but a client written
+  against the old comment would have decoded every crate to the wrong cell. No
+  test could catch that until T-030 exists, which is exactly why the comment now
+  points at the encoder as the authority.
 
 ## Combat: events, not side effects
 
@@ -800,6 +813,47 @@ Events are never culled: the snapshot carries all of them regardless of distance
 and an overflow past 16 in one tick is reported to the host rather than
 `truncate`d. A player learning their core is under attack must not depend on
 being within render distance of it.
+
+## Edits: validate everything, then write one line
+
+The mutable world is tiny — terrain is indestructible, crates are the only
+placeable block, so each team's 8 × 4 × 8 pad is the whole editable surface. What
+is not tiny is the attack surface: `C_EDIT` is the one message a client can use
+to change authoritative state, and §6.6's four checks exist to make that safe.
+
+The order is **bounds → reach → existence → protection → rate → apply**, and the
+ordering is load-bearing rather than stylistic:
+
+- **Bounds first.** A coordinate outside the map has no block to be near, so
+  "reach" is meaningless there. §7.4 rule 4 also names this case: reject, never
+  close, because players legitimately aim at the sky.
+- **Rate last, but still before anything is written.** If the pad were written
+  first and the token bucket refused afterwards, a flood of edits would still
+  change the world every tick it was refused — the pad's 10-tick stability timer
+  would never complete, so no recipe would ever fire, and the cheapest attack in
+  the game would be "spam `C_EDIT`". `Pads::check` is the read-only half of
+  `Pads::place`; the rule lives in one place, and the pipeline can ask without
+  mutating.
+- **The pad mask and the voxel move together.** The pad is what the recipe
+  matcher reads; the voxel is what movement collides with. An edit that updated
+  one and not the other produces a crate you can walk through, or a recipe that
+  fires on nothing.
+
+Two rules are the plan's, and worth stating because they are the difference
+between a tolerant server and an exploitable one:
+
+- **Last-write-wins is not used.** Two edits on one cell in the same tick are
+  resolved in arrival order: the second is validated against the post-first
+  state and refused with `OCCUPIED`. Last-write-wins produces ghost blocks on
+  clients that missed one message.
+- **Diff versions increment on flush, not on edit.** A client applies a diff only
+  when its version is exactly `last_applied + 1`, so two edits in one tick must
+  not consume two versions — the second would be a version the client waits for
+  forever.
+
+`EditWorld` regenerates terrain from the seed and keeps the columns it touches:
+a cache, not a second source of truth. Nothing is persisted, and seed + diff log
+reconstructs the same world on any machine.
 
 ## Content discrepancies, resolved rather than guessed
 
