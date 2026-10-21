@@ -462,6 +462,51 @@ impl MatchState {
         applied
     }
 
+    /// Damage one buddy. Returns the HP actually removed.
+    ///
+    /// A buddy at zero HP is removed from its team on the same tick, not left
+    /// in a `Dead` state: the plans says dead buddies never return, and freeing
+    /// the slot on death is what makes the per-team cap mean "living roster"
+    /// rather than "roster ever built". The caller owns the damage number; this
+    /// is the same split as [`MatchState::damage_player`].
+    pub fn damage_buddy(&mut self, id: crate::ids::EntityId, amount: i32) -> i32 {
+        if amount <= 0 {
+            return 0;
+        }
+        for team in &mut self.teams {
+            let Some(index) = team.buddies.iter().position(|b| b.id == id && b.alive()) else {
+                continue;
+            };
+            let buddy = &mut team.buddies[index];
+            let applied = amount.min(buddy.hp);
+            buddy.hp -= applied;
+            if buddy.hp <= 0 {
+                buddy.kill();
+                team.buddies.remove(index);
+            }
+            return applied;
+        }
+        0
+    }
+
+    /// Restore HP to a living buddy, capped at its role's maximum.
+    pub fn heal_buddy(&mut self, id: crate::ids::EntityId, amount: i32) -> i32 {
+        if amount <= 0 {
+            return 0;
+        }
+        for team in &mut self.teams {
+            let Some(index) = team.buddies.iter().position(|b| b.id == id && b.alive()) else {
+                continue;
+            };
+            let buddy = &mut team.buddies[index];
+            let max = tuning::buddy(buddy.kind).hp;
+            let applied = amount.min(max - buddy.hp).max(0);
+            buddy.hp += applied;
+            return applied;
+        }
+        0
+    }
+
     /// Kill one player outright, starting their respawn timer.
     ///
     /// Returns false when the player cannot die: already down, already

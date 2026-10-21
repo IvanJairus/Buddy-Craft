@@ -379,7 +379,12 @@ impl WorldGen {
         if gy <= sea_level() || gy >= 52 {
             return None;
         }
-        Some((gy, 4 + ((h >> 8) % 3) as u8))
+        // Seven to nine blocks of trunk, not four to six. Terrain is
+        // indestructible, so a canopy that dips within a player's height of the
+        // ground is a pocket the player can walk into and never climb out of.
+        // The extra trunk keeps at least three blocks of headroom under the
+        // lowest leaf even where the ground rises steeply beneath it.
+        Some((gy, 7 + ((h >> 8) % 3) as u8))
     }
 
     /// Generate one 16x96x16 column. Pure: same inputs, same bytes.
@@ -446,9 +451,12 @@ impl WorldGen {
                     self.put(col, (wx0, wz0), [tx, y, tz], p.log);
                 }
 
-                // Canopy: two wide layers plus a single cap block.
+                // Canopy: two wide layers plus a single cap block, starting at
+                // the top of the trunk rather than one below it. The extra
+                // height is what keeps the lowest leaf out of a walking
+                // player's head on sloping ground (see `tree_at`).
                 for dy in 0..2 {
-                    let y = top - 1 + dy;
+                    let y = top + dy;
                     for dz in -2i32..=2 {
                         for dx in -2i32..=2 {
                             if dx.abs() == 2 && dz.abs() == 2 {
@@ -462,7 +470,7 @@ impl WorldGen {
                         }
                     }
                 }
-                self.put(col, (wx0, wz0), [tx, top + 1, tz], p.leaves);
+                self.put(col, (wx0, wz0), [tx, top + 2, tz], p.leaves);
             }
         }
     }

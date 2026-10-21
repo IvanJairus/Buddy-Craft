@@ -93,6 +93,15 @@ impl EditWorld {
         self.gen.seed()
     }
 
+    /// Terrain height at a world column, ignoring trees and placed crates.
+    ///
+    /// Bots use this to aim a path leg at the ground rather than at their own
+    /// current altitude. A leg whose endpoint is in mid-air is unreachable to
+    /// the pathfinder, which requires a floor under every cell it expands.
+    pub fn surface_height(&self, x: i32, z: i32) -> i32 {
+        self.gen.height_at(x, z)
+    }
+
     /// The block at a world position, or air outside the map.
     pub fn block(&self, x: i32, y: i32, z: i32) -> BlockId {
         let Some((cx, cz, lx, ly, lz)) = split(x, y, z) else {

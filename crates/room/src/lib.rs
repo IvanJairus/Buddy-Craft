@@ -15,16 +15,20 @@
 //! * Every state change is a function of (state, inputs). Two rooms ticked in the
 //!   same process share nothing — there is no global, no cache, no thread-local.
 
+pub mod bot;
 pub mod edit;
 pub mod input;
 pub mod lifecycle;
+pub mod play;
 pub mod snapshot;
 
+pub use bot::{Bot, BotOutput, BotView};
 pub use edit::{
     EditPipeline, EditRequest, EditResult, EditWorld, EDITS_PER_SECOND, EDIT_BURST, REACH,
 };
 pub use input::{InputQueue, INPUT_TIMEOUT_TICKS, QUEUE_CAPACITY};
 pub use lifecycle::{Conditions, Effect, IllegalTransition, Lifecycle, Phase};
+pub use play::{Match, MatchEvent};
 pub use snapshot::{
     Encoded, SnapshotEncoder, AOI_HYSTERESIS, AOI_RADIUS, BASELINE_HISTORY, KEYFRAME_INTERVAL,
 };

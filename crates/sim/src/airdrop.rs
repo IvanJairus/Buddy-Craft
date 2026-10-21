@@ -591,6 +591,22 @@ impl Airdrops {
         1
     }
 
+    /// Put deposited crates back in a player's hands.
+    ///
+    /// The room deposits before it validates a placement, because the edit
+    /// pipeline applies the block in the same call that decides whether it is
+    /// legal. If the placement is refused, the crate must not evaporate: this
+    /// reverses exactly one deposit so the ledger still balances.
+    pub fn refund(&mut self, player: PlayerId, crates: u32) {
+        let id = player.0 as usize;
+        if id >= self.carried.len() || crates == 0 {
+            return;
+        }
+        let refunded = crates.min(self.deposited as u32);
+        self.deposited -= u64::from(refunded);
+        self.carried[id] += refunded;
+    }
+
     /// The carrier died: half the load is destroyed, the rest becomes pickups.
     ///
     /// Returns how many crates hit the ground, so the caller can announce it.

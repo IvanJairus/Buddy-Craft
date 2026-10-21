@@ -12,8 +12,9 @@ the match ends when a team's core is destroyed.
 > the determinism harness (T-015) — are done. M2 has the wire contract and its
 > validation (T-017, T-018), the room lifecycle and tick loop (T-019, T-020),
 > player bodies (P-01), the per-client snapshot encoder (T-021), the block edit
-> pipeline (T-022) and the airdrop economy (T-025). Bots and the `match_sim`
-> harness are next, then the web client. See [`docs/PLAN.md`](docs/PLAN.md) for
+> pipeline (T-022), the airdrop economy (T-025), the headless match loop (P-02)
+> and the bots that play it (T-023). The `match_sim` integration harness
+> (T-024) is next, then the web client. See [`docs/PLAN.md`](docs/PLAN.md) for
 > the full 60-task backlog.
 
 ---
@@ -97,7 +98,7 @@ crates/
                 scenario                                        (compiled twice)
   world/        voxel storage, worldgen, mesher, chunk diffs
   protocol/     wire messages, tags, size budgets        (M2)
-  room/         pure room state machine, runtime-agnostic (M2)
+  room/         pure room state machine and the headless match loop (M2)
   client-wasm/  wasm bridge for the browser            (M3)
   host-worker/  Cloudflare Durable Object host         (M4)
   host-axum/    tokio/axum host                        (M4)
@@ -116,12 +117,16 @@ fuzz/
 
 `room` is deliberately runtime-agnostic. The same state machine runs inside a
 Cloudflare Durable Object and inside a `tokio` task, which turns "which host do
-we use" from an architectural decision into a configuration change.
+we use" from an architectural decision into a configuration change. Transport
+and gameplay are separate: `Room` owns lifecycle, input queues and movement,
+while `room::play::Match` owns airdrops, edits, combat, crafting, buddies and
+elimination, and takes input frames as a value. The host composes the two, and
+tests use the second without a runtime.
 
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 432 tests
+cargo test --workspace --all-targets              # 438 tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
@@ -173,6 +178,8 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-021 | per-client snapshots: 48 m AOI, acked-baseline deltas, 2 KB budget | done |
 | T-022 | edit pipeline: reach/existence/protection/rate, diff log, pad+voxel in sync | done |
 | T-025 | airdrops: schedule, integer site pick, carry, deposit, conservation | done |
+| P-02 | match loop: joins airdrops, edits, combat, crafting, buddies and elimination | done |
+| T-023 | bots: collect, build, fight, push a core, driven only by inputs and edits | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -224,8 +231,27 @@ recorded here rather than quietly skipped:
 - **P-01 is not a plan task.** The plan calls `sim::step_local(state, input)` in
   §6.4 but no task creates it, so T-021's snapshots, T-022's reach checks, T-023's
   bots and T-024's full match all depended on something the task list never
-  scheduled. It is numbered `P-01` — prerequisite one — so the gap is visible in
+  scheduled. It is numbered `P-01`, prerequisite one, so the gap is visible in
   the table instead of being smuggled into T-021.
+- **P-02 is not a plan task either.** The list goes from edits and airdrops
+  straight to T-023 (bots) and T-024 (match harness), with no task that joins
+  airdrops, movement, edits, combat, crafting, buddies and elimination into one
+  tick. `room::play::Match` is that join, and it is numbered P-02 in the table.
+  It lives beside `Room` rather than inside it because transport and gameplay
+  have different tests: a socket can drop a player, while a match only sees the
+  frames that arrived.
+- **Worldgen trees got taller in T-023.** Terrain is indestructible, and the
+  canopy used to start one block below the trunk top, which could put leaves
+  within a player's height of sloping ground. A bot that pathed into such a
+  pocket could not jump out and stayed there for the match. Trunks are now 7 to
+  9 blocks and the canopy starts at the top. Trees are scenery, so this is a
+  clearance fix, not balance.
+- **`DropSite::y` is the surface block, not the crate's cell.** Worldgen reports
+  the same height `height_at` reports, while a crate and a player's feet occupy
+  the air cell above it. P-02 adds one when it builds the site list. Without
+  that, the first airdrop landed inside the top terrain block and no pickup
+  could ever reach it; no `sim` test could see this because `sim` receives sites
+  that are already positioned.
 - **The T-015 fixture *script* changed, and that is a real rule change.** The
   fixtures are regenerated in this commit because bodies are now hashed and
   because the script aims at its target instead of walking in fixed compass
@@ -929,8 +955,52 @@ one-line query rather than a hunt through five systems.
 **What this module does not own:** pad ownership. `deposit` takes
 `inside_own_pad` from the caller; the candidate set comes from worldgen, which
 already excludes base pads. Both boundaries exist so the economy has no voxel
-storage and no team rules of its own. The room loop is what joins them, and it is
-the next task.
+storage and no team rules of its own. The room loop is what joins them; that
+join is P-02, and the bots that drive it are T-023.
+
+## Bots: a player made of inputs
+
+A bot is a pure function from an immutable `BotView` to a `BotOutput`: one
+`InputFrame` plus, while building, one `C_EDIT` message. It cannot write state
+because it is never handed a mutable one. `bot_uses_only_input_frames` proves
+that rather than asserting it: one match attaches the brain to a seat, a second
+match runs the same brain in the test and submits its frame as a human input,
+and the two state hashes match for 800 ticks. A side channel would show up as
+the first divergent tick.
+
+The policy is a fixed priority ladder:
+
+| Priority | Behaviour | Why here |
+| --- | --- | --- |
+| 1 | Finish the build already on the pad | A half-built shape matches nothing, and switching plans would abandon it |
+| 2 | Self-defence inside 2 m | A player punching the bot is more urgent than any errand |
+| 3 | Collect a pickup, else camp a falling drop | Walking to the marker is how a bot wins the race to a drop |
+| 4 | Build the best shape the load affords: 9 crates for a buddy, 6 for a sword, 4 for a bandage | The recipe ladder is the only way to convert crates into power |
+| 5 | Punch the enemy core | It is the only win condition that matters |
+
+Two rules stop six bots from destroying a recipe through teamwork. Only the
+primary builder, the teammate carrying the most crates with ties to the lowest
+seat, may place: two bots laying different shapes in one pad produce a cluster
+that matches nothing, and the stability timer resets on every block. And while
+the pad is still empty a bot re-plans to its full load before the first crate
+lands; once a cell is down the plan is committed.
+
+Navigation is A* in 20 m legs, recomputed every 40 ticks. The goal is shifted
+to a standable cell at terrain height, every cell target is a cell centre, and
+`PathLimits::y_margin` widens the search band so a leg over a hill is not
+rejected because both endpoints sit in a valley. Without those details bots
+clip walls, path into tree trunks, or stand at the edge of their own collision
+box, which looks like a stuck bot rather than a pathfinding bug.
+
+D-05 is a separate assertion, not a branch in the brain: a match with one human
+and five bots ends with `winner: None` and `EndReason::NoHumans` on the tick the
+human's core falls, before last-team-standing can hand the win to a bot.
+`d05_ends_a_bot_match_when_the_last_human_dies` is that test.
+
+The full 3v3, six bot-driven bodies, finishes in **44.5 s debug and 2.23 s
+release**, inside the 30,000-tick (25 simulated minute) bound. Wall time is
+dominated by pathfinding, which is why the same match costs twenty times more
+in an unoptimised build.
 
 ## Content discrepancies, resolved rather than guessed
 

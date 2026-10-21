@@ -54,6 +54,11 @@ pub struct PathLimits {
     pub budget: u32,
     /// Deepest drop the path may use.
     pub max_fall: i32,
+    /// Extra cells above and below the start/goal band that the search may
+    /// enter. Four is enough for a buddy following its owner; a bot crossing
+    /// hills needs more, because a mountain between two valley endpoints is
+    /// otherwise outside the search box even though the path over it exists.
+    pub y_margin: i32,
 }
 
 impl Default for PathLimits {
@@ -61,6 +66,7 @@ impl Default for PathLimits {
         PathLimits {
             budget: EXPANSION_BUDGET,
             max_fall: MAX_FALL,
+            y_margin: MARGIN,
         }
     }
 }
@@ -106,7 +112,7 @@ struct SearchBox {
 }
 
 impl SearchBox {
-    fn around(start: Cell, goal: Cell) -> Option<SearchBox> {
+    fn around(start: Cell, goal: Cell, y_margin: i32) -> Option<SearchBox> {
         for axis in [0usize, 2] {
             if (goal[axis] - start[axis]).abs() > MAX_SEARCH_EXTENT {
                 return None;
@@ -115,12 +121,12 @@ impl SearchBox {
         Some(SearchBox {
             min: [
                 start[0].min(goal[0]) - MARGIN,
-                start[1].min(goal[1]) - MARGIN,
+                start[1].min(goal[1]) - y_margin,
                 start[2].min(goal[2]) - MARGIN,
             ],
             max: [
                 start[0].max(goal[0]) + MARGIN,
-                start[1].max(goal[1]) + MARGIN,
+                start[1].max(goal[1]) + y_margin,
                 start[2].max(goal[2]) + MARGIN,
             ],
         })
@@ -279,7 +285,7 @@ pub fn find_path<W: VoxelQuery + ?Sized>(
         return Some(Vec::new());
     }
 
-    let bounds = SearchBox::around(start, goal)?;
+    let bounds = SearchBox::around(start, goal, limits.y_margin)?;
     let len = bounds.len();
     if len == 0 {
         return None;
