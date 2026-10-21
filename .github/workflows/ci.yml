@@ -168,21 +168,23 @@ jobs:
         run: cargo bench -p world --bench gen
 
   web:
-    name: web (pnpm)
+    name: client (build + Playwright)
     runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/web
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        if: hashFiles('pnpm-lock.yaml') != ''
       - uses: actions/setup-node@v4
-        if: hashFiles('pnpm-lock.yaml') != ''
         with:
           node-version: 22
-          cache: pnpm
-      # `apps/web` does not exist yet (M0 is Rust-only), so these steps no-op
-      # until the client lands in M3. They are wired up now so that the first
-      # client PR does not also have to debug CI plumbing.
-      - if: hashFiles('pnpm-lock.yaml') != ''
-        run: pnpm install --frozen-lockfile
-      - if: hashFiles('pnpm-lock.yaml') != ''
-        run: pnpm -r build
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      # T-031's specs need a real WebGL2 context. Chromium's headless build
+      # provides one through SwiftShader; that is relative performance, not a
+      # phone (see the §8.10 caveat), but it is enough for the DPR and
+      # dynamic-resolution contract.
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e

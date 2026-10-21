@@ -3,6 +3,8 @@
 node_modules/
 .pnpm-store/
 dist/
+apps/web/test-results/
+apps/web/playwright-report/
 *.wasm
 *.wasm.map
 .DS_Store

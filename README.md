@@ -13,9 +13,10 @@ the match ends when a team's core is destroyed.
 > validation (T-017, T-018), the room lifecycle and tick loop (T-019, T-020),
 > player bodies (P-01), the per-client snapshot encoder (T-021), the block edit
 > pipeline (T-022), the airdrop economy (T-025), the headless match loop (P-02),
-> the bots that play it (T-023), the whole-match invariant harness (T-024) and
-> the wasm boundary with its render buffer (T-030). The renderer and the
-> offline match loop follow. See [`docs/PLAN.md`](docs/PLAN.md) for the full
+> the bots that play it (T-023), the whole-match invariant harness (T-024), the
+> wasm boundary with its render buffer (T-030) and the three.js renderer with
+> its quality tiers and adaptive resolution (T-031). The chunk manager and the
+> rest of the client follow. See [`docs/PLAN.md`](docs/PLAN.md) for the full
 > 60-task backlog.
 
 ---
@@ -104,7 +105,10 @@ crates/
   host-worker/  Cloudflare Durable Object host         (M4)
   host-axum/    tokio/axum host                        (M4)
 apps/
-  web/src/wasm/loader.ts  typed views over the render buffer (M2)
+  web/src/main.ts          boot benchmark, tier selection, rAF loop (M2)
+  web/src/render/          three.js renderer, adaptive scale, tiers (M2)
+  web/src/wasm/loader.ts   typed views over the render buffer (M2)
+  web/tests/               Playwright specs for the browser contract (M2)
 data/
   tuning.ron    every designer-facing number, single source of truth
   buddies.ron   the six buddy roles, one row each, validated at load
@@ -130,10 +134,13 @@ tests use the second without a runtime.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 451 tests
+cargo test --workspace --all-targets              # 451 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
+
+# Client (first run also needs `npx playwright install chromium`)
+cd apps/web && npm ci && npm run test:e2e          # 7 Playwright specs
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -186,6 +193,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-023 | bots: collect, build, fight, push a core, driven only by inputs and edits | done |
 | T-024 | whole-match harness: eight invariants per tick, reconnect, three-match leak probe | done |
 | T-030 | wasm boundary: 13 exports, byte-stable render buffer, zero-allocation tick | done |
+| T-031 | three.js WebGL2 bootstrap, exact quality tiers, adaptive resolution, boot benchmark | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -340,6 +348,20 @@ recorded here rather than quietly skipped:
   on the pinned 1.87 toolchain; the loader is type-checked with `tsc` and tested
   against the interface shape instead, and the glue step remains a deploy-time
   check.
+- **T-031 had to build the web scaffold the plan assumed.** T-001's file list
+  includes `apps/web/package.json`, but this repo never created it. T-031 adds
+  the package manifest, tsconfig, `index.html`, Playwright config and specs,
+  because the acceptance criteria cannot run without them. It uses npm rather
+  than the plan's pnpm (pnpm is not installed here); the CI `web` job is now an
+  npm build plus Chromium Playwright run instead of a no-op. The T-031 file list
+  names three source files; everything else is the minimum needed to execute
+  the specs.
+- **`window.__cbTest` ships in the production bundle.** The synthetic
+  frame-time injector has to reach the same adaptive code the player runs, so
+  gating it to a dev build would test a different path. It only calls renderer
+  setters and reads state; it cannot mutate game state or open a socket. If the
+  client ever runs against untrusted peers, revisit whether the hook should be
+  query-gated.
 - **`no_entity_leak` runs the same seed three times, not three seeds.** A
   growing entity count would show up in any run, but a leaked global shows up
   only as a *divergence* between two runs of the same input. Three identical
@@ -1121,6 +1143,54 @@ most four catch-up steps per frame) and the render write without pretending to
 be a second match loop. `cb_mesh_chunk` returns zero and `cb_on_snapshot`
 records the payload size for the 4 KB boundary check; T-032 and T-043 fill those
 payloads into the header that is already pinned.
+
+## The renderer: a budget that moves, a ceiling that does not
+
+T-031 boots a three.js WebGL2 renderer and makes two different promises about
+pixels. The resolution scale is allowed to move; the device pixel ratio is not.
+
+| Guard | Value | Measured |
+| --- | --- | --- |
+| DPR clamp | `min(devicePixelRatio, 2)` | emulated DPR 3 gives `getPixelRatio()` 2 |
+| Scale floor | 0.55 | 200 ms frames settle at 0.553 |
+| Slow response | 25 ms frames drop the scale | 0.670 after 1 s |
+| Fast response | 8 ms frames restore it | 0.997 after 2 s |
+| Clear frame | 60 rAF frames/s | 60 frames in 1 s |
+
+The scale is an exponential average of frame time with a target of
+`16.7 / average`, smoothed at 15% per frame and clamped to `[0.55, 1]`. It
+changes `renderer.setPixelRatio`, not the CSS size: the canvas stays full-window
+and the drawing buffer gets cheaper. The DPR clamp happens once, at
+construction, so a phone reporting a ratio of 3 or 4 never allocates a 4x
+buffer even for one frame.
+
+The three tiers are the §8.5 numbers, no more and no less:
+
+| Tier | Render distance | Particle cap | Animation | Fog start | Fog end |
+| --- | --- | --- | --- | --- | --- |
+| LOW | 4 chunks | 64 | off | 40 m | 64 m |
+| MED | 5 chunks | 128 | on | 52 m | 80 m |
+| HIGH | 6 chunks | 256 | on | 64 m | 96 m |
+
+Fog end is the one number §8.5 does not state. It is set to the render distance
+in metres (distance x 16), which is also the camera far plane, so the fog hides
+the streaming edge exactly where the world stops.
+
+The boot benchmark renders 256 instanced boxes for two seconds and classifies
+the average frame time: HIGH at 18 ms or better, MED up to 25 ms, LOW beyond
+that. Those thresholds are not in the plan. The first version used 12 ms for
+HIGH, which no 60 Hz display can reach; a measured 16.67 ms benchmark was
+classified MED, and that measurement is what caught it. The thresholds now make
+"kept up with 60 Hz" HIGH, and `the benchmark thresholds make 60 Hz HIGH` pins
+the policy. The chosen tier is stored in localStorage, and
+`?quality=low|med|high` overrides and persists it.
+
+The specs run against `vite preview`, not the dev server: the benchmark and the
+adaptive loop are the things under test, and a dev-only path would prove
+nothing about the shipped bundle. They drive the loop through
+`window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
+device deterministically. The production bundle is 530.8 KB raw and 132.5 KB
+gzipped, under §8.10's 450 KB gzip JS target.
 
 ## Content discrepancies, resolved rather than guessed
 
