@@ -9,3 +9,12 @@ license.workspace = true
 sim.workspace = true
 world.workspace = true
 protocol.workspace = true
+room.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
+futures-util = { version = "0.3", features = ["sink"] }
+serde = { workspace = true }
+serde_json = "1"
+
+[dev-dependencies]
+tokio-tungstenite = "0.29"

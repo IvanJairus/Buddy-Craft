@@ -25,8 +25,9 @@ the match ends when a team's core is destroyed.
 > visual residual (T-041), chunk diff streaming with keyframes and real
 > remeshing (T-042), pooled snapshot decode with 100 ms entity interpolation
 > (T-043), and event-driven presentation juice with hitstop, shake, damage
-> numbers and reduced-motion gating (T-044). The offline match loop and hosts
-> follow.
+> numbers and reduced-motion gating (T-044), and the local axum WebSocket host
+> with one task per room and a measured tick budget (T-045). The offline match
+> loop follows.
 > See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
@@ -147,13 +148,18 @@ tests use the second without a runtime.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 472 Rust tests
+cargo test --workspace --all-targets              # 480 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
 cd apps/web && npm ci && npm run test:e2e          # 71 specs, 1 headed (pointer lock)
+
+# Host (local dev). `CB_ADDR`, `CB_ALLOWED_ORIGINS` and `CB_SUMMARY_DIR` override defaults.
+cargo run -p host-axum                            # ws://127.0.0.1:8080/ws?room=DEV001
+curl -s http://127.0.0.1:8080/healthz
+cargo test --release -p host-axum tick_interval_p99   # 55 ms gate, release codegen
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -220,6 +226,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-042 | chunk diffs: versioned columns, 1.5 KB splitting, keyframes, real remesh around edits | done |
 | T-043 | snapshots: pooled delta decode, 64-frame baselines, 100 ms interpolation, loss recovery | done |
 | T-044 | juice: event driven, hit flash/stop, shake, 32 damage numbers, telegraph, reduced-motion gate | done |
+| T-045 | axum host: WS upgrade, Origin gate, 20 Hz room task, health, graceful summaries | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -453,9 +460,9 @@ recorded here rather than quietly skipped:
   files; the panel needs layout styles, so `recipeBook.css` is added. The
   prediction and the ghost are not yet wired to pad state; their APIs are
   exercised by the page specs and T-048 will feed them.
-- **The lobby is local until T-045.** The room code, copy button and join
-  validation are real and tested; T-040 supplies the WebSocket client, but
-  there is no authoritative host to connect to yet, so Start enters the demo
+- **The lobby is local until T-048.** The room code, copy button and join
+  validation are real and tested; T-040 supplies the WebSocket client and T-045
+  the host, but the browser does not connect them yet, so Start enters the demo
   match. The screen manager is the part the client plugs into, not a second
   networking layer.
 - **The UI scale applies to menu panels, not the in-match touch controls.** A
@@ -476,13 +483,13 @@ recorded here rather than quietly skipped:
   the byte-vector test pins the duplication so it cannot drift silently.
   Snapshots and chunk diffs stay out of this codec.
 - **The net client is not in the lobby path yet.** It has a transport, codec,
-  retry policy, token and RTT, but no host to connect to until T-045. The
-  lobby's Start remains local and the client is tested with a fake transport;
-  wiring it is the first part of the host milestone, not a second client.
+  retry policy, token and RTT; `host-axum` now listens at `127.0.0.1:8080`, but
+  the browser Start button is still local. Wiring the two is T-048's offline and
+  online loop, not a second client.
 - **T-041's predictor is internal to `client-wasm`.** The task lists the two
   files but no export, and T-030's boundary is already at 15. Adding a predictor
   API before a host can feed it a snapshot would freeze the wrong shape. The
-  Rust tests call the predictor directly; T-045/T-048 wire it into the tick and
+  Rust tests call the predictor directly; T-048 wires it into the tick and
   render path.
 - **T-042 extended `S_CHUNK_DIFF` with a keyframe.** §6.7 names only sparse
   entries, but the acceptance criterion requires a whole-column replacement.
@@ -535,6 +542,20 @@ recorded here rather than quietly skipped:
   recipe, not a world point, so the beam appears four metres in front of the
   camera rather than on the pad. A host can extend the event with a pad origin
   without changing the juice API.
+- **T-045 starts a bot match instead of a lobby flow.** `S_WELCOME`, `S_START`
+  and snapshots are sent; `S_LOBBY`, Ready and team changes wait for the room
+  registry and client wiring in T-047/T-048. A room is created on first use, so
+  there is no authentication or per-IP limit yet.
+- **All WebSocket clients share seat 0.** The host has one human seat and five
+  bots. Separate per-connection seats need the same registry work as above; the
+  server test proves the transport, not multi-human input.
+- **The numeric tick test is release-only.** Debug codegen produced 129 ms
+  pathfinding outliers that do not reflect the server build. The source test is
+  `tick_interval_p99` and the quick start runs it with `--release`; the debug
+  suite keeps the endpoint, upgrade and Origin tests.
+- **The browser is not connected to `host-axum` yet.** The local dev loop can
+  start the host and observe a real upgrade, but Start still enters the demo.
+  T-048 owns the playable offline/online loop and the camera/prediction wiring.
 - **Reconnect attempts reset on a successful open.** The six-attempt ceiling is
   for six consecutive failed connections, not six for the session; an unstable
   link that opens and closes would otherwise be permanently dead. The token is
@@ -1571,7 +1592,7 @@ invalidating the whole screen.
 The app's values are demo numbers until the match stream lands: the clock and
 drop countdown are local, HP and crates start at their full and empty values,
 and the stance is wired to F and the touch button. The store is the seam that
-T-045 and T-048 will feed.
+T-048 will feed.
 
 Plan §8.7 says the store batches DOM writes into a `requestAnimationFrame`; the
 acceptance criterion says a 20 Hz value is sampled on a 100 ms timer. The timer
@@ -1633,9 +1654,8 @@ so Results is reachable without waiting for a core.
 
 The lobby generates a six-character code from an unambiguous alphabet, shows a
 copy button, and validates a joined code against `[A-Z0-9]{6}` before doing
-anything else. The net client is T-040; the host is T-045. Start currently
-enters the local demo match, which is the only part of the lobby that is a
-placeholder.
+anything else. The net client is T-040; the host is T-045. Start still enters
+the local demo match; T-048 connects the two.
 
 Settings persist quality, sensitivity, invert-Y, UI scale (80-150%), reduced
 motion and a key map for ten actions. The remap buttons capture one key on the
@@ -1674,11 +1694,12 @@ a blocking `CONNECTION PROBLEM` screen above the shell with a reload button, not
 a silent disconnect. The RTT readout is a small `PING 42 ms` overlay; both are
 plain `textContent`.
 
-The lobby does not connect yet. T-045 provides the authoritative host; the
-T-043 decoder and T-041 predictor are ready for it. Until then Start stays local
-and the `NetClient` is exercised by a fake transport and the page overlay test.
-That boundary is deliberate: the client can be trusted with control frames and
-reconnect policy before it is trusted with the match.
+The lobby does not connect yet. T-045 provides the authoritative host at
+`127.0.0.1:8080`; the T-043 decoder and T-041 predictor are ready for it, but
+the browser Start button still enters the local match. The `NetClient` is
+exercised by a fake transport and the page overlay test. T-048 wires the real
+socket into the lobby. That boundary is deliberate: the client can be trusted
+with control frames and reconnect policy before it is trusted with the match.
 
 The codec is data, not rules. It does not decide whether a message is valid,
 only whether five fixed layouts decode. Snapshot and chunk decoding live in the
@@ -1718,8 +1739,8 @@ residual; movement and replay remain in Rust, so there is no second physics
 implementation to drift.
 
 Both T-041 files exist, but the bridge still has 15 exports. The predictor stays
-internal until a host can feed it a snapshot; T-045/T-048 wire it into the tick
-and render path. Exposing a `cb_predict_*` API before the snapshot shape exists
+internal until a host feeds it a snapshot; T-048 wires it into the tick and
+render path. Exposing a `cb_predict_*` API before the snapshot shape exists
 would freeze the wrong interface.
 
 ## Chunk diffs: one version per column
@@ -1787,8 +1808,8 @@ that the 64-frame ring reuses the same frame and typed arrays; it is a pool-reus
 test, not a heap sample.
 
 The wire still has no team or buddy role. The decoder's lookup tables default to
-zero until the lobby supplies them in T-045, and the snapshot stream is not on
-the live net path until that host exists.
+zero; T-048's lobby wiring must fill them from the room roster. The snapshot
+stream is served by `host-axum` but the browser is not connected to it yet.
 
 ## Juice: an event packet, not a poll
 
@@ -1819,6 +1840,36 @@ entities and 32 damage numbers on this machine, against the 1.5 ms gate. Audio
 rows in §4.9 belong to T-049 and are not faked here. Knockback is authoritative
 simulation, not presentation; the current sim has no impulse, so T-044 does not
 invent one in the renderer.
+
+## Host: one task per room at 20 Hz
+
+`host-axum` serves `/healthz` and `/ws?room=CODE`. The room code is validated,
+the browser Origin must be on an explicit allowlist, and an absent Origin is
+allowed for CLI clients. A room is created lazily on its first connection; one
+`tokio` task owns its `Match` and is the only writer, so ticks, inputs, edits and
+snapshots cannot race. A connection gets its own bounded send queue and snapshot
+encoder, and a full queue drops frames rather than stalling the room.
+
+The human connection drives seat 0; bots fill seats 1 to 5. Input allows the
+existing §6.2 ack to reach the snapshot encoder, edits go through
+`Match::submit_edit` and broadcast `S_CHUNK_DIFF`, and snapshot events are mapped
+to the T-044 vocabulary. Each tick sends a per-client delta snapshot at 20 Hz.
+
+`/healthz` returns `{"status":"ok","rooms":N,"uptime_s":S}`. SIGINT and SIGTERM
+drain every room, write a JSON summary under `target/room-summaries/<code>.json`
+and exit with status 0. A Python-controlled SIGTERM run exited cleanly; the test
+that creates a room sees its summary file and a zero room count after shutdown.
+
+The six-bot tick body measures **2.5 ms p99 over 61 release ticks**, against the
+55 ms gate. The numeric test is release-only because debug codegen produced
+129 ms pathfinding outliers; the test is present in the source and the quick
+start runs it with `--release`. The debug suite still has a real TCP test for
+`/healthz`, a real WebSocket upgrade that receives `S_WELCOME`, and a foreign
+Origin rejected with 403.
+
+The browser does not connect yet. Start still enters the demo match, and every
+WebSocket client shares the single human seat. T-048 owns the lobby/offline loop
+that turns this host into a playable browser session.
 
 ## Content discrepancies, resolved rather than guessed
 
