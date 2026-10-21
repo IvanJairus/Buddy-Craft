@@ -8,7 +8,7 @@
     "dev": "npm run build:wasm && vite",
     "build": "npm run build:wasm && tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test:e2e": "npm run build:wasm && playwright test"
+    "test:e2e": "npm run build:wasm && playwright test --project=headless && playwright test --project=headed"
   },
   "dependencies": {
     "three": "0.186.1"

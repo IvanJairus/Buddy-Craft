@@ -26,6 +26,7 @@ import {
 } from "./render/entities";
 import { ParticleSystem, type ParticleInfo } from "./render/particles";
 import { Interaction, type PendingEdit, type RayHit, type VisualState } from "./game/interaction";
+import { DesktopInput, type InputAction } from "./game/inputDesktop";
 import { GameRenderer } from "./render/renderer";
 import type { RendererInfo } from "./render/renderer";
 import {
@@ -67,6 +68,20 @@ interface TestApi {
   breakBlock(): number;
   pendingEdits(): PendingEdit[];
   ackEdit(seq: number, accepted: boolean): boolean;
+  input(): {
+    polls: number;
+    ticks: number;
+    frame: number[];
+    yaw: number;
+    pitch: number;
+    slot: number;
+    pointerLocked: boolean;
+    sensitivity: number;
+    invertY: boolean;
+    lastAction: InputAction | null;
+  };
+  setSensitivity(value: number): void;
+  setInvertY(value: boolean): void;
 }
 
 declare global {
@@ -76,10 +91,11 @@ declare global {
   }
 }
 
-const canvas = document.querySelector<HTMLCanvasElement>("#game");
-if (canvas === null) {
+const foundCanvas = document.querySelector<HTMLCanvasElement>("#game");
+if (foundCanvas === null) {
   throw new Error("canvas #game is missing from index.html");
 }
+const canvas: HTMLCanvasElement = foundCanvas;
 
 const query = new URLSearchParams(window.location.search);
 const queryTier = parseTier(query.get("quality"));
@@ -92,6 +108,7 @@ let chunks: ChunkManager | null = null;
 let entities: EntityRenderer | null = null;
 let particles: ParticleSystem | null = null;
 let interaction: Interaction | null = null;
+let tickCalls = 0;
 
 async function boot(): Promise<void> {
   if (tier === null) {
@@ -126,7 +143,7 @@ async function boot(): Promise<void> {
     });
   }
 
-  const input = new Uint8Array(4);
+  const input = new DesktopInput({ canvas });
   window.__cbTest = {
     info: () => renderer.info(),
     chunks: () => chunks?.info() ?? null,
@@ -246,11 +263,38 @@ async function boot(): Promise<void> {
       client?.ackEdit(seq, accepted);
       return known;
     },
+    input: () => ({
+      polls: input.polls,
+      ticks: tickCalls,
+      frame: input.frameBytes(),
+      yaw: input.yawValue,
+      pitch: input.pitchValue,
+      slot: input.selectedSlot,
+      pointerLocked: input.pointerLock,
+      sensitivity: input.sensitivityValue,
+      invertY: input.invertYValue,
+      lastAction: input.lastActionValue,
+    }),
+    setSensitivity: (value) => input.setSensitivity(value),
+    setInvertY: (value) => input.setInvertY(value),
   };
   window.__cbReady = true;
 
   const loop = (now: number): void => {
-    client?.tick(16, input);
+    const frame = input.poll();
+    if (client !== null) {
+      client.tick(16, frame);
+      tickCalls += 1;
+    }
+    if (interaction !== null && input.pointerLock) {
+      interaction.aimFromCamera(renderer.camera);
+      if (input.consumePrimary()) {
+        interaction.breakBlock();
+      }
+      if (input.consumeSecondary()) {
+        interaction.place(1);
+      }
+    }
     const views = client?.renderViews ?? null;
     if (views !== null) {
       entities?.update(views, renderer.quality.entityAnimation);

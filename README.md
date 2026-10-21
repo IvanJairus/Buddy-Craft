@@ -17,8 +17,9 @@ the match ends when a team's core is destroyed.
 > wasm boundary with its render buffer (T-030), the three.js renderer with its
 > quality tiers and adaptive resolution (T-031) and chunk streaming with real
 > wasm meshing (T-032), instanced entities with GPU-lifetime particles
-> (T-033) and the block interaction raycast with its previews (T-034). The
-> input layer and the offline match loop follow.
+> (T-033), the block interaction raycast with its previews (T-034) and desktop
+> input with pointer lock (T-035). Touch input and the offline match loop
+> follow.
 > See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
@@ -109,7 +110,7 @@ crates/
 apps/
   web/src/main.ts          boot benchmark, wasm init, chunk loop (M2)
   web/src/render/          renderer, tiers, chunks, entities, particles (M2)
-  web/src/game/            interaction: DDA raycast and edit previews (M2)
+  web/src/game/            interaction and desktop input (M2)
   web/src/wasm/loader.ts   raw wasm loader and render views (M2)
   web/scripts/             wasm bridge build step (M2)
   web/tests/               Playwright specs for the browser contract (M2)
@@ -144,7 +145,7 @@ cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 22 Playwright specs
+cd apps/web && npm ci && npm run test:e2e          # 29 specs, 1 headed (pointer lock)
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -201,6 +202,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-032 | chunk streaming: 6/7 hysteresis, neighbour meshing, 88 chunk draws, 34 KB leak | done |
 | T-033 | instanced 3-part entities, float-driven animation, 256 GPU-lifetime particles | done |
 | T-034 | DDA voxel raycast, 6 m reach, wireframe highlight, ghost preview, pending edits | done |
+| T-035 | desktop input: 4-byte frame, pointer lock, hotbar, blur release, persisted settings | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -389,6 +391,12 @@ recorded here rather than quietly skipped:
   `VoxelSource` over it. That is a surface, not a full column mirror: caves and
   the air under a canopy are approximate. T-042 owns the real voxel state; the
   interaction does not need to change when it lands.
+- **T-035's pointer-lock spec cannot run in the headless shell.** Chromium's
+  headless build refuses `requestPointerLock` even from a trusted click, so the
+  spec is a headed Playwright project and CI runs the suite under Xvfb. The
+  other specs stay headless. The task's file list also names only
+  `inputDesktop.ts`; the loop wiring and the poll/tick counters live in
+  `main.ts`.
 - **`window.__cbTest` ships in the production bundle.** The synthetic
   frame-time injector has to reach the same adaptive code the player runs, so
   gating it to a dev build would test a different path. It only calls renderer
@@ -1224,7 +1232,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 556.8 KB raw and 140.9 KB gzipped,
+device deterministically. The JS bundle is 562.4 KB raw and 142.6 KB gzipped,
 under §8.10's 450 KB gzip target; the wasm asset is measured in the chunk
 section below.
 
@@ -1333,6 +1341,32 @@ so rollback means forgetting the prediction, not undoing a write.
 The page spec streams the real map, reads the top boundary of column (128,128),
 casts down from two metres above it, and asserts the hit cell, normal, placement
 cell and both previews before placing, breaking and acking both edits.
+
+## Desktop input: one frame, one tick
+
+The browser state is packed into the same 4 bytes §7.1 defines: buttons, yaw,
+pitch and two signed 4-bit axes. The loop calls `poll()` once and hands the
+returned array to `cb_tick` once; the test asserts the poll and tick counters
+advance by the same amount over 300 ms.
+
+| Concern | Behaviour |
+| --- | --- |
+| Pointer lock | the first canvas click requests it; mouse look and mouse buttons only apply while locked |
+| Blur | every key and button is released; the packed axes and buttons go to zero |
+| Hotbar | 1-9 select a slot, the wheel cycles, both emit a local `slot` action |
+| Actions | Q drop, Tab scoreboard, E recipes, F stance, Esc menu; Tab never moves focus |
+| Settings | sensitivity and invert-Y in localStorage; 0.5/true survives a reload |
+
+Pointer lock is the one part of the contract the headless browser refuses. That
+spec is a separate Playwright project with `headless: false`; CI installs Xvfb
+and runs the suite under a virtual display. The other 28 specs stay headless,
+and a local full run opens a window for the one headed test.
+
+Sensitivity defaults to 0.25 yaw units per pixel; the plan does not pin it. LMB
+sets FIRE and asks the interaction to break, RMB sets USE and asks it to place,
+both only while locked. The wire frame has no slot or edit fields, so hotbar
+actions are local callbacks and edits travel through `cb_local_edit`, not
+through the 4-byte frame.
 
 ## Content discrepancies, resolved rather than guessed
 
