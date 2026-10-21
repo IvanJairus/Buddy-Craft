@@ -41,6 +41,7 @@ use world::chunk::{Column, CHUNK_Y};
 use world::gen::{WorldGen, MAP_COLS};
 use world::mesh::mesh_with_neighbours;
 
+pub mod predict;
 mod render_buffer;
 
 pub use render_buffer::{

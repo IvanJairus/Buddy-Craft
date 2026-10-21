@@ -20,8 +20,10 @@ the match ends when a team's core is destroyed.
 > (T-033), the block interaction raycast with its previews (T-034), desktop
 > input with pointer lock (T-035), touch input with explicit modes (T-036), the
 > HUD with its 10 Hz store (T-037), the recipe book with Rust near-miss (T-038),
-> the lobby/settings shell (T-039) and the WebSocket net client with reconnect
-> and RTT (T-040). Client prediction and the offline match loop follow.
+> the lobby/settings shell (T-039), the WebSocket net client with reconnect
+> and RTT (T-040), and client prediction with a rollback ring and a smoothed
+> visual residual (T-041). Chunk diff streaming, snapshot interpolation and the
+> offline match loop follow.
 > See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
 
 ---
@@ -142,13 +144,13 @@ tests use the second without a runtime.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 457 Rust tests
+cargo test --workspace --all-targets              # 463 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 48 specs, 1 headed (pointer lock)
+cd apps/web && npm ci && npm run test:e2e          # 51 specs, 1 headed (pointer lock)
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -211,6 +213,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-038 | recipe book from the wasm table, locked tiers, Rust near-miss, ghost overlay | done |
 | T-039 | shell: Boot/Main/Lobby/Match/Results, room-code validation, persisted settings and remap | done |
 | T-040 | net client: five control frames, reconnect backoff, session token, 1 Hz RTT, fatal screen | done |
+| T-041 | prediction: 128-input rollback ring, 5 cm threshold, 300 ms RTT, clamped exponential residual | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -468,6 +471,11 @@ recorded here rather than quietly skipped:
   retry policy, token and RTT, but no host to connect to until T-045. The
   lobby's Start remains local and the client is tested with a fake transport;
   wiring it is the first part of the host milestone, not a second client.
+- **T-041's predictor is internal to `client-wasm`.** The task lists the two
+  files but no export, and T-030's boundary is already at 15. Adding a predictor
+  API before T-043 can feed it a snapshot would freeze the wrong shape. The Rust
+  tests call the predictor directly; T-043 wires it into the tick and render
+  path.
 - **Reconnect attempts reset on a successful open.** The six-attempt ceiling is
   for six consecutive failed connections, not six for the session; an unstable
   link that opens and closes would otherwise be permanently dead. The token is
@@ -1308,7 +1316,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 601.5 KB raw and 153.8 KB gzipped,
+device deterministically. The JS bundle is 601.5 KB raw and 152.1 KB gzipped,
 under §8.10's 450 KB gzip target; the wasm asset is measured in the chunk
 section below.
 
@@ -1327,7 +1335,7 @@ budget when they want a steady state without waiting.
 | Triangles | 104,862 (gate 350k) |
 | 200 load/unload cycles | 34 KB heap growth after GC (gate 5 MB) |
 | 64 MB `memory.grow` | views rebuilt, geometry unchanged, new meshes still work |
-| wasm asset | 376.0 KB raw, 121.6 KB gzipped (target 700 KB) |
+| wasm asset | 376.1 KB raw, 120.9 KB gzipped (target 700 KB) |
 
 The mesher is neighbour-aware: each column is meshed with the four columns
 around it, so interior chunk borders do not draw walls. The payload is a
@@ -1523,7 +1531,7 @@ unlock clock.
 | Near-miss parity | 500 random clusters; every predicted completion matched the matcher |
 | Banner | `SWORD: needs 1 more crate` |
 | Ghost | one `InstancedMesh`, count = recipe cost |
-| wasm asset | 376.0 KB raw, 121.6 KB gzipped |
+| wasm asset | 376.1 KB raw, 120.9 KB gzipped |
 
 `cb_near_miss` runs the Rust canonicaliser over rotations and translations and
 returns `recipe_id << 8 | missing`. Rust maps the missing blocks back into the
@@ -1605,15 +1613,52 @@ a blocking `CONNECTION PROBLEM` screen above the shell with a reload button, not
 a silent disconnect. The RTT readout is a small `PING 42 ms` overlay; both are
 plain `textContent`.
 
-The lobby does not connect yet. T-045 provides the authoritative host and T-041
-the prediction/reconciliation that consumes snapshots; until then Start stays
-local and the `NetClient` is exercised by a fake transport and the page overlay
-test. That boundary is deliberate: the client can be trusted with control frames
-and reconnect policy before it is trusted with the match.
+The lobby does not connect yet. T-045 provides the authoritative host and T-043
+feeds decoded snapshots into T-041's predictor; until then Start stays local and
+the `NetClient` is exercised by a fake transport and the page overlay test. That
+boundary is deliberate: the client can be trusted with control frames and
+reconnect policy before it is trusted with the match.
 
 The codec is data, not rules. It does not decide whether a message is valid,
 only whether five fixed layouts decode. Snapshot and chunk decoding remain in
 Rust or T-043's decoder.
+
+## Prediction: rollback in Rust, glide in the browser
+
+T-041 keeps local input immediate without making the client a second authority.
+`client-wasm::predict::Predictor` stores the last 128 input frames and the state
+each produced. A snapshot names the last sequence the server processed. If the
+recorded state at that sequence is within 5 cm of the snapshot, the acknowledged
+prefix is dropped and nothing moves. If it is further, the body resets to the
+snapshot and every later frame is replayed in order, so the current prediction
+still reflects the keys the player is holding. An acknowledged sequence that has
+fallen out of the ring triggers a hard resync: the ring is discarded, not
+replayed, because the missing prefix would make a replay skip inputs and land
+further from the server. A visible correction after an 8.5-second freeze is the
+right trade against replaying 8.5 seconds of input on a phone.
+
+The 1,000-snapshot test keeps six inputs in flight instead of acknowledging the
+newest one. It injects 30 cm of drift, and every correction leaves the current
+body within 1 cm of a reference simulation that applied the same frames without
+drift; the six pending inputs survive. A smaller test pins the threshold: 3 cm
+is ignored, 6 cm corrects. The 300 ms test holds six inputs, drains the server
+and checks that client and server finish within 1 cm with zero dropped inputs.
+A hard-resync test overflows the ring, acknowledges an evicted sequence and
+asserts that the stale history is discarded while the camera still receives the
+residual.
+
+The authoritative position changes in one frame, but the camera does not.
+`VisualResidual` keeps the old rendered position minus the corrected one and
+decays it as `exp(-dt/0.15)`, with a 5 cm per-step clamp. The test asserts the
+correction frame stays within a millimetre of where the camera already was, no
+later frame exceeds the 5.01 cm Fixed-rounding bound, and the residual is under
+1 cm after 60 frames. The browser module only numbers inputs and applies this
+residual; movement and replay remain in Rust, so there is no second physics
+implementation to drift.
+
+Both T-041 files exist, but the bridge still has 15 exports. The predictor stays
+internal until T-043's decoder can feed it a snapshot; exposing a `cb_predict_*`
+API before the snapshot shape exists would freeze the wrong interface.
 
 ## Content discrepancies, resolved rather than guessed
 
