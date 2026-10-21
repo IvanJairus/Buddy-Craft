@@ -79,7 +79,7 @@ jobs:
         run: cargo build --target wasm32-unknown-unknown -p sim
 
   wasm-golden:
-    name: wasm determinism (T-015)
+    name: wasm determinism (T-015, T-025)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -105,6 +105,19 @@ jobs:
           wasm=$(ls target/wasm32-wasip1/release/deps/golden-*.wasm | head -n1)
           echo "running $wasm"
           node tools/wasm-golden.mjs "$wasm"
+      # T-025's site-selection portability criterion. The client draws the
+      # airdrop telegraph from the same seed the server picks from, so the two
+      # targets must choose the same site from the same RNG draw. The test pins
+      # the sequence to one committed vector; this step proves the wasm side of
+      # it rather than asserting it in a comment.
+      - name: build the sim unit tests for wasm
+        run: cargo test --release --target wasm32-wasip1 -p sim --lib --no-run
+      - name: run the airdrop portability test under node's WASI
+        run: |
+          set -euo pipefail
+          wasm=$(ls target/wasm32-wasip1/release/deps/sim-*.wasm | head -n1)
+          echo "running $wasm"
+          node tools/wasm-golden.mjs "$wasm" airdrop::tests::site_selection_is_portable
 
   bench:
     name: budget (${{ matrix.arch }})

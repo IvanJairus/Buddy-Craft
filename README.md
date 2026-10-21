@@ -11,9 +11,10 @@ the match ends when a team's core is destroyed.
 > buddy AI (T-012), base damage and elimination (T-013), match rules (T-014) and
 > the determinism harness (T-015) — are done. M2 has the wire contract and its
 > validation (T-017, T-018), the room lifecycle and tick loop (T-019, T-020),
-> player bodies (P-01), the per-client snapshot encoder (T-021) and the block edit
-> pipeline (T-022). Airdrops, bots and the `match_sim` harness are next, then the
-> web client. See [`docs/PLAN.md`](docs/PLAN.md) for the full 60-task backlog.
+> player bodies (P-01), the per-client snapshot encoder (T-021), the block edit
+> pipeline (T-022) and the airdrop economy (T-025). Bots and the `match_sim`
+> harness are next, then the web client. See [`docs/PLAN.md`](docs/PLAN.md) for
+> the full 60-task backlog.
 
 ---
 
@@ -92,8 +93,8 @@ the matcher runs at most six times per tick — 0.06 % of the 50 ms tick budget.
 ```
 crates/
   sim/          rules: fixed point, ids, rng, tuning, movement, pads,
-                recipes, combat, buddies, base, match rules, scenario
-                                                             (compiled twice)
+                recipes, combat, buddies, base, match rules, airdrops,
+                scenario                                        (compiled twice)
   world/        voxel storage, worldgen, mesher, chunk diffs
   protocol/     wire messages, tags, size budgets        (M2)
   room/         pure room state machine, runtime-agnostic (M2)
@@ -120,7 +121,7 @@ we use" from an architectural decision into a configuration change.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 349 tests
+cargo test --workspace --all-targets              # 432 tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
@@ -171,6 +172,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | P-01 | player bodies: spawn search, input application, death, respawn | done |
 | T-021 | per-client snapshots: 48 m AOI, acked-baseline deltas, 2 KB budget | done |
 | T-022 | edit pipeline: reach/existence/protection/rate, diff log, pad+voxel in sync | done |
+| T-025 | airdrops: schedule, integer site pick, carry, deposit, conservation | done |
 
 The plan is followed except where it is wrong or silent, and every such case is
 recorded here rather than quietly skipped:
@@ -260,6 +262,35 @@ recorded here rather than quietly skipped:
   8. The stricter number wins: a burst of 12 in a 50 ms tick is an instantaneous
   240/s, nothing in the game needs it, and the only thing a wider burst buys is a
   wider hole in the flood defence. The refill rate is 8/s either way.
+- **The airdrop schedule produces 73 drops in 20 minutes, not ~59.** §4.4.1's
+  two intervals (25 s until 5:00, then 15 s) give 12 early drops and 61 late
+  ones, and no pair of intervals produces 59 while still matching the rows above
+  it. The per-drop rate is what players experience and what the crate totals are
+  derived from, so 73 ships; the summary's 354/1,062 crates become 508/1,510.
+  Both the schedule and the throughput tests pin the computed numbers.
+- **"First drop 0:10" means it spawns at 0:10, not lands at 0:10.** §4.2 says the
+  first airdrop "lands at 0:10" while §4.4.1 and T-025's criterion say the first
+  drop is at 0:10. A drop that lands at 0:10 would have to spawn at 3.3 s to
+  cover the 6.7 s descent, which contradicts the telegraph and the criterion.
+  Spawn wins; touchdown is at 0:16.7, still inside the 0:00–1:30 opening.
+- **The 5 s telegraph is a floor, not the descent length.** 80 m at 12 m/s is
+  6.7 s, so a marker that appeared 5 s before impact would have to appear after
+  the drop is already falling. The drop is announced at spawn and the descent is
+  the warning; the constant remains the floor for any shallower site.
+- **Landing scatter is a ±2 m square.** A disc of 3 m needs a square root or a
+  rejection loop per crate; the square's 2.83 m diagonal satisfies "within 3 m"
+  and is reached in one fixed-point draw per axis.
+- **T-025's "never selects a base pad" is a property of the candidate set, not
+  the pick.** `Airdrops::new` takes the sites worldgen produced and trusts them
+  the same way movement trusts a `VoxelQuery`; `world::gen`'s
+  `drop_sites_are_flat_and_legal` is the test that keeps pads out. Duplicating
+  the pad geometry inside the airdrop module would give two definitions of
+  "legal site".
+- **§12.4's conservation equation double-counts a placed crate.** "dropped −
+  consumed − destroyed == carried + on ground + placed" subtracts consumption
+  and then adds placement, which is the same crate twice. The shipped ledger
+  puts each crate in exactly one bucket: `dropped == destroyed + deposited +
+  carried + on_ground`.
 - **`protocol::DiffEntry.index`'s doc comment was wrong and is fixed.**
   It said `x | y << 4 | z << 12`; `world::Column::index` — the only producer of
   these entries — packs `x + 16 * (z + 16 * y)`. Both are permutations of the
@@ -854,6 +885,52 @@ between a tolerant server and an exploitable one:
 `EditWorld` regenerates terrain from the seed and keeps the columns it touches:
 a cache, not a second source of truth. Nothing is persisted, and seed + diff log
 reconstructs the same world on any machine.
+
+## Airdrops: the schedule is the economy
+
+There is no mining. Crates arrive on a global timer, land as physical pickups,
+and become blocks on a team's pad, so the drop schedule is not pacing flavour,
+it is the resource chain. Four numbers define it:
+
+| Rule | Shipped value | Why |
+| --- | --- | --- |
+| First drop | 0:10 | Every player has something to run at within ten seconds |
+| Interval | 25 s to 5:00, then 15 s | Early positioning, then enough throughput to fund tier-3 |
+| Crates per drop | 3 × player count | A shared drop must not starve six players |
+| Every fifth drop | × 1.75 | A scheduled contested prize, not a random one |
+
+**Site selection is integer arithmetic, not a float ratio.** A candidate at
+distance `d` from the map centre, with a maximum distance `D`, gets weight
+`3D − 2d`, algebraically `D × (1 + 2(1 − d/D))`, so centre drops are three
+times as likely, but every operation is a whole number. The pick is
+`next_below(total)` over that weight; the previous site is excluded. A committed
+golden vector is asserted in the unit test and was re-run under `wasm32-wasip1`
+in this commit, because a client that picks a different site draws its telegraph
+in the wrong place for every player at once.
+
+The drop falls 80 m at 12 m/s: 6.7 s from spawn to touchdown, 134 ticks. It is
+announced when it spawns, not five seconds before impact, so the marker is up for
+the whole descent. That is the telegraph row as a *floor* rather than a timer.
+Landing scatters each crate into a ±2 m square (2.83 m diagonal, inside the 3 m
+bound) with no rejection loop.
+
+**Carry and deposit.** Pickup is automatic inside 1.2 m, capped at 12. Holding
+the place action inside your own pad deposits at 6/s; the rate is an elapsed-tick
+accumulator capped just under two crates, so time spent walking is not banked and
+a long gap cannot become a burst. Death destroys `floor(load × 0.5)` and spills
+the rest as pickups; that is the anti-snowball lever, and the reason a loaded
+player is worth killing. Pickups expire at 180 s and the world holds at most 120.
+
+The module keeps a ledger: `dropped == destroyed + deposited + carried +
+on_ground`. Every path that removes a crate names its bucket, including the
+120-pickup eviction and the 180 s despawn, so "where did that crate go?" is a
+one-line query rather than a hunt through five systems.
+
+**What this module does not own:** pad ownership. `deposit` takes
+`inside_own_pad` from the caller; the candidate set comes from worldgen, which
+already excludes base pads. Both boundaries exist so the economy has no voxel
+storage and no team rules of its own. The room loop is what joins them, and it is
+the next task.
 
 ## Content discrepancies, resolved rather than guessed
 
