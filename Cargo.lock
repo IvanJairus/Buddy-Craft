@@ -131,6 +131,7 @@ name = "client-wasm"
 version = "0.1.0"
 dependencies = [
  "protocol",
+ "room",
  "sim",
  "wasm-bindgen",
  "world",

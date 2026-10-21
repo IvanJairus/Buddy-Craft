@@ -129,6 +129,11 @@ export async function loadClientWasm(url: string): Promise<ClientWasmExports> {
     cb_mem_alloc: lookup("cb_mem_alloc"),
     cb_recipes: lookup("cb_recipes"),
     cb_near_miss: lookup("cb_near_miss"),
+    cb_offline_init: lookup("cb_offline_init"),
+    cb_offline_message: lookup("cb_offline_message"),
+    cb_offline_tick: lookup("cb_offline_tick"),
+    cb_offline_poll: lookup("cb_offline_poll"),
+    cb_offline_state_hash: lookup("cb_offline_state_hash"),
   };
 }
 
@@ -196,6 +201,11 @@ export interface ClientWasmExports {
   cb_mem_alloc(size: number): number;
   cb_recipes(outPtr: number, outCap: number): number;
   cb_near_miss(ptr: number, count: number, elapsedSeconds: number): number;
+  cb_offline_init(seed: number, mode: number, teams: number): number;
+  cb_offline_message(ptr: number, len: number): number;
+  cb_offline_tick(): number;
+  cb_offline_poll(outPtr: number, outCap: number): number;
+  cb_offline_state_hash(): number;
 }
 
 /** One recipe row, decoded from the wasm table. */

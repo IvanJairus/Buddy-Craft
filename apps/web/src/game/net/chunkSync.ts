@@ -149,6 +149,11 @@ export class ChunkSync {
     this.queue.push({ patch, frame });
   }
 
+  reset(): void {
+    this.queue.length = 0;
+    this.columns.clear();
+  }
+
   /** Decode and queue a wire frame, retaining the bytes for the wasm sink. */
   enqueueFrame(frame: Uint8Array): ChunkPatch {
     const patch = decodeChunkDiff(frame);

@@ -63,6 +63,20 @@ export class Interpolator {
     this.roles = roles;
   }
 
+  reset(): void {
+    this.history.fill(null);
+    this.next = 0;
+    this.count = 0;
+    this.latest = null;
+    this.latestArrival = 0;
+    this.renderClock = 0;
+    this.lastNow = 0;
+    this.started = false;
+    this.playerCount = 0;
+    this.buddyCount = 0;
+    this.renderTick = 0;
+  }
+
   /** Add a decoded snapshot and the client time it arrived. */
   push(frame: SnapshotFrame, nowMs: number): void {
     if (!frame.valid) return;

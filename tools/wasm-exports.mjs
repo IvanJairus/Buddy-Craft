@@ -26,6 +26,11 @@ const CONTRACT = [
   "cb_mem_alloc",
   "cb_recipes",
   "cb_near_miss",
+  "cb_offline_init",
+  "cb_offline_message",
+  "cb_offline_tick",
+  "cb_offline_poll",
+  "cb_offline_state_hash",
 ];
 
 const path = process.argv[2];

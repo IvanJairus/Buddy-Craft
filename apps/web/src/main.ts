@@ -38,6 +38,7 @@ import { errorMessage, showFatalScreen, showRttOverlay } from "./game/net/client
 import { ChunkSync } from "./game/net/chunkSync";
 import { SnapshotDecoder } from "./game/net/snapshot";
 import { Interpolator } from "./game/interp";
+import { OfflineSession } from "./game/offline";
 import { Hud, type HudStats } from "./ui/hud";
 import { RecipeBookUi, type RecipeBookInfo } from "./ui/recipeBook";
 import { LobbyScreen } from "./ui/lobby";
@@ -149,6 +150,22 @@ interface TestApi {
   audioRumble(level: number): AudioStats;
   audioPanner(): { x: number; y: number; z: number } | null;
   audioEvent(kind: number, a: number, b: number): void;
+  offlineStart(mode?: number, teams?: number): boolean;  offlineStats(): {
+    active: boolean;
+    snapshot: boolean;
+    state: string;
+    players: number;
+    buddies: number;
+    decoded: number;
+    hash: number;
+    ended: boolean;
+    x: number;
+    y: number;
+    z: number;
+  };
+  offlineAdvance(ticks: number): void;
+  offlineInput(frame: number[]): void;
+  offlineStop(): void;
 }
 
 declare global {
@@ -174,6 +191,12 @@ let client: ClientWasm | null = null;
 let chunks: ChunkManager | null = null;
 let entities: EntityRenderer | null = null;
 let particles: ParticleSystem | null = null;
+let offline: OfflineSession | null = null;
+let offlineActive = false;
+let offlineSnapshot = false;
+let lastOfflineInput = 0;
+let lastAdvanced = { ended: false, hash: 0 };
+const ZERO_FRAME = new Uint8Array(4);
 let interaction: Interaction | null = null;
 let desktop: DesktopInput | null = null;
 let touch: TouchInput | null = null;
@@ -231,7 +254,10 @@ async function boot(): Promise<void> {
   );
   if (chunks !== null) {
     interaction = new Interaction(renderer.scene, chunks.voxelSource(), {
-      localEdit: (x, y, z, block, action) => wasmClient.localEdit(x, y, z, block, action),
+      localEdit: (x, y, z, block, action) =>
+        offlineActive && offline !== null
+          ? offline.sendEdit(x, y, z, block, action)
+          : wasmClient.localEdit(x, y, z, block, action),
     });
   }
 
@@ -261,7 +287,7 @@ async function boot(): Promise<void> {
         interaction?.breakBlock();
       };
       touch.onPlace = (block) => {
-        interaction?.place(block);
+        interaction?.place(offlineActive ? 11 : block);
       };
     }
   } else {
@@ -286,7 +312,7 @@ async function boot(): Promise<void> {
     "main",
     buildMainMenu({
       onOnline: () => screens?.show("lobby"),
-      onOffline: () => screens?.show("match"),
+      onOffline: () => startOffline(),
       onSettings: () => screens?.show("settings"),
     }),
   );
@@ -306,12 +332,78 @@ async function boot(): Promise<void> {
   screens.register(
     "results",
     buildResults({
-      onMain: () => screens?.show("main"),
-      onRematch: () => screens?.show("match"),
+      onMain: () => {
+        offline?.stop();
+        offline = null;
+        offlineActive = false;
+        screens?.show("main");
+      },
+      onRematch: () => startOffline(),
     }),
   );
   const initialScreen: ScreenId = query.get("screen") === "match" ? "match" : "boot";
   screens.show(initialScreen);
+
+  function startOffline(mode = 1, teams = 2): void {
+    offline?.stop();
+    offline = null;
+    snapshotDecoder.reset();
+    interpolator.reset();
+    chunkSync.reset();
+    offlineActive = true;
+    offlineSnapshot = false;
+    lastOfflineInput = 0;
+    lastAdvanced = { ended: false, hash: 0 };
+    offline = new OfflineSession({
+      seed: DEMO_SEED,
+      mode,
+      teams,
+      onWelcome: () => {
+        hudStore.set({ hp: 100, maxHp: 100, crates: 0, carryCap: 12 });
+      },
+      onFrame: (bytes) => {
+        if (client === null) return;
+        client.onServerMessage(bytes);
+        if (bytes[0] === 0x87) {
+          chunkSync.enqueueFrame(bytes);
+          chunkSync.flush(
+            renderer.camera.position.x,
+            renderer.camera.position.z,
+            (patch) => {
+              chunks?.refreshAround(patch.cx, patch.cz);
+            },
+          );
+        } else if (bytes[0] === 0x84) {
+          const frame = snapshotDecoder.decode(bytes);
+          if (frame !== null) {
+            interpolator.push(frame, performance.now());
+            offlineSnapshot = true;
+          }
+        } else if (bytes[0] === 0x85) {
+          const ack = editAck(bytes);
+          if (ack !== null) interaction?.ack(ack.seq, ack.accepted);
+        }
+      },
+      onEnd: () => {
+        offlineActive = false;
+        offlineSnapshot = false;
+        offline?.stop();
+        offline = null;
+        screens?.show("results");
+      },
+      onAdvanced: (ended, hash) => {
+        lastAdvanced = { ended, hash };
+        if (ended) {
+          offlineActive = false;
+          offlineSnapshot = false;
+          offline?.stop();
+          offline = null;
+          screens?.show("results");
+        }
+      },
+    });
+    screens?.show("match");
+  }
 
   window.__cbTest = {
     info: () => renderer.info(),
@@ -599,6 +691,44 @@ async function boot(): Promise<void> {
     },
     audioPanner: () => audio.lastPanner(),
     audioEvent: (kind, a, b) => audio.handleEvent(kind, a, b),
+    offlineStart: (mode = 1, teams = 2) => {
+      startOffline(mode, teams);
+      return true;
+    },
+    offlineStats: () => {
+      let x = 0;
+      let y = 0;
+      let z = 0;
+      for (let i = 0; i < interpolator.playerCount; i += 1) {
+        if (interpolator.playerIds[i] === 0) {
+          x = interpolator.playerX[i];
+          y = interpolator.playerY[i];
+          z = interpolator.playerZ[i];
+          break;
+        }
+      }
+      return {
+        active: offlineActive,
+        snapshot: offlineSnapshot,
+        state: offline?.state ?? "idle",
+        players: interpolator.playerCount,
+        buddies: interpolator.buddyCount,
+        decoded: snapshotDecoder.decoded,
+        hash: lastAdvanced.hash,
+        ended: lastAdvanced.ended,
+        x,
+        y,
+        z,
+      };
+    },
+    offlineAdvance: (ticks) => offline?.advance(ticks),
+    offlineInput: (frame) => offline?.sendInput(Uint8Array.from(frame)),
+    offlineStop: () => {
+      offline?.stop();
+      offline = null;
+      offlineActive = false;
+      offlineSnapshot = false;
+    },
   };
   window.__cbReady = true;
 
@@ -610,8 +740,12 @@ async function boot(): Promise<void> {
         : touch !== null
           ? touch.poll()
           : new Uint8Array(4);
+    if (offlineActive && offline !== null && now - lastOfflineInput >= 66) {
+      offline.sendInput(frame);
+      lastOfflineInput = now;
+    }
     if (client !== null) {
-      client.tick(16, frame);
+      client.tick(16, offlineActive ? ZERO_FRAME : frame);
       tickCalls += 1;
     }
     const seconds = Math.floor(now / 1000);
@@ -619,7 +753,9 @@ async function boot(): Promise<void> {
     recipeBook.setElapsed(seconds);
     const cycle = seconds % 20;
     hudStore.set({
-      matchSeconds: seconds,
+      matchSeconds: offlineActive
+        ? Math.floor((snapshotDecoder.latestFrame?.tick ?? 0) / 20)
+        : seconds,
       // Demo countdown until the airdrop stream is wired in T-045/T-048.
       dropSeconds: cycle <= 10 ? 10 - cycle : 20 - cycle,
     });
@@ -630,7 +766,7 @@ async function boot(): Promise<void> {
           interaction.breakBlock();
         }
         if (desktop.consumeSecondary()) {
-          interaction.place(1);
+          interaction.place(offlineActive ? 11 : 1);
         }
       } else if (touch !== null) {
         interaction.aimFromCamera(renderer.camera);
@@ -646,7 +782,14 @@ async function boot(): Promise<void> {
     lastJuiceAt = now;
     juice.update(now, dt);
     audio.update(dt / 1_000);
-    if (views !== null) {
+    if (offlineActive && offlineSnapshot) {
+      interpolator.sample(now);
+      entities?.updateFromInterp(
+        interpolator,
+        renderer.quality.entityAnimation && juice.timeScale > 0,
+      );
+      followOfflineCamera();
+    } else if (views !== null) {
       entities?.update(views, renderer.quality.entityAnimation && juice.timeScale > 0);
     }
     particles?.update(juice.presentationSeconds);
@@ -658,7 +801,41 @@ async function boot(): Promise<void> {
     juice.restoreCamera();
     window.requestAnimationFrame(loop);
   };
+
+  function followOfflineCamera(): void {
+    for (let i = 0; i < interpolator.playerCount; i += 1) {
+      if (interpolator.playerIds[i] !== 0) continue;
+      const yaw = interpolator.playerYaw[i];
+      const x = interpolator.playerX[i];
+      const y = interpolator.playerY[i];
+      const z = interpolator.playerZ[i];
+      renderer.camera.position.set(
+        x - Math.sin(yaw) * 4.2,
+        y + 2.6,
+        z - Math.cos(yaw) * 4.2,
+      );
+      renderer.camera.lookAt(x, y + 1.1, z);
+      hudStore.set({ hp: interpolator.playerHp[i], maxHp: 100 });
+      return;
+    }
+  }
   window.requestAnimationFrame(loop);
 }
 
 void boot();
+
+function editAck(bytes: Uint8Array): { seq: number; accepted: boolean } | null {
+  let at = 1;
+  let seq = 0;
+  let shift = 0;
+  for (;;) {
+    if (at >= bytes.length || shift > 35) return null;
+    const byte = bytes[at];
+    at += 1;
+    seq += (byte & 0x7f) * 2 ** shift;
+    if ((byte & 0x80) === 0) break;
+    shift += 7;
+  }
+  if (at >= bytes.length) return null;
+  return { seq: seq >>> 0, accepted: bytes[at] === 1 };
+}

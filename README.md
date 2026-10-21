@@ -148,13 +148,13 @@ tests use the second without a runtime.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 484 Rust tests
+cargo test --workspace --all-targets              # 486 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 85 specs, 1 headed (pointer lock)
+cd apps/web && npm ci && npm run test:e2e          # 89 specs, 1 headed (pointer lock)
 
 # Host (local dev). `CB_ADDR`, `CB_ALLOWED_ORIGINS` and `CB_SUMMARY_DIR` override defaults.
 cargo run -p host-axum                            # ws://127.0.0.1:8080/ws?room=DEV001
@@ -229,7 +229,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-045 | axum host: WS upgrade, Origin gate, 20 Hz room task, health, graceful summaries | done |
 | T-046 | Durable Object adapter and `wrangler deploy` | blocked: deploy/runtime verification |
 | T-047 | Crockford codes, registry collision, lockout and quota policy | partial: HTTP/DO blocked behind T-046 |
-| T-048 | offline Web Worker match | not started |
+| T-048 | offline Web Worker match with bots and the online wire frames | done |
 | T-049 | audio graph, 24 voices, 30 procedural cues, rumble worklet | partial: WebKit/iOS and recorded assets not verified |
 | T-050 | anti-cheat T1–T15 matrix and cheat client | not started |
 | T-051 | art atlas and GLB models | not started: no art assets |
@@ -395,7 +395,7 @@ recorded here rather than quietly skipped:
   created (T-001's web skeleton was skipped). The bridge adds the dependency and
   `crate-type = ["cdylib", "rlib"]`, creates only the wasm loader, and leaves
   the rest of the app to T-031. Raw wasm export names carry wasm-bindgen's hash
-  suffix, so `tools/wasm-exports.mjs` checks the 15 base names and CI runs it.
+  suffix, so `tools/wasm-exports.mjs` checks the 20 base names and CI runs it.
   The wasm-bindgen CLI is not part of the build: the raw loader instantiates the
   module directly and stubs its four unused imports. A future export that takes
   a string or an object would need the glue back; none does today.
@@ -467,7 +467,7 @@ recorded here rather than quietly skipped:
   needs the same table and the same near-miss logic the matcher uses, and §5.1
   forbids reimplementing recipe matching in JS, so `cb_recipes` and
   `cb_near_miss` are two read-only helpers. The state API is unchanged;
-  `tools/wasm-exports.mjs`, CI and this README now pin 15.
+  `tools/wasm-exports.mjs`, CI and this README now pin 15 before T-048; the current number is 20.
 - **Near-miss is "missing blocks ≤ 2", not byte Hamming distance.** A byte
   comparison of canonical keys does not yield a "needs N" count, and a cluster
   with an extra block cannot be fixed by adding a missing one. The implemented
@@ -478,8 +478,8 @@ recorded here rather than quietly skipped:
 - **The recipe book's CSS is a third file.** The task names two TypeScript
   files; the panel needs layout styles, so `recipeBook.css` is added. The
   prediction and the ghost are not yet wired to pad state; their APIs are
-  exercised by the page specs and T-048 will feed them.
-- **The lobby is local until T-048.** The room code, copy button and join
+  exercised by the page specs; T-052 will feed them from pad state.
+- **The lobby is local until the online client wiring.** The room code, copy button and join
   validation are real and tested; T-040 supplies the WebSocket client and T-045
   the host, but the browser does not connect them yet, so Start enters the demo
   match. The screen manager is the part the client plugs into, not a second
@@ -491,7 +491,7 @@ recorded here rather than quietly skipped:
   together.
 - **The match and results are not connected to a real outcome.** LEAVE MATCH is
   a deliberate route so the Results screen is reachable and the shell has no
-  dead end. T-048 will replace the leave action with the match-end event.
+  dead end. Offline now routes S_END to Results; the online host still uses the leave action until T-057.
 - **The key map is one code per action, not a chord model.** The ten controls
   each get one keyboard code; modifier combinations would need an array or a
   chord type. The JSON format is versioned by its own key, so a later chord
@@ -503,13 +503,13 @@ recorded here rather than quietly skipped:
   Snapshots and chunk diffs stay out of this codec.
 - **The net client is not in the lobby path yet.** It has a transport, codec,
   retry policy, token and RTT; `host-axum` now listens at `127.0.0.1:8080`, but
-  the browser Start button is still local. Wiring the two is T-048's offline and
-  online loop, not a second client.
+  the browser Start button is still local. T-048 now provides the offline loop;
+  the online wiring remains T-057, not a second client.
 - **T-041's predictor is internal to `client-wasm`.** The task lists the two
-  files but no export, and T-030's boundary is already at 15. Adding a predictor
+  files but no export, and T-030's boundary is now 20 including offline. Adding a predictor
   API before a host can feed it a snapshot would freeze the wrong shape. The
-  Rust tests call the predictor directly; T-048 wires it into the tick and
-  render path.
+  Rust tests call the predictor directly; offline renders interpolated snapshots,
+  so the predictor remains unwired.
 - **T-042 extended `S_CHUNK_DIFF` with a keyframe.** §6.7 names only sparse
   entries, but the acceptance criterion requires a whole-column replacement.
   The message now has `keyframe: bool` and `runs: Vec<(u8, u32)>`; a sparse
@@ -563,7 +563,7 @@ recorded here rather than quietly skipped:
   without changing the juice API.
 - **T-045 starts a bot match instead of a lobby flow.** `S_WELCOME`, `S_START`
   and snapshots are sent; `S_LOBBY`, Ready and team changes wait for the room
-  registry and client wiring in T-047/T-048. A room is created on first use, so
+  registry and online client wiring in T-047/T-057. A room is created on first use, so
   there is no authentication or per-IP limit yet.
 - **All WebSocket clients share seat 0.** The host has one human seat and five
   bots. Separate per-connection seats need the same registry work as above; the
@@ -574,7 +574,7 @@ recorded here rather than quietly skipped:
   suite keeps the endpoint, upgrade and Origin tests.
 - **The browser is not connected to `host-axum` yet.** The local dev loop can
   start the host and observe a real upgrade, but Start still enters the demo.
-  T-048 owns the playable offline/online loop and the camera/prediction wiring.
+  T-048 now owns the playable offline loop; the online host path remains T-057.
 - **Reconnect attempts reset on a successful open.** The six-attempt ceiling is
   for six consecutive failed connections, not six for the session; an unstable
   link that opens and closes would otherwise be permanently dead. The token is
@@ -1358,11 +1358,11 @@ a grow detaches every cached `ArrayBuffer`. In dev builds every frame checks
 that each view still has a non-zero buffer and that the magic is present; the
 error names `memory.grow`, the actual cause.
 
-The browser does not load wasm-bindgen glue. All 15 exports take and return
+The browser does not load wasm-bindgen glue. All 20 exports take and return
 numbers, so `loadClientWasm` compiles the raw `.wasm`, stubs the four internal
 imports (`describe`, a throw shim, two externref-table hooks), and maps the
 hash-suffixed export names back to the contract. The wasm artifact is the single
-source of truth; `tools/wasm-exports.mjs` checks the 15 base names in CI.
+source of truth; `tools/wasm-exports.mjs` checks the 20 base names in CI.
 
 `cb_tick` still steps one local body against a flat floor. That is enough to
 prove wire input decoding, the 50 ms accumulator (at most four catch-up steps
@@ -1416,9 +1416,9 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 636.2 KB raw and 162.4 KB gzipped,
-under §8.10's 450 KB gzip target; the wasm asset is measured in the chunk
-section below.
+device deterministically. The JS bundle is 648.1 KB raw and 166.1 KB gzipped,
+under §8.10's 450 KB gzip target; the offline worker adds a 2.9 KB module. The
+wasm asset is measured in the chunk section below.
 
 ## Chunks: one mesh per column, a ring that lags
 
@@ -1435,7 +1435,7 @@ budget when they want a steady state without waiting.
 | Triangles | 104,862 (gate 350k) |
 | 200 load/unload cycles | 34 KB heap growth after GC (gate 5 MB) |
 | 64 MB `memory.grow` | views rebuilt, geometry unchanged, new meshes still work |
-| wasm asset | 417.4 KB raw, 133.9 KB gzipped (target 700 KB) |
+| wasm asset | 604.1 KB raw, 197.8 KB gzipped (target 700 KB) |
 
 The mesher is neighbour-aware: each column is meshed with the four columns
 around it, so interior chunk borders do not draw walls. The payload is a
@@ -1510,7 +1510,7 @@ off-by-one this avoids.
 | visuals | wireframe at cell + 0.5; ghost at cell + normal + 0.5 |
 | edits | place and break call the sink once and leave a pending record; ack retires it |
 
-`VoxelSource` is the seam. The 15-export bridge has no block query, so the mesh
+`VoxelSource` is the seam. The 20-export bridge has no block query, so the mesh
 payload now carries a 256-byte height map per column, computed in Rust from the
 column itself rather than from merged vertices. The chunk manager turns that into
 `solid(x, y, z) = y < top(x, z)`. T-042 applies diffs to the real wasm column and
@@ -1611,7 +1611,7 @@ invalidating the whole screen.
 The app's values are demo numbers until the match stream lands: the clock and
 drop countdown are local, HP and crates start at their full and empty values,
 and the stance is wired to F and the touch button. The store is the seam that
-T-048 will feed.
+T-052 will feed.
 
 Plan §8.7 says the store batches DOM writes into a `requestAnimationFrame`; the
 acceptance criterion says a 20 Hz value is sampled on a 100 ms timer. The timer
@@ -1632,7 +1632,7 @@ unlock clock.
 | Near-miss parity | 500 random clusters; every predicted completion matched the matcher |
 | Banner | `SWORD: needs 1 more crate` |
 | Ghost | one `InstancedMesh`, count = recipe cost |
-| wasm asset | 417.4 KB raw, 133.9 KB gzipped |
+| wasm asset | 604.1 KB raw, 197.8 KB gzipped |
 
 `cb_near_miss` runs the Rust canonicaliser over rotations and translations and
 returns `recipe_id << 8 | missing`. Rust maps the missing blocks back into the
@@ -1646,9 +1646,9 @@ also has an extra crate.
 The ghost is one translucent instanced copy of a recipe row. The book opens from
 E on desktop and from its own 44 px button on touch; the near-miss banner is
 driven by the same Rust call. The pad state that will feed an anchor and a live
-cluster is T-048's job; the prediction and overlay APIs are already tested.
+cluster is T-052's job; the prediction and overlay APIs are already tested.
 
-This task is why the wasm boundary grew from 13 to 15 exports. §5.1 says JS
+This task is why the wasm boundary grew from 13 to 15 exports; T-048 later added the five offline names, for 20. §5.1 says JS
 never decides whether a recipe matches, so porting the canonicaliser into
 TypeScript was not an option. The two new exports are read-only data and
 prediction helpers; the state exports are unchanged and the export check now
@@ -1674,7 +1674,7 @@ so Results is reachable without waiting for a core.
 The lobby generates a six-character code from an unambiguous alphabet, shows a
 copy button, and validates a joined code against `[A-Z0-9]{6}` before doing
 anything else. The net client is T-040; the host is T-045. Start still enters
-the local demo match; T-048 connects the two.
+the local demo match; T-048 connects offline play and the online socket remains T-057.
 
 Settings persist quality, sensitivity, invert-Y, UI scale (80-150%), reduced
 motion and a key map for ten actions. The remap buttons capture one key on the
@@ -1716,8 +1716,8 @@ plain `textContent`.
 The lobby does not connect yet. T-045 provides the authoritative host at
 `127.0.0.1:8080`; the T-043 decoder and T-041 predictor are ready for it, but
 the browser Start button still enters the local match. The `NetClient` is
-exercised by a fake transport and the page overlay test. T-048 wires the real
-socket into the lobby. That boundary is deliberate: the client can be trusted
+exercised by a fake transport and the page overlay test; T-057 wires the real
+socket into the lobby. Offline now uses the same bytes in a Worker. That boundary is deliberate: the client can be trusted
 with control frames and reconnect policy before it is trusted with the match.
 
 The codec is data, not rules. It does not decide whether a message is valid,
@@ -1757,9 +1757,9 @@ later frame exceeds the 5.01 cm Fixed-rounding bound, and the residual is under
 residual; movement and replay remain in Rust, so there is no second physics
 implementation to drift.
 
-Both T-041 files exist, but the bridge still has 15 exports. The predictor stays
-internal until a host feeds it a snapshot; T-048 wires it into the tick and
-render path. Exposing a `cb_predict_*` API before the snapshot shape exists
+Both T-041 files exist, but the bridge is now at 20 exports including offline. The predictor stays
+internal until the online path feeds it a snapshot; offline uses snapshot
+interpolation and does not wire it. Exposing a `cb_predict_*` API before the snapshot shape exists
 would freeze the wrong interface.
 
 ## Chunk diffs: one version per column
@@ -1782,7 +1782,7 @@ full-column keyframe is tested at the protocol, client and wasm layers.
 On the client, `ChunkSync` decodes with hard limits, orders queued frames by
 distance from the player's column, and drops equal or older versions. The
 bridge's existing `cb_on_snapshot` entry point now applies a chunk diff to its
-cached voxel columns; no new wasm export was needed, so the surface stays at 15.
+cached voxel columns; no new wasm export was needed, so the surface stays at 20 including offline.
 The loader rebuilds its views after the call, and `ChunkManager.refreshAround`
 re-meshes the edited column and its four neighbours.
 
@@ -1827,8 +1827,9 @@ that the 64-frame ring reuses the same frame and typed arrays; it is a pool-reus
 test, not a heap sample.
 
 The wire still has no team or buddy role. The decoder's lookup tables default to
-zero; T-048's lobby wiring must fill them from the room roster. The snapshot
-stream is served by `host-axum` but the browser is not connected to it yet.
+zero; the online lobby wiring must fill them from the room roster. Offline
+decodes the same zero defaults. The snapshot stream is served by `host-axum`
+but the browser is not connected to it yet.
 
 ## Juice: an event packet, not a poll
 
@@ -1887,21 +1888,46 @@ start runs it with `--release`. The debug suite still has a real TCP test for
 Origin rejected with 403.
 
 The browser does not connect yet. Start still enters the demo match, and every
-WebSocket client shares the single human seat. T-048 owns the lobby/offline loop
-that turns this host into a playable browser session.
+WebSocket client shares the single human seat. Offline play is now available; the online lobby path is still T-057/T-058.
+
+## Offline: the room runs in a Worker
+
+T-048 puts the same `room::Match` inside a Web Worker. `OfflineSession` swaps
+only the transport: the worker receives `C_INPUT` and emits `S_WELCOME`,
+`S_START`, `S_SNAPSHOT`, `S_CHUNK_DIFF`, `S_EDIT_ACK` and `S_END` bytes, and the
+main thread runs the same `NetClient`, snapshot decoder and chunk stream as the
+WebSocket path. The offline exports (`cb_offline_init`, `cb_offline_message`,
+`cb_offline_tick`, `cb_offline_poll`, `cb_offline_state_hash`) are the only new
+wasm surface; total exports are now 20.
+
+The main thread follows the local player from the interpolated snapshot and
+sends edits through the same C2S codec. The Worker ticks at 20 Hz with five
+bots. The default button starts a 3v3 Teams match; FFA is exercised through the
+test entry point and supported by the same session. A 60,000-tick accelerated
+run reaches `S_END` and the Results screen in about 2.4 seconds of Worker CPU.
+
+The specs prove the player moves while `context.setOffline(true)` is active,
+both modes start, and the full bot match reaches results. `offline_and_online_share_rules`
+compares the offline state hash with a native match ticked by the same input.
+
+Not yet covered: a mode selector in the menu (Teams is the default), and a
+scripted human mine-craft-buddy-core walkthrough. Bots perform the craft and
+core loop in the full-match test; the human can move, break, place and follow
+the same wire path.
 
 ## Where this batch stops
 
-The batch reached T-061 only partially. T-047's registry policy and Crockford
-codes are native-tested, but its HTTP/DO surface is blocked behind T-046.
-T-049 has a real graph and 30 procedural cues, but no recorded OGG assets and no
-WebKit/iOS run. T-059 and T-061 are complete locally. T-046 and T-057 need a
-live Cloudflare/Vercel deployment, T-051 needs art, T-048 and T-054 need the
-playable worker loop, and T-062/T-063/T-064 need physical devices, six humans on
-production and a week of telemetry. Those are not marked done.
+The batch reached T-061 only partially. T-048 is now playable and T-049 has a
+real graph and 30 procedural cues, but no recorded OGG assets and no WebKit/iOS
+run. T-047's registry policy and Crockford codes are native-tested, but its
+HTTP/DO surface is blocked behind T-046. T-059 and T-061 are complete locally.
+T-046 and T-057 need a live Cloudflare/Vercel deployment, T-051 needs art,
+T-054 needs the online host path plus Firefox/WebKit, and T-062/T-063/T-064 need
+physical devices, six humans on production and a week of telemetry. Those are
+not marked done.
 
-The current gates are 484 Rust tests, 85 Playwright specs, clippy/fmt clean, and
-15 wasm exports. The last full-browser run is Chromium plus the headed pointer
+The current gates are 486 Rust tests, 89 Playwright specs, clippy/fmt clean, and
+20 wasm exports. The last full-browser run is Chromium plus the headed pointer
 lock project; Firefox and WebKit are not installed on this machine.
 
 ## Content discrepancies, resolved rather than guessed

@@ -14,5 +14,6 @@ crate-type = ["cdylib", "rlib"]
 sim.workspace = true
 world.workspace = true
 protocol.workspace = true
+room.workspace = true
 wasm-bindgen = "0.2"
 

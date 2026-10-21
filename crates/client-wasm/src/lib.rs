@@ -41,6 +41,7 @@ use world::chunk::{Column, CHUNK_Y, VOLUME};
 use world::gen::{WorldGen, MAP_COLS};
 use world::mesh::mesh_with_neighbours;
 
+pub mod offline;
 pub mod predict;
 mod render_buffer;
 
@@ -437,6 +438,11 @@ impl VoxelQuery for FlatGround {
 
 thread_local! {
     static BRIDGE: RefCell<Option<Bridge>> = const { RefCell::new(None) };
+    static OFFLINE: RefCell<Option<offline::OfflineSession>> = const { RefCell::new(None) };
+}
+
+fn with_offline<R>(f: impl FnOnce(&mut offline::OfflineSession) -> R) -> Option<R> {
+    OFFLINE.with(|slot| slot.borrow_mut().as_mut().map(f))
 }
 
 fn with_bridge<R>(f: impl FnOnce(&mut Bridge) -> R) -> Option<R> {
@@ -620,6 +626,83 @@ pub fn cb_mesh_chunk(cx: i16, cz: i16, out_ptr: u32, out_cap: u32) -> u32 {
 pub fn cb_release_mesh(generation: u32) -> u32 {
     let _ = generation;
     OK
+}
+
+/// Start the offline room session. Returns [`OK`] or 0.
+#[wasm_bindgen]
+pub fn cb_offline_init(seed: u32, mode: u8, teams: u8) -> u32 {
+    let session = offline::OfflineSession::new(u64::from(seed), mode, teams);
+    OFFLINE.with(|slot| {
+        *slot.borrow_mut() = session;
+        if slot.borrow().is_some() {
+            OK
+        } else {
+            0
+        }
+    })
+}
+
+/// Feed one C2S frame into the offline room. Returns [`OK`] or 0.
+#[wasm_bindgen]
+pub fn cb_offline_message(ptr: u32, len: u32) -> u32 {
+    if ptr == 0 || len == 0 || len > 4096 {
+        return 0;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        // SAFETY: `ptr` is inside the arena reserved by `cb_mem_alloc`, and JS
+        // wrote exactly `len` bytes there.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+        with_offline(|session| {
+            session.message(bytes);
+            OK
+        })
+        .unwrap_or(0)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // A native u32 cannot carry this process's pointer; native tests call
+        // `OfflineSession::message` directly.
+        let _ = (ptr, len);
+        0
+    }
+}
+
+/// Advance the offline room by one 50 ms tick.
+#[wasm_bindgen]
+pub fn cb_offline_tick() -> u32 {
+    with_offline(|session| {
+        session.tick();
+        OK
+    })
+    .unwrap_or(0)
+}
+
+/// Pop one S2C frame into JS-owned staging memory. Returns its length, or 0.
+#[wasm_bindgen]
+pub fn cb_offline_poll(out_ptr: u32, out_cap: u32) -> u32 {
+    if out_ptr == 0 || out_cap == 0 {
+        return 0;
+    }
+    with_offline(|session| {
+        let Some(frame) = session.poll() else {
+            return 0;
+        };
+        if frame.len() > out_cap as usize {
+            return 0;
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(frame.as_ptr(), out_ptr as *mut u8, frame.len());
+        }
+        frame.len() as u32
+    })
+    .unwrap_or(0)
+}
+
+/// Low 32 bits of the offline match state hash.
+#[wasm_bindgen]
+pub fn cb_offline_state_hash() -> u32 {
+    with_offline(|session| session.state_hash() as u32).unwrap_or(0)
 }
 
 /// Pointer to the render header.

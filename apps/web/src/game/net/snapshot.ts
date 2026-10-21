@@ -146,6 +146,13 @@ export class SnapshotDecoder {
     return this.latest;
   }
 
+  reset(): void {
+    for (const frame of this.frames) frame.valid = false;
+    this.latest = null;
+    this.needsKeyframe = 0;
+    this.decoded = 0;
+  }
+
   frame(seq: number): SnapshotFrame | null {
     if (seq === 0) return null;
     const frame = this.frames[seq % BASELINE_FRAMES];

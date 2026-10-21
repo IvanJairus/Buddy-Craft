@@ -22,6 +22,8 @@ export const TOKEN_LEN = 16;
 export const ERROR_DETAIL_LEN = 64;
 
 export const C2S_HELLO = 0x01;
+export const C2S_INPUT = 0x04;
+export const C2S_EDIT = 0x05;
 export const C2S_PING = 0x08;
 export const S2C_WELCOME = 0x81;
 export const S2C_ERROR = 0x8a;
@@ -61,8 +63,7 @@ function pushVarint(out: number[], value: number): void {
   } while (rest !== 0);
 }
 
-function readVarint(bytes: Uint8Array, at: number): { value: number; next: number } {
-  let value = 0;
+function readVarint(bytes: Uint8Array, at: number): { value: number; next: number } {  let value = 0;
   let shift = 0;
   let offset = at;
   while (offset < bytes.length) {
@@ -114,6 +115,54 @@ export function encodeHello(fields: HelloFields): Uint8Array {
 export function encodePing(t: number): Uint8Array {
   const out: number[] = [C2S_PING];
   pushVarint(out, t);
+  return Uint8Array.from(out);
+}
+
+export interface WireInputFields {
+  axes: number;
+  yaw: number;
+  pitch: number;
+  buttons: number;
+}
+
+/** Three frames, exactly as `C_INPUT` carries them. */
+export function encodeInput(
+  seq: number,
+  ackedSeq: number,
+  firstTick: number,
+  frames: readonly WireInputFields[],
+): Uint8Array {
+  const out: number[] = [C2S_INPUT];
+  pushVarint(out, seq);
+  pushVarint(out, ackedSeq);
+  pushVarint(out, firstTick);
+  for (let i = 0; i < 3; i += 1) {
+    const frame = frames[Math.min(i, frames.length - 1)];
+    out.push(frame.axes & 0xff, frame.yaw & 0xff, frame.pitch & 0xff, frame.buttons & 0xff);
+  }
+  return Uint8Array.from(out);
+}
+
+export interface EditFields {
+  seq: number;
+  x: number;
+  y: number;
+  z: number;
+  block: number;
+  action: number;
+}
+
+function pushSigned(out: number[], value: number): void {
+  pushVarint(out, value >= 0 ? value * 2 : -value * 2 - 1);
+}
+
+export function encodeEdit(fields: EditFields): Uint8Array {
+  const out: number[] = [C2S_EDIT];
+  pushVarint(out, fields.seq);
+  pushSigned(out, fields.x);
+  pushSigned(out, fields.y);
+  pushSigned(out, fields.z);
+  out.push(fields.block & 0xff, fields.action & 0xff);
   return Uint8Array.from(out);
 }
 
@@ -348,6 +397,7 @@ export interface NetClientOptions {
   onRtt?: (ms: number) => void;
   onState?: (state: NetState) => void;
   onOther?: (message: Extract<ServerMessage, { kind: "other" }>) => void;
+  onRaw?: (bytes: Uint8Array) => void;
 }
 
 export type NetState = "idle" | "connecting" | "open" | "reconnecting" | "fatal" | "closed";
@@ -424,6 +474,13 @@ export class NetClient {
     this.setState("closed");
   }
 
+  /** Send a pre-encoded C2S frame. Offline mode uses the same path. */
+  sendRaw(bytes: Uint8Array): boolean {
+    if (this.transport === null || this.stateValue !== "open") return false;
+    this.transport.send(bytes);
+    return true;
+  }
+
   destroy(): void {
     this.disconnect();
     if (this.overlay) {
@@ -495,9 +552,11 @@ export class NetClient {
   }
 
   private handleMessage(data: ArrayBuffer): void {
+    const raw = new Uint8Array(data);
+    this.options.onRaw?.(raw);
     let message: ServerMessage;
     try {
-      message = decodeS2c(data);
+      message = decodeS2c(raw);
     } catch {
       this.fatal("The server sent a message this client cannot read.");
       return;
