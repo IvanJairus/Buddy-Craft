@@ -162,7 +162,10 @@ npm run dev
 ```
 
 Open the printed URL, choose OFFLINE, and the bot-filled Worker match starts.
-The rest of the commands below are for development, the network host and gates.
+Local host and client settings are documented in `.env.example`. Rust does not
+read `.env` by itself; export it with `set -a; source .env; set +a`. Vite reads
+only `VITE_*` values from `apps/web/.env.local`. The rest of the commands below
+are for development, the network host and gates.
 
 ```bash
 cargo test --workspace --all-targets              # 501 Rust tests
