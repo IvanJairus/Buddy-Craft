@@ -35,9 +35,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             hub.shutdown().await;
         }
     };
-    axum::serve(listener, app(state.clone()))
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    axum::serve(
+        listener,
+        app(state.clone()).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await?;
     state.hub.shutdown().await;
     Ok(())
 }

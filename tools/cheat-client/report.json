@@ -1,0 +1,96 @@
+{
+  "attempts": [
+    {
+      "attack": "speed / teleport via input",
+      "detail": "13.656 m over 3 s, budget 14.5 m",
+      "id": "T1",
+      "outcome": "clamped"
+    },
+    {
+      "attack": "reach hack",
+      "detail": "reason 2",
+      "id": "T2",
+      "outcome": "rejected"
+    },
+    {
+      "attack": "damage spoof",
+      "detail": "tag 0x0A is not a client message",
+      "id": "T3",
+      "outcome": "rejected"
+    },
+    {
+      "attack": "edit spam",
+      "detail": "8 accepted, last reason 5",
+      "id": "T4",
+      "outcome": "rejected"
+    },
+    {
+      "attack": "crate duplication",
+      "detail": "the second edit sees the first crate",
+      "id": "T5",
+      "outcome": "rejected"
+    },
+    {
+      "attack": "block-edit race",
+      "detail": "edits are serial per tick",
+      "id": "T6",
+      "outcome": "rejected"
+    },
+    {
+      "attack": "snapshot / message flood",
+      "detail": "60 of 61 messages admitted",
+      "id": "T7",
+      "outcome": "rejected"
+    },
+    {
+      "attack": "message-size DoS",
+      "detail": "close code Some(1009)",
+      "id": "T8",
+      "outcome": "rejected"
+    },
+    {
+      "attack": "connection flood",
+      "detail": "3 of 4 admitted",
+      "id": "T9",
+      "outcome": "rejected"
+    },
+    {
+      "attack": "room-code brute force",
+      "detail": "lockout after six failures",
+      "id": "T10",
+      "outcome": "rejected"
+    },
+    {
+      "attack": "XSS via name",
+      "detail": "the name codec rejects characters outside its alphabet",
+      "id": "T11",
+      "outcome": "rejected"
+    },
+    {
+      "attack": "secret leakage",
+      "detail": "secret-scan.mjs found no planted pattern",
+      "id": "T12",
+      "outcome": "rejected"
+    },
+    {
+      "attack": "prototype pollution / postcard mutation",
+      "detail": "64 mutated frames decoded without a panic",
+      "id": "T13",
+      "outcome": "rejected"
+    },
+    {
+      "attack": "eliminated player rejoin",
+      "detail": "revoked token is not accepted",
+      "id": "T14",
+      "outcome": "rejected"
+    },
+    {
+      "attack": "token replay",
+      "detail": "room scope and cleanup revocation",
+      "id": "T15",
+      "outcome": "rejected"
+    }
+  ],
+  "failed": 0,
+  "protocol": 1
+}

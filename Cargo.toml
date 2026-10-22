@@ -9,6 +9,7 @@ members = [
   "crates/host-worker",
   "crates/host-axum",
   "tools/bot-swarm",
+  "tools/cheat-client",
 ]
 
 [workspace.package]
@@ -27,6 +28,8 @@ sim = { path = "crates/sim" }
 world = { path = "crates/world" }
 protocol = { path = "crates/protocol" }
 room = { path = "crates/room" }
+host-worker = { path = "crates/host-worker" }
+host-axum = { path = "crates/host-axum" }
 
 [profile.release]
 opt-level = 3

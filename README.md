@@ -134,6 +134,7 @@ docs/
   PLAN.md       the specification this repo implements
 tools/
   asset-pipeline/  deterministic atlas and GLB model generators (T-051)
+  cheat-client/    15-attack fixture and report (T-050)
   recipe-editor/   local grid editor and validator for data/recipes.ron (T-052)
   wasm-golden.mjs  runs the wasm build of the golden test under node:wasi
   wasm-exports.mjs checks the bridge's 20-function export contract
@@ -164,13 +165,13 @@ Open the printed URL, choose OFFLINE, and the bot-filled Worker match starts.
 The rest of the commands below are for development, the network host and gates.
 
 ```bash
-cargo test --workspace --all-targets              # 497 Rust tests
+cargo test --workspace --all-targets              # 499 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 92 specs passed, 4 perf-gated skipped, 1 headed
+cd apps/web && npm ci && npm run test:e2e          # 98 specs passed, 4 perf-gated skipped, 1 headed
 cd apps/web && PERF_GATE=1 npx playwright test tests/perf.spec.ts --project=headless
 
 # Host (local dev). `CB_ADDR`, `CB_ALLOWED_ORIGINS` and `CB_SUMMARY_DIR` override defaults.
@@ -178,6 +179,7 @@ cargo run -p host-axum                            # ws://127.0.0.1:8080/ws?room=
 curl -s http://127.0.0.1:8080/healthz
 cargo test --release -p host-axum tick_interval_p99   # 55 ms gate, release codegen
 cargo run --release -p bot-swarm                   # 20 rooms x 6 bots, writes tools/bot-swarm/report.md
+cargo run -p cheat-client                          # 15 attacks, writes tools/cheat-client/report.json
 
 # Look at the world. Property tests say a map is legal; this says it is a place.
 cargo run -p world --example ascii_map -- 0xC0FFEE 4
@@ -249,7 +251,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-047 | Crockford codes, registry collision, lockout and quota policy | partial: HTTP/DO blocked behind T-046 |
 | T-048 | offline Web Worker match with bots and the online wire frames | done |
 | T-049 | audio graph, 24 voices, 30 procedural cues, rumble worklet | partial: WebKit/iOS and recorded assets not verified |
-| T-050 | anti-cheat: 15 named threat tests, connection cap, token revocation | partial: cheat-client and host wiring missing |
+| T-050 | anti-cheat: 15 named threat tests, connection cap, token revocation | partial: host guards and 15-attack fixture done; registry limits blocked |
 | T-051 | art atlas and GLB models | done at the asset boundary: 24-tile atlas, 9 GLB models; renderer still boxes |
 | T-052 | content pass and recipe editor | done: 14 recipes, 6 buddies, grid editor with duplicate guard |
 | T-053 | 20-room bot swarm: p99 0.455 ms, 27 MB RSS, 240-player Oracle estimate | done |
@@ -2086,6 +2088,25 @@ All variants were reverted. No `data/tuning.ron` constant was changed. The next
 balance step is a map-aware route to the pad, then the same ten-match report is
 re-run.
 
+## Anti-cheat: socket guards and a 15-attack fixture
+
+T-050 wires the connection-scoped guards into `host-axum`. A browser must send
+`C_HELLO` within 5 s, a per-IP budget admits three sockets, and every connection
+has a 30/s token bucket with a 60-message burst. Reconnect tokens are issued per
+seat, resume the same seat when the old socket is gone, and are revoked at match
+end and room cleanup. The edit pipeline still owns reach, rate and placement
+validation.
+
+`cargo run -p cheat-client` runs all fifteen §11.2 attacks through the same
+guards and writes `tools/cheat-client/report.json`. The current fixture has 15
+attempts, 0 failures: T1 is clamped at 13.656 m over 3 s, T4's ninth edit is
+rate limited, T8 closes with 1009, T9 admits 3 of 4 sockets, and T14/T15 reject
+revoked and cross-room tokens.
+
+The task remains partial because the registry's room-creation (3/min/IP) and
+join lockout policies are exercised natively but their HTTP/DO surface is still
+blocked behind T-046/T-047. Chat rate limiting also has no host path in v1.
+
 ## Swarm: 20 rooms on one core
 
 T-053 runs twenty `room::Match` instances with six bots each for three simulated
@@ -2141,9 +2162,10 @@ T-046 and T-057 need a live Cloudflare/Vercel deployment, T-060's target still
 needs a bot economy/pathing fix, and T-062/T-063/T-064 need physical devices,
 six humans on production and a week of telemetry. Those are not marked done.
 
-The current gates are 497 Rust tests, 138 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
-20 wasm exports. T-050 has the 15 named threat tests, but `tools/cheat-client`
-and host wiring for the new connection/token guards are still missing. The last full-browser run is Chromium plus the headed pointer
+The current gates are 499 Rust tests, 138 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
+20 wasm exports. T-050 now has the 15 named threat tests, the socket guards and
+the committed 15-attack fixture; only the registry HTTP/DO surface and chat
+rate path remain. The last full-browser run is Chromium plus the headed pointer
 lock project; Firefox and WebKit are now installed through Playwright and the
 T-054 suite runs on both.
 

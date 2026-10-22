@@ -10,7 +10,7 @@ pub mod telemetry;
 pub mod ws;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use axum::body::Bytes;
@@ -35,6 +35,8 @@ pub struct AppState {
     pub switches: Arc<telemetry::Switches>,
     /// Accelerated E2E commands and spawn overrides.
     pub e2e: bool,
+    /// Per-IP socket budget (T-050).
+    pub connections: Arc<Mutex<room::ConnectionBudget>>,
 }
 
 impl AppState {
@@ -46,6 +48,7 @@ impl AppState {
             started: Instant::now(),
             switches: Arc::new(telemetry::Switches::from_env()),
             e2e: std::env::var("CB_E2E").ok().as_deref() == Some("1"),
+            connections: Arc::new(Mutex::new(room::ConnectionBudget::default())),
         }
     }
 

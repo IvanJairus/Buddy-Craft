@@ -15,7 +15,7 @@ use protocol::{
     end_reason, error_code, event_kind, End, ErrorMsg, FixedBytes, Input, RoomConfig, S2c,
     SnapshotEvent, Start, Welcome, INPUT_FRAMES, TOKEN_LEN,
 };
-use room::{snapshot::SnapshotEncoder, Match, MatchEvent};
+use room::{snapshot::SnapshotEncoder, Match, MatchEvent, TokenBook};
 use sim::{Mode, PlayerId, RoomSetup, Tick};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -44,6 +44,8 @@ pub enum RoomCommand {
         id: u64,
         /// Encoded server frames for this connection.
         to_client: mpsc::Sender<Vec<u8>>,
+        /// Reconnect token from `C_HELLO`, if any.
+        token: Option<[u8; TOKEN_LEN]>,
     },
     /// A `C_INPUT` packet from one connection.
     Input {
@@ -180,6 +182,8 @@ async fn run_room(code: String, mut commands: mpsc::Receiver<RoomCommand>, hub: 
         game.set_spawn(PlayerId(0), sim::Vec3::from_ints(72, height + 1, 59));
         game.set_spawn(PlayerId(1), sim::Vec3::from_ints(74, height + 1, 59));
     }
+    let mut tokens = TokenBook::default();
+    let room_key = room_key(&code);
     let mut clients: Vec<Client> = Vec::new();
     let mut human: [Option<sim::InputFrame>; HUMAN_SEATS as usize] = std::array::from_fn(|_| None);
     let mut end_sent = false;
@@ -195,18 +199,38 @@ async fn run_room(code: String, mut commands: mpsc::Receiver<RoomCommand>, hub: 
         tokio::select! {
             command = commands.recv() => {
                 match command {
-                    Some(RoomCommand::Join { id, to_client }) => {
-                        let Some(seat) = (0..HUMAN_SEATS)
-                            .map(PlayerId)
-                            .find(|candidate| !clients.iter().any(|client| client.seat == *candidate))
-                        else {
-                            let error = S2c::Error(ErrorMsg {
-                                code: error_code::ROOM_FULL,
-                                detail: FixedBytes::from_str_lossy("room is full"),
-                            });
-                            let _ = to_client.try_send(error.encode());
-                            continue;
+                    Some(RoomCommand::Join { id, to_client, token }) => {
+                        let existing = token.and_then(|token| {
+                            tokens
+                                .accept(room_key, &token)
+                                .filter(|player| {
+                                    player.0 < HUMAN_SEATS
+                                        && !clients
+                                            .iter()
+                                            .any(|client| client.seat == *player)
+                                })
+                        });
+                        let seat = match existing {
+                            Some(player) => player,
+                            None => {
+                                let Some(free) = (0..HUMAN_SEATS).map(PlayerId).find(|candidate| {
+                                    !clients.iter().any(|client| client.seat == *candidate)
+                                }) else {
+                                    let error = S2c::Error(ErrorMsg {
+                                        code: error_code::ROOM_FULL,
+                                        detail: FixedBytes::from_str_lossy("room is full"),
+                                    });
+                                    let _ = to_client.try_send(error.encode());
+                                    continue;
+                                };
+                                free
+                            }
                         };
+                        let token = match existing {
+                            Some(_) => token.expect("existing token was accepted"),
+                            None => token_for(&format!("{code}:{id}")),
+                        };
+                        tokens.issue(room_key, seat, token);
                         let welcome = S2c::Welcome(Welcome {
                             player_id: seat.0,
                             team: seat.0,
@@ -219,7 +243,7 @@ async fn run_room(code: String, mut commands: mpsc::Receiver<RoomCommand>, hub: 
                                 target_minutes: 20,
                             },
                             tick: game.now(),
-                            your_token: FixedBytes(token_for(&code)),
+                            your_token: FixedBytes(token),
                         });
                         if to_client.try_send(welcome.encode()).is_ok() {
                             let start = S2c::Start(Start {
@@ -294,6 +318,7 @@ async fn run_room(code: String, mut commands: mpsc::Receiver<RoomCommand>, hub: 
                         }
                     }
                     Some(RoomCommand::Shutdown(ack)) => {
+                        tokens.revoke_room(room_key);
                         persist(&code, &game, &hub.summaries);
                         let _ = ack.send(());
                         break;
@@ -330,6 +355,7 @@ async fn run_room(code: String, mut commands: mpsc::Receiver<RoomCommand>, hub: 
                         stats: Vec::new(),
                     });
                     broadcast(&mut clients, end.encode());
+                    tokens.revoke_room(room_key);
                     end_sent = true;
                 }
                 let mut alive = Vec::with_capacity(clients.len());
@@ -473,6 +499,15 @@ fn persist(code: &str, game: &Match, dir: &PathBuf) {
         dir.join(format!("{code}.json")),
         serde_json::to_vec_pretty(&summary).unwrap_or_default(),
     );
+}
+
+fn room_key(code: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in code.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    hash
 }
 
 fn token_for(code: &str) -> [u8; TOKEN_LEN] {

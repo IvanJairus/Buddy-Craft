@@ -1,0 +1,15 @@
+[package]
+name = "cheat-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+sim.workspace = true
+world.workspace = true
+protocol.workspace = true
+room.workspace = true
+host-worker.workspace = true
+host-axum.workspace = true
+serde_json = "1"
