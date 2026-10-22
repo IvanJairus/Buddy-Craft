@@ -6,14 +6,17 @@
 //! code, which is the point of the runtime-agnostic split.
 
 pub mod rooms;
+pub mod telemetry;
 pub mod ws;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::body::Bytes;
 use axum::extract::State;
-use axum::routing::get;
+use axum::http::StatusCode;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
@@ -28,6 +31,8 @@ pub struct AppState {
     pub allowed_origins: Arc<Vec<String>>,
     /// Process start time, for `/healthz`.
     pub started: Instant,
+    /// Runtime kill switches.
+    pub switches: Arc<telemetry::Switches>,
 }
 
 impl AppState {
@@ -37,7 +42,14 @@ impl AppState {
             hub: RoomHub::new(summaries),
             allowed_origins: Arc::new(allowed_origins),
             started: Instant::now(),
+            switches: Arc::new(telemetry::Switches::from_env()),
         }
+    }
+
+    /// Replace the environment-derived switches (tests and embedders).
+    pub fn with_switches(mut self, switches: telemetry::Switches) -> AppState {
+        self.switches = Arc::new(switches);
+        self
     }
 
     /// The health document. Kept as a method so a test can inspect it without
@@ -47,6 +59,9 @@ impl AppState {
             "status": "ok",
             "rooms": self.hub.room_count().await,
             "uptime_s": self.started.elapsed().as_secs(),
+            "rooms_enabled": self.switches.rooms_enabled,
+            "protocol_min_version": self.switches.protocol_min_version,
+            "client_build_override": self.switches.client_build_override,
         })
     }
 }
@@ -56,11 +71,25 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health))
         .route("/ws", get(ws::ws_handler))
+        .route("/telemetry", post(client_telemetry))
         .with_state(state)
 }
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(state.health().await)
+}
+
+async fn client_telemetry(State(_state): State<AppState>, body: Bytes) -> StatusCode {
+    if body.len() > 4096 {
+        return StatusCode::PAYLOAD_TOO_LARGE;
+    }
+    match serde_json::from_slice::<Value>(&body) {
+        Ok(value) => {
+            telemetry::emit("client", value);
+            StatusCode::NO_CONTENT
+        }
+        Err(_) => StatusCode::BAD_REQUEST,
+    }
 }
 
 /// The default browser origins for `pnpm dev` and `vite preview`.

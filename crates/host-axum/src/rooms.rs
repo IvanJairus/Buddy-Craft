@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use protocol::{
     event_kind, FixedBytes, Input, RoomConfig, S2c, SnapshotEvent, Start, Welcome, INPUT_FRAMES,
@@ -18,6 +18,8 @@ use protocol::{
 use room::{snapshot::SnapshotEncoder, Match, MatchEvent};
 use sim::{Mode, PlayerId, RoomSetup, Tick};
 use tokio::sync::{mpsc, oneshot, Mutex};
+
+use crate::telemetry;
 
 /// The one human seat a browser connection drives. Bots occupy the rest.
 pub const HUMAN_ID: PlayerId = PlayerId(0);
@@ -96,7 +98,7 @@ impl RoomHub {
         rooms.insert(code.to_owned(), tx.clone());
         let code = code.to_owned();
         let inner = Arc::clone(&self.inner);
-        eprintln!("[room {code}] task started");
+        telemetry::emit("room_started", serde_json::json!({"room": code}));
         tokio::spawn(async move {
             run_room(code, rx, &inner).await;
         });
@@ -136,6 +138,10 @@ async fn run_room(code: String, mut commands: mpsc::Receiver<RoomCommand>, hub: 
     }
     let mut clients: Vec<Client> = Vec::new();
     let mut human: Option<sim::InputFrame> = None;
+    let mut metric_ticks = 0u32;
+    let mut metric_us = 0u128;
+    let mut metric_max_us = 0u128;
+    let mut metric_bytes = 0usize;
     let mut interval = tokio::time::interval(Duration::from_millis(TICK_MS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -208,13 +214,16 @@ async fn run_room(code: String, mut commands: mpsc::Receiver<RoomCommand>, hub: 
                 }
             }
             _ = interval.tick() => {
+                let tick_begin = Instant::now();
                 let frames = human.take().map(|frame| vec![(HUMAN_ID, frame)]).unwrap_or_default();
                 game.tick(&frames);
                 let events = snapshot_events(game.events());
                 let now = game.now();
                 let mut alive = Vec::with_capacity(clients.len());
+                let mut tick_bytes = 0usize;
                 for mut client in clients.drain(..) {
                     let encoded = client.encoder.encode(now, game.state(), &[], &events, client.acked);
+                    tick_bytes += encoded.bytes.len();
                     match client.tx.try_send(encoded.bytes) {
                         Ok(()) => alive.push(client),
                         Err(mpsc::error::TrySendError::Full(_)) => alive.push(client),
@@ -222,10 +231,35 @@ async fn run_room(code: String, mut commands: mpsc::Receiver<RoomCommand>, hub: 
                     }
                 }
                 clients = alive;
+                let elapsed = tick_begin.elapsed().as_micros();
+                metric_ticks += 1;
+                metric_us += elapsed;
+                metric_max_us = metric_max_us.max(elapsed);
+                metric_bytes += tick_bytes;
+                if metric_ticks >= 20 {
+                    telemetry::emit(
+                        "room_metrics",
+                        serde_json::json!({
+                            "room": code,
+                            "ticks": metric_ticks,
+                            "avg_tick_us": metric_us / u128::from(metric_ticks),
+                            "max_tick_us": metric_max_us,
+                            "avg_snapshot_bytes": metric_bytes / metric_ticks as usize,
+                            "clients": clients.len(),
+                        }),
+                    );
+                    metric_ticks = 0;
+                    metric_us = 0;
+                    metric_max_us = 0;
+                    metric_bytes = 0;
+                }
             }
         }
     }
-    eprintln!("[room {code}] stopped at tick {}", game.now().0);
+    telemetry::emit(
+        "room_stopped",
+        serde_json::json!({"room": code, "tick": game.now().0}),
+    );
     hub.rooms.lock().await.remove(&code);
 }
 

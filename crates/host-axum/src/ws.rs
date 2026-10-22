@@ -15,6 +15,7 @@ use serde::Deserialize;
 use protocol::{C2s, S2c};
 
 use crate::rooms::RoomCommand;
+use crate::telemetry;
 use crate::AppState;
 
 /// Query string accepted by `/ws`.
@@ -34,6 +35,9 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
 ) -> Response {
     let origin = headers.get("origin").and_then(|value| value.to_str().ok());
+    if !state.switches.rooms_enabled {
+        return (StatusCode::SERVICE_UNAVAILABLE, "rooms are disabled").into_response();
+    }
     if !origin_allowed(origin, &state.allowed_origins) {
         return (StatusCode::FORBIDDEN, "origin is not allowed").into_response();
     }
@@ -70,7 +74,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, room: String) {
     let (to_client, mut from_room) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
     let room_tx = state.hub.sender(&room).await;
     let client_id = state.hub.next_client_id();
-    eprintln!("[ws] room {room} client {client_id} connected");
+    telemetry::emit(
+        "ws_connected",
+        serde_json::json!({"room": room, "client": client_id}),
+    );
     if room_tx
         .send(RoomCommand::Join {
             id: client_id,
@@ -108,6 +115,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, room: String) {
                             break;
                         }
                     }
+                    Ok(C2s::Hello(hello)) => {
+                        if !state.switches.protocol_allowed(u32::from(hello.protocol)) {
+                            break;
+                        }
+                    }
                     Ok(C2s::Ping(ping)) => {
                         let _ =
                             to_client.try_send(S2c::Pong(protocol::Pong { t: ping.t }).encode());
@@ -126,7 +138,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, room: String) {
     }
 
     let _ = room_tx.send(RoomCommand::Leave { id: client_id }).await;
-    eprintln!("[ws] room {room} client {client_id} disconnected");
+    telemetry::emit(
+        "ws_disconnected",
+        serde_json::json!({"room": room, "client": client_id}),
+    );
     writer.abort();
 }
 

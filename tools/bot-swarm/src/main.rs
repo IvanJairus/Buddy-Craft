@@ -163,11 +163,10 @@ fn main() {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(debug_assertions)))]
 mod tests {
     use super::*;
 
-    #[cfg(not(debug_assertions))]
     #[test]
     fn tick_p99_under_12ms() {
         let mut rooms: Vec<SwarmRoom> = (0..ROOMS)

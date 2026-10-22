@@ -27,6 +27,7 @@ import {
 import { ParticleSystem, type ParticleInfo } from "./render/particles";
 import { Juice, EVENT_HIT, type JuiceStats } from "./render/juice";
 import { AudioEngine, type AudioStats } from "./audio/engine";
+import { CrashReporter, type CrashReport } from "./telemetry";
 import { Interaction, type PendingEdit, type RayHit, type VisualState } from "./game/interaction";
 import {
   DesktopInput,
@@ -151,6 +152,8 @@ interface TestApi {
   audioRumble(level: number): AudioStats;
   audioPanner(): { x: number; y: number; z: number } | null;
   audioEvent(kind: number, a: number, b: number): void;
+  telemetryReport(message: string): CrashReport;
+  telemetryLast(): CrashReport | null;
   offlineStart(mode?: number, teams?: number): boolean;  offlineStats(): {
     active: boolean;
     snapshot: boolean;
@@ -198,6 +201,11 @@ let offlineSnapshot = false;
 let lastOfflineInput = 0;
 let lastAdvanced = { ended: false, hash: 0 };
 const ZERO_FRAME = new Uint8Array(4);
+const crashReporter = new CrashReporter(
+  (import.meta.env.VITE_TELEMETRY_URL as string | undefined) ?? null,
+  "dev",
+);
+crashReporter.install();
 let interaction: Interaction | null = null;
 let desktop: DesktopInput | null = null;
 let touch: TouchInput | null = null;
@@ -705,6 +713,8 @@ async function boot(): Promise<void> {
     },
     audioPanner: () => audio.lastPanner(),
     audioEvent: (kind, a, b) => audio.handleEvent(kind, a, b),
+    telemetryReport: (message) => crashReporter.capture("wasm", new Error(message)),
+    telemetryLast: () => crashReporter.lastReport,
     offlineStart: (mode = 1, teams = 2) => {
       startOffline(mode, teams);
       return true;

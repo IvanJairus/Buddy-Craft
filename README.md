@@ -148,13 +148,13 @@ tests use the second without a runtime.
 ## Quick start
 
 ```bash
-cargo test --workspace --all-targets              # 491 Rust tests
+cargo test --workspace --all-targets              # 493 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 90 specs passed, 4 perf-gated skipped, 1 headed
+cd apps/web && npm ci && npm run test:e2e          # 92 specs passed, 4 perf-gated skipped, 1 headed
 cd apps/web && PERF_GATE=1 npx playwright test tests/perf.spec.ts --project=headless
 
 # Host (local dev). `CB_ADDR`, `CB_ALLOWED_ORIGINS` and `CB_SUMMARY_DIR` override defaults.
@@ -239,7 +239,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-053 | 20-room bot swarm: p99 0.455 ms, 27 MB RSS, 240-player Oracle estimate | done |
 | T-054 | cross-browser two-client E2E suite | not started: needs T-048 |
 | T-055 | perf gates: size, frame p95, wasm tick, first playable, juice, draw calls | done |
-| T-056 | telemetry, kill switches, runbook | not started |
+| T-056 | telemetry: JSON host logs, room metrics, crash endpoint, kill switches, runbook | partial: worker/Sentry ingest not configured |
 | T-057 | Vercel/Cloudflare deployment pipelines | not started: live deploy not authorized |
 | T-058 | generated protocol/architecture docs | not started |
 | T-059 | CSP, no-innerHTML guard, bundle secret scan | done locally; headers live in T-057 |
@@ -1418,7 +1418,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 648.4 KB raw and 166.2 KB gzipped,
+device deterministically. The JS bundle is 649.5 KB raw and 166.6 KB gzipped,
 under §8.10's 450 KB gzip target; the offline worker adds a 2.9 KB module. The
 wasm asset is measured in the chunk section below.
 
@@ -1937,6 +1937,20 @@ and a first-playable run under 8 Mbps / 150 ms RTT. Perf specs are skipped in
 the normal suite and run with `PERF_GATE=1` in `.github/workflows/perf.yml`.
 The workflow writes the brotli size to the PR.
 
+## Telemetry: JSON lines and switches
+
+T-056 writes one JSON object per host event: room lifecycle, WebSocket
+lifecycle, and a `room_metrics` line every 20 ticks with average/max tick time,
+average snapshot bytes and client count. `GET /healthz` reports the three kill
+switches. `ROOMS_ENABLED=false` rejects upgrades, `PROTOCOL_MIN_VERSION` gates
+`C_HELLO`, and `CLIENT_BUILD_OVERRIDE` is recorded in health. The client posts
+crash and wasm-trap reports to `VITE_TELEMETRY_URL`; without that env it keeps
+the last report for the test hook and sends nothing. [RUNBOOK](docs/RUNBOOK.md)
+maps each alert to its likely cause and one-line mitigation.
+
+Worker telemetry and a live Sentry/GlitchTip project are not configured, so the
+task remains partial rather than claiming an ingest pipeline it did not test.
+
 ## Where this batch stops
 
 The batch reached T-061 only partially. T-048 is now playable and T-049 has a
@@ -1948,7 +1962,7 @@ T-054 needs the online host path plus Firefox/WebKit, and T-062/T-063/T-064 need
 physical devices, six humans on production and a week of telemetry. Those are
 not marked done.
 
-The current gates are 491 Rust tests, 90 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
+The current gates are 493 Rust tests, 92 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
 20 wasm exports. T-050 has the 15 named threat tests, but `tools/cheat-client`
 and host wiring for the new connection/token guards are still missing. The last full-browser run is Chromium plus the headed pointer
 lock project; Firefox and WebKit are not installed on this machine.
