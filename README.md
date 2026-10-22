@@ -147,6 +147,18 @@ tests use the second without a runtime.
 
 ## Quick start
 
+Clean clone to a local offline match, four commands:
+
+```bash
+git clone https://github.com/IvanJairus/Buddy-Craft.git
+cd Buddy-Craft/apps/web
+npm ci
+npm run dev
+```
+
+Open the printed URL, choose OFFLINE, and the bot-filled Worker match starts.
+The rest of the commands below are for development, the network host and gates.
+
 ```bash
 cargo test --workspace --all-targets              # 493 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
@@ -241,7 +253,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-055 | perf gates: size, frame p95, wasm tick, first playable, juice, draw calls | done |
 | T-056 | telemetry: JSON host logs, room metrics, crash endpoint, kill switches, runbook | partial: worker/Sentry ingest not configured |
 | T-057 | Vercel/Cloudflare deployment pipelines | not started: live deploy not authorized |
-| T-058 | generated protocol/architecture docs | not started |
+| T-058 | generated PROTOCOL, architecture, contributing and four-command quick start | partial: clean-machine and deployed-URL checks need T-057 |
 | T-059 | CSP, no-innerHTML guard, bundle secret scan | done locally; headers live in T-057 |
 | T-060 | balance instrumentation and report | not started |
 | T-061 | focus, reduced motion, HUD contrast, A11Y doc | done |
@@ -1950,6 +1962,17 @@ maps each alert to its likely cause and one-line mitigation.
 
 Worker telemetry and a live Sentry/GlitchTip project are not configured, so the
 task remains partial rather than claiming an ingest pipeline it did not test.
+
+## Documentation: generated wire index
+
+T-058 adds `tools/protocol-doc.mjs`, which reads `crates/protocol/src/lib.rs` and
+writes `docs/PROTOCOL.md` with the C2S/S2C tags, payload types, constants and
+source digest. `docs/ARCHITECTURE.md` records the one-rule-set boundary and
+determinism rules; `docs/CONTRIBUTING.md` carries the local loop and required
+checks. The README's quick start is four commands from clone to a local offline
+match. The generated page is not hand-edited.
+
+The clean-machine and deployed-URL verification remain T-057/T-063 work.
 
 ## Where this batch stops
 
