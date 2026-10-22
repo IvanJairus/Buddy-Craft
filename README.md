@@ -2079,9 +2079,12 @@ T-060 stays partial: the 60-90 s target is not met. The bots stop at 4-8 crates
 to build a sword or bandage, and the builder spends minutes away from the pad.
 A save-for-buddy planner plus fall-up-3 pathing reached 203.75 s in one seed,
 still outside the target and it broke the bot-victory test; a 4096-node A*
-budget reached 1188.1 s. Both were reverted. No `data/tuning.ron` constant was
-changed. The next balance step is the bot deposit threshold and route to pad,
-then the same ten-match report is re-run.
+budget reached 1188.1 s. Direct-to-pad walking with 120 s patience reached
+231.1 s: a builder held 10 crates by 40 s and then sat about 15 m from its pad
+for over a minute, so terrain access is the blocker, not the deposit threshold.
+All variants were reverted. No `data/tuning.ron` constant was changed. The next
+balance step is a map-aware route to the pad, then the same ten-match report is
+re-run.
 
 ## Swarm: 20 rooms on one core
 

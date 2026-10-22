@@ -310,6 +310,10 @@ fn balance_report(matches: &[BalanceMatch]) -> String {
            reverted.\n\
          * A* budget 512 -> 4096 with the same planner: first buddy at 1188.1 s,\n\
            worse, reverted.\n\
+         * Direct-to-pad walking plus 120 s save patience: bot 1 held 10 crates by\n\
+           40 s and then sat at (82,47,68), about 15 m from its pad, for over a\n\
+           minute; first buddy at 231.1 s. The bottleneck is terrain access, not\n\
+           the deposit threshold alone.\n\
          * Clearing crafted voxels from the world exposed stale build cells and is\n\
            still needed for correctness, but it was bundled with the rejected bot\n\
            policy; it is not in this baseline.\n\n\

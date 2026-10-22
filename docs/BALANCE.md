@@ -48,6 +48,10 @@ test because the bots kept rebuilding instead of attacking, so it was
 reverted.
 * A* budget 512 -> 4096 with the same planner: first buddy at 1188.1 s,
 worse, reverted.
+* Direct-to-pad walking plus 120 s save patience: bot 1 held 10 crates by
+40 s and then sat at (82,47,68), about 15 m from its pad, for over a
+minute; first buddy at 231.1 s. The bottleneck is terrain access, not
+the deposit threshold alone.
 * Clearing crafted voxels from the world exposed stale build cells and is
 still needed for correctness, but it was bundled with the rejected bot
 policy; it is not in this baseline.
