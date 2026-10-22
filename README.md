@@ -259,7 +259,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-055 | perf gates: size, frame p95, wasm tick, first playable, juice, draw calls | done |
 | T-056 | telemetry: JSON host logs, room metrics, crash endpoint, kill switches, runbook | partial: worker/Sentry ingest not configured |
 | T-057 | Vercel/Cloudflare deployment pipelines | not started: live deploy not authorized |
-| T-058 | generated PROTOCOL, architecture, contributing and four-command quick start | partial: clean-machine and deployed-URL checks need T-057 |
+| T-058 | generated PROTOCOL, architecture, contributing and four-command quick start | partial: clean clone + npm ci + npm run dev verified 2026-10-23; deployed URL pending T-057 |
 | T-059 | CSP, no-innerHTML guard, bundle secret scan | done locally; headers live in T-057 |
 | T-060 | balance instrumentation and report | done: median first buddy 70.1 s in 60-90; 9/10 matches, outliers in BALANCE.md |
 | T-061 | focus, reduced motion, HUD contrast, A11Y doc | done |
@@ -2183,7 +2183,10 @@ determinism rules; `docs/CONTRIBUTING.md` carries the local loop and required
 checks. The README's quick start is four commands from clone to a local offline
 match. The generated page is not hand-edited.
 
-The clean-machine and deployed-URL verification remain T-057/T-063 work.
+A clean clone of `1c734b3` on 2026-10-23 ran the four quick-start commands:
+`npm ci` installed 30 packages, `npm run dev` built the wasm and served
+`127.0.0.1:5173`, and the offline match booted with all nine character meshes
+and no console errors. The deployed-URL verification remains T-057/T-063 work.
 
 ## Where this batch stops
 
