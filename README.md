@@ -251,7 +251,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-047 | Crockford codes, registry collision, lockout and quota policy | partial: HTTP/DO blocked behind T-046 |
 | T-048 | offline Web Worker match with bots and the online wire frames | done |
 | T-049 | audio graph, 24 voices, 30 procedural cues, rumble worklet | partial: WebKit/iOS and recorded assets not verified |
-| T-050 | anti-cheat: 15 named threat tests, connection cap, token revocation | partial: host guards, chat/create limits and fixture done; join lockout/DO blocked |
+| T-050 | anti-cheat: 15 named threat tests, connection cap, token revocation | done: AC met; registry HTTP/DO surface remains T-046/T-047 |
 | T-051 | art atlas and GLB models | done at the asset boundary: 24-tile atlas, 9 GLB models; renderer still boxes |
 | T-052 | content pass and recipe editor | done: 14 recipes, 6 buddies, grid editor with duplicate guard |
 | T-053 | 20-room bot swarm: p99 0.455 ms, 27 MB RSS, 240-player Oracle estimate | done |
@@ -2105,9 +2105,10 @@ attempts, 0 failures: T1 is clamped at 13.656 m over 3 s, T4's ninth edit is
 rate limited, T8 closes with 1009, T9 admits 3 of 4 sockets, and T14/T15 reject
 revoked and cross-room tokens.
 
-The task remains partial because the registry's join lockout (5/min/IP) and its
-HTTP/DO surface are still blocked behind T-046/T-047. Room creation and chat
-rate limits are now enforced by the axum host.
+T-050 is done at its acceptance boundary: the fifteen named threats, the
+no-position assertion, every §11.3 channel, and the fifteen-attack fixture are
+present. The registry's join lockout is tested natively; exposing that policy
+through the Durable Object HTTP surface remains T-046/T-047 work.
 
 ## Swarm: 20 rooms on one core
 
@@ -2165,9 +2166,9 @@ needs a bot economy/pathing fix, and T-062/T-063/T-064 need physical devices,
 six humans on production and a week of telemetry. Those are not marked done.
 
 The current gates are 501 Rust tests, 138 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
-20 wasm exports. T-050 now has the 15 named threat tests, the socket guards,
-chat/creation rate limits and the committed 15-attack fixture; only the registry
-join lockout and its HTTP/DO surface remain. The last full-browser run is Chromium plus the headed pointer
+20 wasm exports. T-050 is done at its AC boundary: 15 named threat tests, the
+socket guards, chat/creation rate limits and the committed 15-attack fixture.
+The registry's HTTP/DO surface remains T-046/T-047. The last full-browser run is Chromium plus the headed pointer
 lock project; Firefox and WebKit are now installed through Playwright and the
 T-054 suite runs on both.
 
