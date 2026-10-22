@@ -1,0 +1,69 @@
+name: Performance gates
+
+# Plan T-055. Every threshold is read from perf.budget.json; this workflow only
+# supplies the runner and the 60-second scripted frame gate.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  perf:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.87.0"
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: perf
+      - name: install web dependencies
+        working-directory: apps/web
+        run: npm ci
+      - name: build
+        working-directory: apps/web
+        run: npm run build
+      - name: size gates
+        run: node tools/perf-gate.mjs apps/web/dist/assets
+      - name: install chromium
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+      - name: frame and juice gates
+        working-directory: apps/web
+        env:
+          PERF_GATE: "1"
+        run: npx playwright test tests/perf.spec.ts --project=headless
+      - name: read summary
+        if: github.event_name == 'pull_request'
+        id: summary
+        run: |
+          set -euo pipefail
+          node -e "const s=require('./perf-summary.json'); console.log('wasm_brotli='+(s.wasm_brotli_bytes/1024).toFixed(1)); console.log('js_gzip='+(s.js_gzip_bytes/1024).toFixed(1));" >> "$GITHUB_OUTPUT"
+      - name: comment size in PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          WASM_BROTLI: ${{ steps.summary.outputs.wasm_brotli }}
+          JS_GZIP: ${{ steps.summary.outputs.js_gzip }}
+        with:
+          script: |
+            const body = `Performance gates passed. wasm brotli ${process.env.WASM_BROTLI} KiB, JS gzip ${process.env.JS_GZIP} KiB.`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });

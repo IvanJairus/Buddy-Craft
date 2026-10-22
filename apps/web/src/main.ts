@@ -143,6 +143,7 @@ interface TestApi {
   juiceHitstop(ms?: number): JuiceStats;
   juiceDamage(amount: number, x: number, y: number, z: number): JuiceStats;
   juiceBenchmark(frames?: number): { averageMs: number; stats: JuiceStats };
+  wasmTickBenchmark(frames?: number): number;
   serverMessage(frame: number[]): boolean;
   audioStats(): AudioStats;
   audioUnlock(): Promise<boolean>;
@@ -671,6 +672,19 @@ async function boot(): Promise<void> {
         total += stats.lastUpdateMs;
       }
       return { averageMs: total / Math.max(1, frames), stats };
+    },
+    wasmTickBenchmark: (frames = 600) => {
+      if (client === null) {
+        throw new Error("wasm is not initialised");
+      }
+      const times: number[] = [];
+      for (let i = 0; i < frames; i += 1) {
+        const begin = performance.now();
+        client.tick(16, ZERO_FRAME);
+        times.push(performance.now() - begin);
+      }
+      times.sort((a, b) => a - b);
+      return times[Math.floor(times.length * 0.99)];
     },
     serverMessage: (frame) => {
       if (client === null) {

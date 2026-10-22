@@ -154,7 +154,8 @@ cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 90 specs, 1 headed (pointer lock)
+cd apps/web && npm ci && npm run test:e2e          # 90 specs passed, 4 perf-gated skipped, 1 headed
+cd apps/web && PERF_GATE=1 npx playwright test tests/perf.spec.ts --project=headless
 
 # Host (local dev). `CB_ADDR`, `CB_ALLOWED_ORIGINS` and `CB_SUMMARY_DIR` override defaults.
 cargo run -p host-axum                            # ws://127.0.0.1:8080/ws?room=DEV001
@@ -237,7 +238,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-052 | content pass and recipe editor | not started |
 | T-053 | 20-room bot swarm: p99 0.455 ms, 27 MB RSS, 240-player Oracle estimate | done |
 | T-054 | cross-browser two-client E2E suite | not started: needs T-048 |
-| T-055 | CI performance gates | not started |
+| T-055 | perf gates: size, frame p95, wasm tick, first playable, juice, draw calls | done |
 | T-056 | telemetry, kill switches, runbook | not started |
 | T-057 | Vercel/Cloudflare deployment pipelines | not started: live deploy not authorized |
 | T-058 | generated protocol/architecture docs | not started |
@@ -1417,7 +1418,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 648.1 KB raw and 166.1 KB gzipped,
+device deterministically. The JS bundle is 648.4 KB raw and 166.2 KB gzipped,
 under §8.10's 450 KB gzip target; the offline worker adds a 2.9 KB module. The
 wasm asset is measured in the chunk section below.
 
@@ -1926,6 +1927,16 @@ Oracle cores carry about 40 rooms, or 240 players, inside the plan's 150-300
 concurrent-player assumption. The probe is in-process, so socket framing stays
 T-045's measurement; the room code is the same.
 
+## Performance gates: one budget file
+
+T-055 puts every §8.10 threshold in `perf.budget.json` and reads it from both
+`tools/perf-gate.mjs` and `tests/perf.spec.ts`. The size gate checks wasm raw,
+wasm brotli, JS gzip and blocking assets; the browser gate runs a 60-second
+frame p95 replay, the draw/triangle caps, the 1.5 ms juice budget, wasm tick p99
+and a first-playable run under 8 Mbps / 150 ms RTT. Perf specs are skipped in
+the normal suite and run with `PERF_GATE=1` in `.github/workflows/perf.yml`.
+The workflow writes the brotli size to the PR.
+
 ## Where this batch stops
 
 The batch reached T-061 only partially. T-048 is now playable and T-049 has a
@@ -1937,7 +1948,7 @@ T-054 needs the online host path plus Firefox/WebKit, and T-062/T-063/T-064 need
 physical devices, six humans on production and a week of telemetry. Those are
 not marked done.
 
-The current gates are 491 Rust tests, 90 Playwright specs, clippy/fmt clean, and
+The current gates are 491 Rust tests, 90 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
 20 wasm exports. T-050 has the 15 named threat tests, but `tools/cheat-client`
 and host wiring for the new connection/token guards are still missing. The last full-browser run is Chromium plus the headed pointer
 lock project; Firefox and WebKit are not installed on this machine.

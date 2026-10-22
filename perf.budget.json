@@ -1,0 +1,12 @@
+{
+  "wasm_raw_bytes": 700000,
+  "wasm_brotli_bytes": 700000,
+  "js_gzip_bytes": 450000,
+  "frame_p95_ms": 20,
+  "juice_ms": 1.5,
+  "draw_calls": 120,
+  "triangles": 350000,
+  "blocking_assets_bytes": 90000,
+  "wasm_tick_p99_ms": 3,
+  "first_playable_ms": 3000
+}
