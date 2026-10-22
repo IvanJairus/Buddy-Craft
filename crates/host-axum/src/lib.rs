@@ -9,9 +9,10 @@ pub mod rooms;
 pub mod telemetry;
 pub mod ws;
 
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -21,6 +22,35 @@ use axum::{Json, Router};
 use serde_json::{json, Value};
 
 pub use rooms::{RoomCommand, RoomHub, HUMAN_ID, ROOM_SEED, TICK_MS};
+
+/// New rooms one address may create in a minute (§11.3).
+pub const ROOM_CREATIONS_PER_MINUTE: usize = 3;
+
+/// A per-IP room-creation budget. Joins to an existing room are free.
+#[derive(Debug, Default)]
+pub struct RoomCreationBudget {
+    recent: Mutex<BTreeMap<String, VecDeque<Instant>>>,
+}
+
+impl RoomCreationBudget {
+    /// Record a creation, or refuse it when the minute is full.
+    pub fn allow(&self, ip: &str) -> bool {
+        let now = Instant::now();
+        let mut recent = self.recent.lock().expect("creation budget poisoned");
+        let entries = recent.entry(ip.to_owned()).or_default();
+        while entries
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(60))
+        {
+            entries.pop_front();
+        }
+        if entries.len() >= ROOM_CREATIONS_PER_MINUTE {
+            return false;
+        }
+        entries.push_back(now);
+        true
+    }
+}
 
 /// Shared state for both routes.
 #[derive(Clone)]
@@ -37,6 +67,8 @@ pub struct AppState {
     pub e2e: bool,
     /// Per-IP socket budget (T-050).
     pub connections: Arc<Mutex<room::ConnectionBudget>>,
+    /// Per-IP room-creation budget (T-050).
+    pub creations: Arc<RoomCreationBudget>,
 }
 
 impl AppState {
@@ -49,6 +81,7 @@ impl AppState {
             switches: Arc::new(telemetry::Switches::from_env()),
             e2e: std::env::var("CB_E2E").ok().as_deref() == Some("1"),
             connections: Arc::new(Mutex::new(room::ConnectionBudget::default())),
+            creations: Arc::new(RoomCreationBudget::default()),
         }
     }
 
@@ -170,6 +203,16 @@ pub fn default_origins() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn room_creation_budget_is_per_ip() {
+        let budget = RoomCreationBudget::default();
+        assert!(budget.allow("203.0.113.9"));
+        assert!(budget.allow("203.0.113.9"));
+        assert!(budget.allow("203.0.113.9"));
+        assert!(!budget.allow("203.0.113.9"));
+        assert!(budget.allow("203.0.113.10"));
+    }
 
     #[tokio::test]
     async fn health_reports_status_rooms_and_uptime() {

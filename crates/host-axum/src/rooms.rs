@@ -143,6 +143,11 @@ impl RoomHub {
         tx
     }
 
+    /// True when a room task already exists for `code`.
+    pub async fn exists(&self, code: &str) -> bool {
+        self.inner.rooms.lock().await.contains_key(code)
+    }
+
     /// Number of live room tasks, for `/healthz`.
     pub async fn room_count(&self) -> usize {
         self.inner.rooms.lock().await.len()

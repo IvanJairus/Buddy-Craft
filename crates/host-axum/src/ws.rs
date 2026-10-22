@@ -65,6 +65,33 @@ impl MessageRate {
     }
 }
 
+/// Chat is 0.5 messages per second with a burst of two (§11.3).
+struct ChatRate {
+    tokens: f64,
+    last: Instant,
+}
+
+impl ChatRate {
+    fn new() -> ChatRate {
+        ChatRate {
+            tokens: 2.0,
+            last: Instant::now(),
+        }
+    }
+
+    fn allow(&mut self) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last).as_secs_f64();
+        self.last = now;
+        self.tokens = (self.tokens + elapsed * 0.5).min(2.0);
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
+}
+
 /// Releases one per-IP slot when the socket task ends, including early returns.
 struct ConnectionGuard {
     budget: Arc<Mutex<ConnectionBudget>>,
@@ -145,7 +172,7 @@ pub fn origin_allowed(origin: Option<&str>, allowed: &[String]) -> bool {
     }
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, room: String, _guard: ConnectionGuard) {
+async fn handle_socket(socket: WebSocket, state: AppState, room: String, guard: ConnectionGuard) {
     let (mut sink, mut stream) = socket.split();
 
     // T9: no Welcome, no room work, and no seat until the client identifies
@@ -167,6 +194,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, room: String, _guard:
         return;
     }
     if hello.room_code.as_slice() != room.as_bytes() {
+        let _ = sink.close().await;
+        return;
+    }
+    if !state.e2e && !state.hub.exists(&room).await && !state.creations.allow(&guard.ip) {
+        telemetry::emit(
+            "room_creation_rate_limited",
+            serde_json::json!({"room": room, "ip": guard.ip}),
+        );
         let _ = sink.close().await;
         return;
     }
@@ -200,6 +235,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, room: String, _guard:
     });
 
     let mut rate = MessageRate::new();
+    let mut chat = ChatRate::new();
     while let Some(message) = stream.next().await {
         let Ok(message) = message else {
             break;
@@ -240,6 +276,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, room: String, _guard:
                     }
                     // Exactly one Hello per connection (§11.3).
                     Ok(C2s::Hello(_)) => break,
+                    Ok(C2s::Chat(_)) => {
+                        // Dropped silently above 0.5/s; there is no chat
+                        // broadcast in v1, but the channel is still limited.
+                        if !chat.allow() {
+                            continue;
+                        }
+                    }
                     Ok(C2s::Ping(ping)) => {
                         let _ =
                             to_client.try_send(S2c::Pong(protocol::Pong { t: ping.t }).encode());
@@ -275,6 +318,14 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    #[test]
+    fn chat_rate_drops_after_its_burst() {
+        let mut rate = ChatRate::new();
+        assert!(rate.allow());
+        assert!(rate.allow());
+        assert!(!rate.allow(), "the third immediate chat is dropped");
+    }
 
     #[test]
     fn origin_policy_accepts_local_and_rejects_other() {

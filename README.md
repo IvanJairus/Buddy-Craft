@@ -165,7 +165,7 @@ Open the printed URL, choose OFFLINE, and the bot-filled Worker match starts.
 The rest of the commands below are for development, the network host and gates.
 
 ```bash
-cargo test --workspace --all-targets              # 499 Rust tests
+cargo test --workspace --all-targets              # 501 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
@@ -251,7 +251,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-047 | Crockford codes, registry collision, lockout and quota policy | partial: HTTP/DO blocked behind T-046 |
 | T-048 | offline Web Worker match with bots and the online wire frames | done |
 | T-049 | audio graph, 24 voices, 30 procedural cues, rumble worklet | partial: WebKit/iOS and recorded assets not verified |
-| T-050 | anti-cheat: 15 named threat tests, connection cap, token revocation | partial: host guards and 15-attack fixture done; registry limits blocked |
+| T-050 | anti-cheat: 15 named threat tests, connection cap, token revocation | partial: host guards, chat/create limits and fixture done; join lockout/DO blocked |
 | T-051 | art atlas and GLB models | done at the asset boundary: 24-tile atlas, 9 GLB models; renderer still boxes |
 | T-052 | content pass and recipe editor | done: 14 recipes, 6 buddies, grid editor with duplicate guard |
 | T-053 | 20-room bot swarm: p99 0.455 ms, 27 MB RSS, 240-player Oracle estimate | done |
@@ -2092,10 +2092,12 @@ re-run.
 
 T-050 wires the connection-scoped guards into `host-axum`. A browser must send
 `C_HELLO` within 5 s, a per-IP budget admits three sockets, and every connection
-has a 30/s token bucket with a 60-message burst. Reconnect tokens are issued per
-seat, resume the same seat when the old socket is gone, and are revoked at match
-end and room cleanup. The edit pipeline still owns reach, rate and placement
-validation.
+has a 30/s token bucket with a 60-message burst; chat is dropped above 0.5/s
+with a burst of two. New rooms are capped at 3/min/IP (the E2E host bypasses
+this so a suite can create many short-lived rooms). Reconnect tokens are issued
+per seat, resume the same seat when the old socket is gone, and are revoked at
+match end and room cleanup. The edit pipeline still owns reach, rate and
+placement validation.
 
 `cargo run -p cheat-client` runs all fifteen §11.2 attacks through the same
 guards and writes `tools/cheat-client/report.json`. The current fixture has 15
@@ -2103,9 +2105,9 @@ attempts, 0 failures: T1 is clamped at 13.656 m over 3 s, T4's ninth edit is
 rate limited, T8 closes with 1009, T9 admits 3 of 4 sockets, and T14/T15 reject
 revoked and cross-room tokens.
 
-The task remains partial because the registry's room-creation (3/min/IP) and
-join lockout policies are exercised natively but their HTTP/DO surface is still
-blocked behind T-046/T-047. Chat rate limiting also has no host path in v1.
+The task remains partial because the registry's join lockout (5/min/IP) and its
+HTTP/DO surface are still blocked behind T-046/T-047. Room creation and chat
+rate limits are now enforced by the axum host.
 
 ## Swarm: 20 rooms on one core
 
@@ -2162,10 +2164,10 @@ T-046 and T-057 need a live Cloudflare/Vercel deployment, T-060's target still
 needs a bot economy/pathing fix, and T-062/T-063/T-064 need physical devices,
 six humans on production and a week of telemetry. Those are not marked done.
 
-The current gates are 499 Rust tests, 138 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
-20 wasm exports. T-050 now has the 15 named threat tests, the socket guards and
-the committed 15-attack fixture; only the registry HTTP/DO surface and chat
-rate path remain. The last full-browser run is Chromium plus the headed pointer
+The current gates are 501 Rust tests, 138 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
+20 wasm exports. T-050 now has the 15 named threat tests, the socket guards,
+chat/creation rate limits and the committed 15-attack fixture; only the registry
+join lockout and its HTTP/DO surface remain. The last full-browser run is Chromium plus the headed pointer
 lock project; Firefox and WebKit are now installed through Playwright and the
 T-054 suite runs on both.
 
