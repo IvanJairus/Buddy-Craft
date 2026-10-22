@@ -28,6 +28,7 @@ import { ParticleSystem, type ParticleInfo } from "./render/particles";
 import { Juice, EVENT_HIT, type JuiceStats } from "./render/juice";
 import { AudioEngine, type AudioStats } from "./audio/engine";
 import { CrashReporter, type CrashReport } from "./telemetry";
+import { EconomyTracker, reportEconomy, type EconomySummary } from "./telemetry/economy";
 import { Interaction, type PendingEdit, type RayHit, type VisualState } from "./game/interaction";
 import {
   DesktopInput,
@@ -158,6 +159,7 @@ interface TestApi {
   audioEvent(kind: number, a: number, b: number): void;
   telemetryReport(message: string): CrashReport;
   telemetryLast(): CrashReport | null;
+  economyLast(): EconomySummary | null;
   offlineStart(mode?: number, teams?: number): boolean;  offlineStats(): {
     active: boolean;
     snapshot: boolean;
@@ -242,10 +244,10 @@ let localCarried = 0;
 let sessionEvents: Array<{ kind: number; a: number; b: number; c: number; tick: number }> = [];
 let lastAdvanced = { ended: false, hash: 0 };
 const ZERO_FRAME = new Uint8Array(4);
-const crashReporter = new CrashReporter(
-  (import.meta.env.VITE_TELEMETRY_URL as string | undefined) ?? null,
-  "dev",
-);
+const telemetryEndpoint = (import.meta.env.VITE_TELEMETRY_URL as string | undefined) ?? null;
+let economy = new EconomyTracker(6);
+let lastEconomy: EconomySummary | null = null;
+const crashReporter = new CrashReporter(telemetryEndpoint, "dev");
 crashReporter.install();
 let interaction: Interaction | null = null;
 let desktop: DesktopInput | null = null;
@@ -450,6 +452,7 @@ async function boot(): Promise<void> {
       const c = frame.eventC[i];
       sessionEvents.push({ kind, a, b, c, tick: frame.tick });
       if (sessionEvents.length > 128) sessionEvents.shift();
+      economy.observe(kind, a, b, c, frame.tick);
       if (kind === 6 && a === localId) {
         localCarried += b;
         hudStore.set({ crates: localCarried });
@@ -470,6 +473,11 @@ async function boot(): Promise<void> {
     }
   }
 
+  function finalizeEconomy(): void {
+    lastEconomy = economy.summary(snapshotDecoder.latestFrame?.tick ?? 0);
+    reportEconomy(telemetryEndpoint, lastEconomy);
+  }
+
   function startOffline(mode = 1, teams = 2): void {
     online?.stop();
     online = null;
@@ -486,6 +494,8 @@ async function boot(): Promise<void> {
     sessionTeam = 0;
     localCarried = 0;
     sessionEvents = [];
+    economy = new EconomyTracker(6);
+    lastEconomy = null;
     lastAdvanced = { ended: false, hash: 0 };
     offline = new OfflineSession({
       seed: DEMO_SEED,
@@ -520,6 +530,7 @@ async function boot(): Promise<void> {
         }
       },
       onEnd: (bytes) => {
+        finalizeEconomy();
         showResults(bytes);
         offlineActive = false;
         offlineSnapshot = false;
@@ -598,6 +609,7 @@ async function boot(): Promise<void> {
         }
       },
       onEnd: (bytes) => {
+        finalizeEconomy();
         showResults(bytes);
         onlineEnded = true;
         onlineActive = false;
@@ -918,6 +930,7 @@ async function boot(): Promise<void> {
     audioEvent: (kind, a, b) => audio.handleEvent(kind, a, b),
     telemetryReport: (message) => crashReporter.capture("wasm", new Error(message)),
     telemetryLast: () => crashReporter.lastReport,
+    economyLast: () => lastEconomy,
     offlineStart: (mode = 1, teams = 2) => {
       startOffline(mode, teams);
       return true;

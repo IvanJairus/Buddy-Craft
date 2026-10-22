@@ -259,7 +259,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-057 | Vercel/Cloudflare deployment pipelines | not started: live deploy not authorized |
 | T-058 | generated PROTOCOL, architecture, contributing and four-command quick start | partial: clean-machine and deployed-URL checks need T-057 |
 | T-059 | CSP, no-innerHTML guard, bundle secret scan | done locally; headers live in T-057 |
-| T-060 | balance instrumentation and report | not started |
+| T-060 | balance instrumentation and report | partial: metrics and 10-match report; TTFF target unmet |
 | T-061 | focus, reduced motion, HUD contrast, A11Y doc | done |
 | T-062 | physical device matrix | blocked: manual devices |
 | T-063 | production launch checklist | blocked: live six-human match |
@@ -1434,7 +1434,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 663.7 KB raw and 169.4 KB gzipped,
+device deterministically. The JS bundle is 665.1 KB raw and 169.7 KB gzipped,
 under §8.10's 450 KB gzip target; the offline worker adds a 2.9 KB module. The
 wasm asset is measured in the chunk section below.
 
@@ -2053,6 +2053,36 @@ The remaining L5 caveat is the same as §12.7: headless WebGL is SwiftShader, no
 a phone GPU, and the accelerated setup is not a substitute for T-060's human
 playtest.
 
+## Balance: four numbers, ten bot matches
+
+T-060 adds `EconomyTracker` in `apps/web/src/telemetry/economy.ts`. It folds the
+same snapshot events the HUD sees into crates per minute, recipes completed,
+buddies spawned and time-to-first-buddy, with per-player crates derived from the
+six-seat count. At `S_END` the summary is kept for the test hook and posted to
+`VITE_TELEMETRY_URL` when configured. The tracker has two unit specs.
+
+`cargo run --release -p bot-swarm -- balance` runs ten deterministic Teams 2
+matches with six bot-driven players and writes `BALANCE.md`. The baseline report
+is:
+
+| Metric | Baseline |
+| --- | ---: |
+| Matches | 10 |
+| Crates landed | 17,728 |
+| Crates picked | 578 (3.3%) |
+| Crates/min/player | 0.41 |
+| Recipes completed | 9 |
+| Buddies spawned | 0 |
+| Time to first buddy | not measurable |
+
+T-060 stays partial: the 60-90 s target is not met. The bots stop at 4-8 crates
+to build a sword or bandage, and the builder spends minutes away from the pad.
+A save-for-buddy planner plus fall-up-3 pathing reached 203.75 s in one seed,
+still outside the target and it broke the bot-victory test; a 4096-node A*
+budget reached 1188.1 s. Both were reverted. No `data/tuning.ron` constant was
+changed. The next balance step is the bot deposit threshold and route to pad,
+then the same ten-match report is re-run.
+
 ## Swarm: 20 rooms on one core
 
 T-053 runs twenty `room::Match` instances with six bots each for three simulated
@@ -2104,12 +2134,11 @@ The batch reached T-061 only partially. T-048 is now playable and T-049 has a
 real graph and 30 procedural cues, but no recorded OGG assets and no WebKit/iOS
 run. T-047's registry policy and Crockford codes are native-tested, but its
 HTTP/DO surface is blocked behind T-046. T-059 and T-061 are complete locally.
-T-046 and T-057 need a live Cloudflare/Vercel deployment, T-060 needs the
-balance instrumentation and ten bot-vs-bot reports, and T-062/T-063/T-064 need
-physical devices, six humans on production and a week of telemetry. Those are
-not marked done.
+T-046 and T-057 need a live Cloudflare/Vercel deployment, T-060's target still
+needs a bot economy/pathing fix, and T-062/T-063/T-064 need physical devices,
+six humans on production and a week of telemetry. Those are not marked done.
 
-The current gates are 497 Rust tests, 136 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
+The current gates are 497 Rust tests, 138 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
 20 wasm exports. T-050 has the 15 named threat tests, but `tools/cheat-client`
 and host wiring for the new connection/token guards are still missing. The last full-browser run is Chromium plus the headed pointer
 lock project; Firefox and WebKit are now installed through Playwright and the

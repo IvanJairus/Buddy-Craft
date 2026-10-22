@@ -9,12 +9,14 @@
 use std::time::{Duration, Instant};
 
 use protocol::SnapshotEvent;
-use room::{snapshot::SnapshotEncoder, Match};
+use room::{snapshot::SnapshotEncoder, Match, MatchEvent};
 use sim::{Mode, PlayerId, RoomSetup};
 
 const ROOMS: usize = 20;
 const TICKS: usize = 3 * 60 * 20;
 const BOTS: u8 = 6;
+const BALANCE_MATCHES: usize = 10;
+const BALANCE_CAP_TICKS: usize = 25 * 60 * 20;
 
 struct SwarmRoom {
     game: Match,
@@ -89,7 +91,284 @@ fn cpu_seconds() -> f64 {
     user + sys
 }
 
+#[derive(Clone, Copy, Default)]
+struct TeamBalance {
+    picked: u32,
+    recipes: u32,
+    buddies: u32,
+    first_buddy_tick: Option<u32>,
+}
+
+struct BalanceMatch {
+    seed: u64,
+    ticks: u32,
+    picked: u32,
+    landed: u32,
+    recipes: u32,
+    buddies: u32,
+    first_buddy_tick: Option<u32>,
+    teams: [TeamBalance; 2],
+}
+
+fn balance_match(seed: u64) -> BalanceMatch {
+    let setup = RoomSetup {
+        mode: Mode::Teams,
+        teams: Some(2),
+        humans: 1,
+        bots: 5,
+    };
+    let mut game = Match::new(seed, setup).expect("legal balance room");
+    for id in 0..6u8 {
+        assert!(game.add_bot(PlayerId(id)), "seat {id}");
+    }
+    let mut result = BalanceMatch {
+        seed,
+        ticks: 0,
+        picked: 0,
+        landed: 0,
+        recipes: 0,
+        buddies: 0,
+        first_buddy_tick: None,
+        teams: [TeamBalance::default(); 2],
+    };
+    let trace = std::env::var("BALANCE_TRACE").ok().as_deref() == Some("1");
+    for tick in 0..BALANCE_CAP_TICKS {
+        game.tick(&[]);
+        if trace && tick % 400 == 0 {
+            eprintln!(
+                "  t={} pickups={} carried={:?} pos={:?}",
+                game.now().0,
+                game.airdrops().pickups().len(),
+                (0..6)
+                    .map(|id| game.airdrops().carried(PlayerId(id)))
+                    .collect::<Vec<_>>(),
+                (0..6)
+                    .map(|id| {
+                        game.state()
+                            .body(PlayerId(id))
+                            .map(|body| body.state.pos.floor_to_ints())
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
+        for event in game.events() {
+            if trace {
+                eprintln!("  event {} {:?}", game.now().0, event);
+            }
+            match *event {
+                MatchEvent::Picked { player, count } => {
+                    result.picked += count;
+                    let team = game
+                        .state()
+                        .players()
+                        .iter()
+                        .find(|slot| slot.id == player)
+                        .map(|slot| slot.team.0 as usize)
+                        .unwrap_or(0);
+                    if team < result.teams.len() {
+                        result.teams[team].picked += count;
+                    }
+                }
+                MatchEvent::AirdropLanded { crates, .. } => result.landed += crates,
+                MatchEvent::Crafted {
+                    team,
+                    buddy,
+                    recipe: _,
+                } => {
+                    let index = team.0 as usize;
+                    result.recipes += 1;
+                    if index < result.teams.len() {
+                        result.teams[index].recipes += 1;
+                    }
+                    if buddy.is_some() {
+                        result.buddies += 1;
+                        let tick = game.now().0;
+                        result.first_buddy_tick = Some(
+                            result
+                                .first_buddy_tick
+                                .map_or(tick, |first| first.min(tick)),
+                        );
+                        if index < result.teams.len() {
+                            result.teams[index].buddies += 1;
+                            let slot = &mut result.teams[index].first_buddy_tick;
+                            *slot = Some(slot.map_or(tick, |first| first.min(tick)));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if game.is_over() {
+            break;
+        }
+    }
+    result.ticks = game.now().0;
+    result
+}
+
+fn mean(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.iter().sum::<f64>() / values.len() as f64)
+    }
+}
+
+fn median(values: &mut [f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| a.total_cmp(b));
+    let mid = values.len() / 2;
+    Some(if values.len() % 2 == 0 {
+        (values[mid - 1] + values[mid]) / 2.0
+    } else {
+        values[mid]
+    })
+}
+
+fn balance_report(matches: &[BalanceMatch]) -> String {
+    let mut rows = String::new();
+    let mut ttffs = Vec::new();
+    let mut total_picked = 0u64;
+    let mut total_landed = 0u64;
+    let mut total_recipes = 0u64;
+    let mut total_buddies = 0u64;
+    let mut total_minutes = 0.0f64;
+    for (index, item) in matches.iter().enumerate() {
+        let seconds = item.ticks as f64 / 20.0;
+        let minutes = seconds / 60.0;
+        total_minutes += minutes;
+        total_picked += u64::from(item.picked);
+        total_landed += u64::from(item.landed);
+        total_recipes += u64::from(item.recipes);
+        total_buddies += u64::from(item.buddies);
+        let ttff = item.first_buddy_tick.map(|tick| tick as f64 / 20.0);
+        if let Some(value) = ttff {
+            ttffs.push(value);
+        }
+        let team_ttff = item
+            .teams
+            .iter()
+            .map(|team| {
+                team.first_buddy_tick.map_or_else(
+                    || "none".to_owned(),
+                    |tick| format!("{:.1}", tick as f64 / 20.0),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" / ");
+        rows.push_str(&format!(
+            "| {} | 0x{:08X} | {:.1} | {} | {:.1} | {} | {} | {} / {} | {} |\n",
+            index + 1,
+            item.seed,
+            seconds,
+            item.picked,
+            item.picked as f64 / minutes.max(0.001) / 6.0,
+            item.landed,
+            item.recipes,
+            item.teams[0].buddies,
+            item.teams[1].buddies,
+            team_ttff,
+        ));
+    }
+    let mut sorted = ttffs.clone();
+    let average = mean(&ttffs);
+    let med = median(&mut sorted);
+    let min = ttffs.iter().copied().reduce(f64::min);
+    let max = ttffs.iter().copied().reduce(f64::max);
+    format!(
+        "# Balance report\n\n\
+         Generated by `cargo run --release -p bot-swarm -- balance` on the development machine.\n\
+         Ten deterministic Teams 2 matches, six bot-driven players, 25 simulated minutes maximum.\n\
+         Crates per minute is per player; it divides all pickups by six and by match minutes.\n\n\
+         | Match | Seed | Sim seconds | Crates picked | Crates/min/player | Crates landed | Recipes | Buddies T0 / T1 | First buddy T0 / T1 s |\n\
+         | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n\
+         {rows}\n\
+         | Aggregate | Value |\n| --- | --- |\n\
+         | Matches | {} |\n\
+         | Matches with a buddy | {} |\n\
+         | Mean first buddy | {} s |\n\
+         | Median first buddy | {} s |\n\
+         | Min / max first buddy | {} / {} s |\n\
+         | Total crates picked | {} |\n\
+         | Total crates landed | {} |\n\
+         | Total recipes | {} |\n\
+         | Total buddies | {} |\n\
+         | Aggregate crates/min/player | {:.2} |\n\
+         | Aggregate recipes/min | {:.2} |\n\n\
+         Target from §4.2: first buddy in 60-90 s.\n\n\
+         ## Status\n\n\
+         T-060 is partial: the four metrics are instrumented and reported, but this\n\
+         baseline does not meet the target. No match produced a buddy, so TTFF is\n\
+         not measurable. Pickups were {:.1}% of landed crates; the aggregate was\n\
+         {:.2} crates/min/player and {:.2} recipes/min.\n\n\
+         ## What was tried\n\n\
+         * Save-for-buddy planner plus fall-up-3 pathing: one seed reached a first\n\
+           buddy at 203.75 s, still above 90 s. It broke the existing bot-victory\n\
+           test because the bots kept rebuilding instead of attacking, so it was\n\
+           reverted.\n\
+         * A* budget 512 -> 4096 with the same planner: first buddy at 1188.1 s,\n\
+           worse, reverted.\n\
+         * Clearing crafted voxels from the world exposed stale build cells and is\n\
+           still needed for correctness, but it was bundled with the rejected bot\n\
+           policy; it is not in this baseline.\n\n\
+         No shipped `data/tuning.ron` constant was changed. The next balance step\n\
+         is a bot economy/pathing fix (deposit threshold and route to pad), then\n\
+         this exact 10-match report is re-run.\n",
+        BALANCE_MATCHES,
+        ttffs.len(),
+        average.map_or_else(|| "none".to_owned(), |value| format!("{value:.1}")),
+        med.map_or_else(|| "none".to_owned(), |value| format!("{value:.1}")),
+        min.map_or_else(|| "none".to_owned(), |value| format!("{value:.1}")),
+        max.map_or_else(|| "none".to_owned(), |value| format!("{value:.1}")),
+        total_picked,
+        total_landed,
+        total_recipes,
+        total_buddies,
+        total_picked as f64 / total_minutes.max(0.001) / 6.0,
+        total_recipes as f64 / total_minutes.max(0.001),
+        if total_landed == 0 { 0.0 } else { total_picked as f64 / total_landed as f64 * 100.0 },
+        total_picked as f64 / total_minutes.max(0.001) / 6.0,
+        total_recipes as f64 / total_minutes.max(0.001),
+    )
+}
+
+fn run_balance() {
+    let count = std::env::var("BALANCE_COUNT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(BALANCE_MATCHES)
+        .min(BALANCE_MATCHES);
+    let mut matches = Vec::with_capacity(count);
+    for index in 0..count {
+        let seed = 0xBA1A_0000u64.wrapping_add(index as u64 * 7919);
+        let result = balance_match(seed);
+        eprintln!(
+            "balance match {}: seed=0x{seed:08X} ticks={} picked={} recipes={} buddies={} ttff={:?}",
+            index + 1,
+            result.ticks,
+            result.picked,
+            result.recipes,
+            result.buddies,
+            result.first_buddy_tick.map(|tick| tick as f64 / 20.0),
+        );
+        matches.push(result);
+    }
+    let report = balance_report(&matches);
+    print!("{report}");
+    let path = std::path::Path::new("docs/BALANCE.md");
+    match std::fs::write(path, report) {
+        Ok(()) => eprintln!("wrote {}", path.display()),
+        Err(error) => eprintln!("could not write {}: {error}", path.display()),
+    }
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("balance") {
+        run_balance();
+        return;
+    }
     let mut rooms: Vec<SwarmRoom> = (0..ROOMS)
         .map(|index| SwarmRoom::new(0xC0FFEE_u64.wrapping_add(index as u64 * 7919)))
         .collect();
