@@ -11,6 +11,18 @@ const ATLAS_URL = "/assets/atlas.png";
 const ATLAS_BYTES_MAX = 30 * 1024;
 const TILE = 16;
 const AUTHORED_TILES = 24;
+const MODEL_NAMES = [
+  "buddy_archer.glb",
+  "buddy_berserker.glb",
+  "buddy_healer.glb",
+  "buddy_mage.glb",
+  "buddy_sniper.glb",
+  "buddy_swordsman.glb",
+  "player_guard.glb",
+  "player_raider.glb",
+  "player_scout.glb",
+];
+const MODELS_BYTES_MAX = 40 * 1024;
 
 interface DecodedPng {
   width: number;
@@ -105,6 +117,20 @@ test("the atlas is 256x256, 24 slots and under 30 KB", async ({ request }) => {
   for (let tile = AUTHORED_TILES; tile < 256; tile += 1) {
     expect(tileHasAlpha(atlas, tile), `tile ${tile} should be spare`).toBe(false);
   }
+});
+
+test("the nine GLB models are served and stay under 40 KB", async ({ request }) => {
+  let total = 0;
+  for (const name of MODEL_NAMES) {
+    const response = await request.get(`/assets/models/${name}`);
+    expect(response.status(), name).toBe(200);
+    const bytes = await response.body();
+    expect(bytes.subarray(0, 4).toString("ascii"), name).toBe("glTF");
+    expect(bytes.readUInt32LE(4), name).toBe(2);
+    expect(bytes.readUInt32LE(8), name).toBe(bytes.length);
+    total += bytes.length;
+  }
+  expect(total).toBeLessThanOrEqual(MODELS_BYTES_MAX);
 });
 
 test("a match loads the atlas and draws textured terrain", async ({ page }) => {

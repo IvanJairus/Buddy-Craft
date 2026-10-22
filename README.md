@@ -122,7 +122,7 @@ apps/
   web/src/ui/              store, HUD, recipe book, screens, settings (M2)
   web/src/wasm/loader.ts   raw wasm loader and render views (M2)
   web/scripts/             wasm bridge build step (M2)
-  web/public/assets/       generated block atlas (T-051)
+  web/public/assets/       generated block atlas and GLB models (T-051)
   web/tests/               Playwright specs for the browser contract (M2)
 data/
   tuning.ron    every designer-facing number, single source of truth
@@ -132,7 +132,7 @@ data/
 docs/
   PLAN.md       the specification this repo implements
 tools/
-  asset-pipeline/  deterministic PNG atlas generator (T-051)
+  asset-pipeline/  deterministic atlas and GLB model generators (T-051)
   recipe-editor/   local grid editor and validator for data/recipes.ron (T-052)
   wasm-golden.mjs  runs the wasm build of the golden test under node:wasi
   wasm-exports.mjs checks the bridge's 20-function export contract
@@ -249,7 +249,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-048 | offline Web Worker match with bots and the online wire frames | done |
 | T-049 | audio graph, 24 voices, 30 procedural cues, rumble worklet | partial: WebKit/iOS and recorded assets not verified |
 | T-050 | anti-cheat: 15 named threat tests, connection cap, token revocation | partial: cheat-client and host wiring missing |
-| T-051 | art atlas and GLB models | partial: textured atlas and terrain shader shipped; no GLB models |
+| T-051 | art atlas and GLB models | done at the asset boundary: 24-tile atlas, 9 GLB models; renderer still boxes |
 | T-052 | content pass and recipe editor | done: 14 recipes, 6 buddies, grid editor with duplicate guard |
 | T-053 | 20-room bot swarm: p99 0.455 ms, 27 MB RSS, 240-player Oracle estimate | done |
 | T-054 | cross-browser two-client E2E suite | not started: needs T-048 |
@@ -1433,7 +1433,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 658.4 KB raw and 167.9 KB gzipped,
+device deterministically. The JS bundle is 658.5 KB raw and 167.9 KB gzipped,
 under §8.10's 450 KB gzip target; the offline worker adds a 2.9 KB module. The
 wasm asset is measured in the chunk section below.
 
@@ -1475,15 +1475,30 @@ runs the default 6/7 policy and checks a kept column at distance 7 and an
 unloaded one at distance 8, the other runs 2/3 and asserts the whole set,
 including the ring.
 
-## Atlas: one texture, a shader that tiles it
+## Atlas and models: two generated asset families
 
-T-051 is partial: the atlas and textured terrain exist, the nine GLB models do
-not. `tools/asset-pipeline/generate-atlas.mjs` writes a 256 x 256 RGBA PNG with
-no image dependency, only zlib and a CRC32 table. The sheet has 24 authored
-16 x 16 slots in a 16 x 16 grid: slots 1-19 are the non-air blocks in
-`data/blocks.ron` order, slot 0 is transparent air, slots 20-23 are spare, and
-the rest of the grid stays empty. The file is 5,400 bytes against the 30 KB
-budget, and it is the only blocking asset, so the total is 5.4 KB against 90 KB.
+T-051 now ships both asset families. `tools/asset-pipeline/generate-atlas.mjs`
+writes a 256 x 256 RGBA PNG with no image dependency, only zlib and a CRC32
+table. The sheet has 24 authored 16 x 16 slots in a 16 x 16 grid: slots 1-19 are
+the non-air blocks in `data/blocks.ron` order, slot 0 is transparent air, slots
+20-23 are spare, and the rest of the grid stays empty. The file is 5,400 bytes
+against the 30 KB budget.
+
+`tools/asset-pipeline/generate-models.mjs` writes nine GLB meshes, one per
+buddy role plus three player silhouettes. They are merged low-poly box meshes
+with per-vertex colours, no textures, no images and no materials: 144-192
+triangles each and 31,232 bytes for all nine, against a 400-triangle per-mesh
+limit and a 40 KB total. The generator is deterministic; regenerating produces
+the same SHA-256 for every file. The atlas and models together are 36,632 bytes
+of blocking assets against the 90 KB budget.
+
+| Asset check | Measured |
+| --- | --- |
+| Atlas | 256 x 256, 24 slots, 5,400 B (budget 30 KB) |
+| Models | 9 files, 144-192 tris each, 31,232 B total (budget 40 KB) |
+| Blocking payload | 36,632 B (budget 90 KB) |
+| Model validation | direct GLB JSON checks plus a three.js `GLTFLoader` parse |
+| Renderer | still the instanced boxes; swapping in the GLBs is renderer integration |
 
 The mesher already emitted a tile index, in-plane cell coordinates, an AO
 level, a face index and a flags byte. The chunk shader consumes them instead of
@@ -1495,15 +1510,16 @@ Transparent texels discard, so the air slot never draws. The texture uses
 nearest filtering and no mipmaps, which keeps the pixel grid readable at 16 px
 and avoids a mip chain that would blend neighbouring tiles.
 
-Two guards pin the contract. `every_block_has_a_tile()` reads the shipped PNG
-header and asserts every registry tile is below the 24 authored slots; it was
-shown red by changing the marker tile to 30, then green again. The browser spec
-decodes the PNG, checks 256 x 256, the transparent air slot, 23 visible slots,
-four spare and empty remainder, then boots a high-quality match, fails on a
-missing atlas request or a shader error, and reads two canvas pixels so an
-all-transparent sample (the wrong `flipY` was exactly that) cannot pass. Player
-and buddy models remain boxes; the six buddy and three player GLB meshes of
-T-051 are not authored yet.
+Two guards pin the atlas contract. `every_block_has_a_tile()` reads the shipped
+PNG header and asserts every registry tile is below the 24 authored slots; it
+was shown red by changing the marker tile to 30, then green again. The browser
+spec decodes the PNG, checks 256 x 256, the transparent air slot, 23 visible
+slots, four spare and empty remainder, then boots a high-quality match, fails on
+a missing atlas request or a shader error, and reads two canvas pixels so an
+all-transparent sample (the wrong `flipY` was exactly that) cannot pass. The
+model test parses every GLB, counts triangles, requires `COLOR_0`, rejects
+textures and materials, and was shown red by lowering its triangle budget to 1.
+A browser spec also fetches all nine GLBs and checks the 40 KB total.
 
 ## Entities: three boxes and a float contract
 
@@ -2047,12 +2063,11 @@ The batch reached T-061 only partially. T-048 is now playable and T-049 has a
 real graph and 30 procedural cues, but no recorded OGG assets and no WebKit/iOS
 run. T-047's registry policy and Crockford codes are native-tested, but its
 HTTP/DO surface is blocked behind T-046. T-059 and T-061 are complete locally.
-T-046 and T-057 need a live Cloudflare/Vercel deployment, T-051 still needs
-the nine GLB models, T-054 needs the online host path plus Firefox/WebKit, and
-T-062/T-063/T-064 need physical devices, six humans on production and a week of
-telemetry. Those are not marked done.
+T-046 and T-057 need a live Cloudflare/Vercel deployment, T-054 needs the online
+host path plus Firefox/WebKit, and T-062/T-063/T-064 need physical devices, six
+humans on production and a week of telemetry. Those are not marked done.
 
-The current gates are 496 Rust tests, 95 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
+The current gates are 496 Rust tests, 96 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
 20 wasm exports. T-050 has the 15 named threat tests, but `tools/cheat-client`
 and host wiring for the new connection/token guards are still missing. The last full-browser run is Chromium plus the headed pointer
 lock project; Firefox and WebKit are not installed on this machine.

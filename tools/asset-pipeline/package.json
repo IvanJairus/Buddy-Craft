@@ -1,0 +1,10 @@
+{
+  "name": "@buddy-craft/asset-pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "node generate-atlas.mjs && node generate-models.mjs",
+    "test": "node --test test/models.test.mjs"
+  }
+}
