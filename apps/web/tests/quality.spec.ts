@@ -22,6 +22,7 @@ interface TestWindow {
     info(): RendererInfo;
     setFrameTime(ms: number | null): void;
     setTier(tier: QualityTier): void;
+    resetScale(): void;
   };
 }
 
@@ -80,6 +81,7 @@ test("each tier applies the exact §8.5 numbers", async ({ page }) => {
 
 test("dynamic resolution drops under 25 ms frames and recovers under 8 ms", async ({ page }) => {
   await boot(page, "/?quality=high&scene=clear&screen=match");
+  await page.evaluate(() => (window as unknown as TestWindow).__cbTest!.resetScale());
   expect((await info(page)).scale).toBe(1);
 
   await page.evaluate(() => (window as unknown as TestWindow).__cbTest!.setFrameTime(25));

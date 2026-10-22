@@ -77,6 +77,7 @@ interface GrowResult {
 interface TestApi {
   info(): RendererInfo;
   pixel(x: number, y: number): [number, number, number, number];
+  resetScale(): void;
   chunks(): ChunkInfo | null;
   stream(x: number, z: number, budget?: number): ChunkInfo | null;
   setFrameTime(ms: number | null): void;
@@ -418,6 +419,7 @@ async function boot(): Promise<void> {
   window.__cbTest = {
     info: () => renderer.info(),
     pixel: (x, y) => renderer.readPixel(x, y),
+    resetScale: () => renderer.resetScale(),
     chunks: () => chunks?.info() ?? null,
     stream: (x, z, budget = 1024) => {
       chunks?.update(x, z, budget);

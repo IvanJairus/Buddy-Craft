@@ -130,6 +130,14 @@ export class GameRenderer {
     }
   }
 
+  /** Restore a deterministic 1.0 baseline; used by the scaler spec. */
+  resetScale(): void {
+    this.scale = 1;
+    this.frameMsAvg = TARGET_FRAME_MS;
+    this.lastFrameMs = 0;
+    this.applyResolution();
+  }
+
   /**
    * Replace the measured frame time with a synthetic value, or `null` to go
    * back to real time. The Playwright dynamic-resolution spec uses this: it is
