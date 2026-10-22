@@ -68,6 +68,10 @@ impl OfflineSession {
     /// Decode one C2S frame. Bad frames are ignored by the offline host; the
     /// browser already validated its own input.
     pub fn message(&mut self, bytes: &[u8]) {
+        if bytes.first() == Some(&0xf0) {
+            self.debug_message(bytes);
+            return;
+        }
         let Ok(message) = protocol::codec::decode_checked(bytes, protocol::codec::Bounds::STANDARD)
         else {
             return;
@@ -97,6 +101,56 @@ impl OfflineSession {
             protocol::C2s::Ping(ping) => {
                 self.queue
                     .push_back(S2c::Pong(protocol::Pong { t: ping.t }).encode());
+            }
+            _ => {}
+        }
+    }
+
+    /// Accelerated E2E setup, kept off the normal C2S path: 0xF0 is not a
+    /// protocol tag. The commands only grant state or fill a pad; the next
+    /// ordinary tick still runs the real crafting and outcome rules.
+    fn debug_message(&mut self, bytes: &[u8]) {
+        match bytes.get(1) {
+            Some(1) if bytes.len() >= 5 => {
+                let player = PlayerId(bytes[2]);
+                let crates = u32::from(u16::from_le_bytes([bytes[3], bytes[4]]));
+                self.game.grant_crates(player, crates);
+            }
+            Some(2) if bytes.len() >= 7 => {
+                let team = sim::TeamId(bytes[2]);
+                let amount = i32::from_le_bytes([bytes[3], bytes[4], bytes[5], bytes[6]]);
+                self.game.damage_core(team, amount);
+            }
+            Some(3) if bytes.len() >= 5 => {
+                let team = sim::TeamId(bytes[2]);
+                let recipe = sim::RecipeId(u16::from_le_bytes([bytes[3], bytes[4]]));
+                if self.game.debug_place_recipe(team, recipe) {
+                    for diff in self.game.take_diffs() {
+                        self.queue.push_back(S2c::ChunkDiff(diff).encode());
+                    }
+                }
+            }
+            Some(4) if bytes.len() >= 4 => {
+                let team = sim::TeamId(bytes[2]);
+                let count = bytes[3] as usize;
+                let end = 4 + count * 3;
+                if bytes.len() >= end {
+                    let blocks: Vec<[i32; 3]> = (0..count)
+                        .map(|i| {
+                            let at = 4 + i * 3;
+                            [
+                                i32::from(bytes[at]),
+                                i32::from(bytes[at + 1]),
+                                i32::from(bytes[at + 2]),
+                            ]
+                        })
+                        .collect();
+                    if self.game.debug_place_blocks(team, &blocks) {
+                        for diff in self.game.take_diffs() {
+                            self.queue.push_back(S2c::ChunkDiff(diff).encode());
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -228,6 +282,12 @@ fn snapshot_events(events: &[MatchEvent]) -> Vec<SnapshotEvent> {
                 a: i32::from(team.0),
                 b: i32::from(recipe.0),
                 c: i32::from(buddy.is_some()),
+            },
+            MatchEvent::CraftBlocked { team, recipe } => SnapshotEvent {
+                kind: event_kind::CRAFT_BLOCKED,
+                a: i32::from(team.0),
+                b: i32::from(recipe.0),
+                c: 0,
             },
             MatchEvent::CoreHit { team, amount, by } => SnapshotEvent {
                 kind: event_kind::BASE_HIT,

@@ -106,12 +106,26 @@ async fn handle_socket(socket: WebSocket, state: AppState, room: String) {
             Message::Binary(bytes) => {
                 match protocol::codec::decode_checked(&bytes, protocol::codec::Bounds::STANDARD) {
                     Ok(C2s::Input(packet)) => {
-                        if room_tx.send(RoomCommand::Input(packet)).await.is_err() {
+                        if room_tx
+                            .send(RoomCommand::Input {
+                                id: client_id,
+                                packet,
+                            })
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
                     Ok(C2s::Edit(edit)) => {
-                        if room_tx.send(RoomCommand::Edit(edit)).await.is_err() {
+                        if room_tx
+                            .send(RoomCommand::Edit {
+                                id: client_id,
+                                edit,
+                            })
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -269,6 +283,59 @@ mod tests {
             other => panic!("expected welcome, got {other:?}"),
         }
         drop(socket);
+        let _ = stop.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+        state.hub.shutdown().await;
+    }
+
+    type WsClient = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn connect(addr: SocketAddr, room: &str) -> WsClient {
+        let mut request = format!("ws://{addr}/ws?room={room}")
+            .into_client_request()
+            .expect("request");
+        request
+            .headers_mut()
+            .insert("origin", "http://127.0.0.1:5173".parse().expect("header"));
+        tokio_tungstenite::connect_async(request)
+            .await
+            .expect("upgrade")
+            .0
+    }
+
+    async fn next_s2c(socket: &mut WsClient) -> S2c {
+        let message = tokio::time::timeout(Duration::from_secs(3), socket.next())
+            .await
+            .expect("frame timeout")
+            .expect("message")
+            .expect("frame");
+        let tokio_tungstenite::tungstenite::Message::Binary(bytes) = message else {
+            panic!("expected a binary frame");
+        };
+        protocol::decode_s2c(&bytes).expect("decode")
+    }
+
+    #[tokio::test]
+    async fn two_connections_get_distinct_seats_and_a_third_is_rejected() {
+        let (addr, state, stop, task) = spawn("seats").await;
+        let mut first = connect(addr, "dev001").await;
+        match next_s2c(&mut first).await {
+            S2c::Welcome(welcome) => assert_eq!(welcome.player_id, 0),
+            other => panic!("expected welcome, got {other:?}"),
+        }
+        let mut second = connect(addr, "dev001").await;
+        match next_s2c(&mut second).await {
+            S2c::Welcome(welcome) => assert_eq!(welcome.player_id, 1),
+            other => panic!("expected welcome, got {other:?}"),
+        }
+        let mut third = connect(addr, "dev001").await;
+        match next_s2c(&mut third).await {
+            S2c::Error(error) => assert_eq!(error.code, protocol::error_code::ROOM_FULL),
+            other => panic!("expected room-full error, got {other:?}"),
+        }
+        drop((first, second, third));
         let _ = stop.send(());
         let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
         state.hub.shutdown().await;

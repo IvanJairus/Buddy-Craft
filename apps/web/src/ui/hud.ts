@@ -148,6 +148,11 @@ export class Hud {
     };
   }
 
+  /** Current feed lines, oldest first. Used by the E2E specs. */
+  feedText(): string[] {
+    return Array.from(this.feed.children, (node) => node.textContent ?? "");
+  }
+
   /** Append an event line. Plain text only; the feed is player-facing. */
   toast(text: string): void {
     const node = make("div", "hud-toast");

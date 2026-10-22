@@ -128,8 +128,10 @@ export function buildResults(callbacks: ResultsCallbacks): HTMLDivElement {
   const panel = make("div", "screen-panel results-panel");
   panel.dataset.screen = "results";
   const title = make("h1", "screen-title");
+  title.dataset.results = "title";
   title.textContent = "MATCH OVER";
   const subtitle = make("p", "screen-subtitle");
+  subtitle.dataset.results = "detail";
   subtitle.textContent = "The arena is quiet. For now.";
   const rematch = actionButton("rematch", "REMATCH", true);
   rematch.addEventListener("click", callbacks.onRematch);

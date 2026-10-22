@@ -1,7 +1,7 @@
 # Protocol
 
 Generated from `crates/protocol/src/lib.rs` by `tools/protocol-doc.mjs`.
-Source digest: `81edea726262`. Do not edit by hand; run the generator.
+Source digest: `1c0e3c7f2525`. Do not edit by hand; run the generator.
 
 One WebSocket frame is one message: the first byte is the tag, the rest is a
 postcard payload. Frames are capped at 4096 bytes.

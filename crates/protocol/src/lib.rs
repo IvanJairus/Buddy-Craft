@@ -237,6 +237,9 @@ pub mod event_kind {
     pub const AIRDROP_TELEGRAPH: u8 = 8;
     /// A player crossed below 30% HP. `a` = player id, `b` = hp, `c` = max hp.
     pub const LOW_HP: u8 = 9;
+    /// A recipe matched but was refused, usually by a buddy cap.
+    /// `a` = team, `b` = recipe id, `c` = unused.
+    pub const CRAFT_BLOCKED: u8 = 10;
 }
 
 // ---------------------------------------------------------------------------

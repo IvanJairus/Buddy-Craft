@@ -33,6 +33,8 @@ pub struct AppState {
     pub started: Instant,
     /// Runtime kill switches.
     pub switches: Arc<telemetry::Switches>,
+    /// Accelerated E2E commands and spawn overrides.
+    pub e2e: bool,
 }
 
 impl AppState {
@@ -43,7 +45,14 @@ impl AppState {
             allowed_origins: Arc::new(allowed_origins),
             started: Instant::now(),
             switches: Arc::new(telemetry::Switches::from_env()),
+            e2e: std::env::var("CB_E2E").ok().as_deref() == Some("1"),
         }
+    }
+
+    /// Enable the debug command endpoint (tests only).
+    pub fn with_e2e(mut self, enabled: bool) -> AppState {
+        self.e2e = enabled;
+        self
     }
 
     /// Replace the environment-derived switches (tests and embedders).
@@ -72,11 +81,61 @@ pub fn app(state: AppState) -> Router {
         .route("/healthz", get(health))
         .route("/ws", get(ws::ws_handler))
         .route("/telemetry", post(client_telemetry))
+        .route("/debug/command", post(debug_command))
         .with_state(state)
 }
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(state.health().await)
+}
+
+#[derive(serde::Deserialize)]
+struct DebugCommand {
+    room: String,
+    action: String,
+    player: Option<u8>,
+    team: Option<u8>,
+    crates: Option<u32>,
+    amount: Option<i32>,
+}
+
+async fn debug_command(
+    State(state): State<AppState>,
+    Json(command): Json<DebugCommand>,
+) -> StatusCode {
+    use sim::{PlayerId, TeamId};
+    if !state.e2e {
+        return StatusCode::NOT_FOUND;
+    }
+    let tx = state.hub.sender(&command.room).await;
+    let sent = match command.action.as_str() {
+        "grant" => tx
+            .send(RoomCommand::DebugGrant {
+                player: PlayerId(command.player.unwrap_or(0)),
+                crates: command.crates.unwrap_or(0),
+            })
+            .await
+            .is_ok(),
+        "damage-core" => tx
+            .send(RoomCommand::DebugDamage {
+                team: TeamId(command.team.unwrap_or(0)),
+                amount: command.amount.unwrap_or(0),
+            })
+            .await
+            .is_ok(),
+        "place-crate" => tx
+            .send(RoomCommand::DebugPlace {
+                team: TeamId(command.team.unwrap_or(0)),
+            })
+            .await
+            .is_ok(),
+        _ => false,
+    };
+    if sent {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::BAD_REQUEST
+    }
 }
 
 async fn client_telemetry(State(_state): State<AppState>, body: Bytes) -> StatusCode {

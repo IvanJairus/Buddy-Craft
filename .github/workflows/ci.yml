@@ -201,8 +201,20 @@ jobs:
       # provides one through SwiftShader; that is relative performance, not a
       # phone (see the §8.10 caveat), but it is enough for the DPR and
       # dynamic-resolution contract.
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium firefox webkit
       # T-035's pointer-lock spec needs a headed Chromium: the headless shell
       # refuses requestPointerLock. Xvfb gives the headed project a display.
       - run: sudo apt-get update && sudo apt-get install -y xvfb
       - run: xvfb-run --auto-servernum npm run test:e2e
+      # T-054: one host-axum process and the same ten specs on Chromium,
+      # Firefox, WebKit and a mobile viewport. The suite has its own time gate.
+      - name: build the E2E host
+        run: cargo build --manifest-path ../../Cargo.toml -p host-axum
+      - name: T-054 four-browser E2E suite (<= 6 min)
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          npm run test:t054
+          elapsed=$(( $(date +%s) - start ))
+          echo "T-054 suite wall time: ${elapsed}s"
+          test "$elapsed" -le 360

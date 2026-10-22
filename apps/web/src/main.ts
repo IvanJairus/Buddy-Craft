@@ -35,11 +35,12 @@ import {
   type InputAction,
 } from "./game/inputDesktop";
 import { TouchInput, type TouchState } from "./game/inputTouch";
-import { errorMessage, showFatalScreen, showRttOverlay } from "./game/net/client";
+import { errorMessage, showFatalScreen, showRttOverlay, type NetState } from "./game/net/client";
 import { ChunkSync } from "./game/net/chunkSync";
 import { SnapshotDecoder } from "./game/net/snapshot";
 import { Interpolator } from "./game/interp";
 import { OfflineSession } from "./game/offline";
+import { OnlineSession } from "./game/online";
 import { Hud, type HudStats } from "./ui/hud";
 import { RecipeBookUi, type RecipeBookInfo } from "./ui/recipeBook";
 import { LobbyScreen } from "./ui/lobby";
@@ -116,6 +117,7 @@ interface TestApi {
   hudUpdate(patch: Partial<HudState>): void;
   hudState(): HudState;
   hudStats(): HudStats;
+  hudFeed(): string[];
   hudToast(text: string): void;
   recipeRows(): RecipeRow[];
   recipesInfo(): RecipeBookInfo;
@@ -163,15 +165,42 @@ interface TestApi {
     players: number;
     buddies: number;
     decoded: number;
+    tick: number;
     hash: number;
     ended: boolean;
     x: number;
     y: number;
     z: number;
   };
-  offlineAdvance(ticks: number): void;
+  offlineAdvance(ticks: number, post?: boolean): void;
   offlineInput(frame: number[]): void;
   offlineStop(): void;
+  offlineGrant(player: number, crates: number): void;
+  offlineDamageCore(team: number, amount: number): void;
+  offlinePlaceRecipe(team: number, recipe: number): void;
+  offlinePlaceBlocks(team: number, blocks: Array<[number, number, number]>): void;
+  onlineStart(roomCode: string, server?: string): boolean;
+  sessionEvents(): Array<{ kind: number; a: number; b: number; c: number; tick: number }>;
+  sessionTeam(): number;
+  onlineStats(): {
+    active: boolean;
+    state: NetState;
+    playerId: number;
+    snapshot: boolean;
+    players: Array<{ id: number; x: number; y: number; z: number }>;
+    decoded: number;
+    tick: number;
+    rtt: number | null;
+    frames: { snapshots: number; chunkDiffs: number };
+    ended: boolean;
+    x: number;
+    y: number;
+    z: number;
+  };
+  onlineInput(frame: number[]): void;
+  onlineHold(frame: number[] | null): void;
+  onlineDrop(): void;
+  onlineStop(): void;
 }
 
 declare global {
@@ -201,6 +230,16 @@ let offline: OfflineSession | null = null;
 let offlineActive = false;
 let offlineSnapshot = false;
 let lastOfflineInput = 0;
+let online: OnlineSession | null = null;
+let onlineActive = false;
+let onlineSnapshot = false;
+let onlinePlayerId = 0;
+let lastOnlineInput = 0;
+let onlineEnded = false;
+let onlineOverride: Uint8Array | null = null;
+let sessionTeam = 0;
+let localCarried = 0;
+let sessionEvents: Array<{ kind: number; a: number; b: number; c: number; tick: number }> = [];
 let lastAdvanced = { ended: false, hash: 0 };
 const ZERO_FRAME = new Uint8Array(4);
 const crashReporter = new CrashReporter(
@@ -268,7 +307,9 @@ async function boot(): Promise<void> {
       localEdit: (x, y, z, block, action) =>
         offlineActive && offline !== null
           ? offline.sendEdit(x, y, z, block, action)
-          : wasmClient.localEdit(x, y, z, block, action),
+          : onlineActive && online !== null
+            ? online.sendEdit(x, y, z, block, action)
+            : wasmClient.localEdit(x, y, z, block, action),
     });
   }
 
@@ -298,7 +339,7 @@ async function boot(): Promise<void> {
         interaction?.breakBlock();
       };
       touch.onPlace = (block) => {
-        interaction?.place(offlineActive ? 11 : block);
+        interaction?.place(offlineActive || onlineActive ? 11 : block);
       };
     }
   } else {
@@ -317,7 +358,7 @@ async function boot(): Promise<void> {
     });
   }
 
-  screens = new ScreenManager(document.body, () => screens?.show("results"));
+  screens = new ScreenManager(document.body, () => leaveMatch());
   screens.register("boot", buildBoot(() => screens?.show("main")));
   screens.register(
     "main",
@@ -329,7 +370,7 @@ async function boot(): Promise<void> {
   );
   const lobby = new LobbyScreen({
     onBack: () => screens?.show("main"),
-    onStart: () => screens?.show("match"),
+    onStart: (code) => startOnline(code),
   });
   screens.register("lobby", lobby.element);
   const settings = new SettingsScreen({
@@ -344,9 +385,7 @@ async function boot(): Promise<void> {
     "results",
     buildResults({
       onMain: () => {
-        offline?.stop();
-        offline = null;
-        offlineActive = false;
+        stopSessions();
         screens?.show("main");
       },
       onRematch: () => startOffline(),
@@ -355,7 +394,87 @@ async function boot(): Promise<void> {
   const initialScreen: ScreenId = query.get("screen") === "match" ? "match" : "boot";
   screens.show(initialScreen);
 
+  function stopSessions(): void {
+    offline?.stop();
+    offline = null;
+    offlineActive = false;
+    offlineSnapshot = false;
+    online?.stop();
+    online = null;
+    onlineActive = false;
+    onlineSnapshot = false;
+    onlineEnded = false;
+    onlineOverride = null;
+  }
+
+  function leaveMatch(): void {
+    stopSessions();
+    screens?.show("results");
+  }
+
+  function showResults(bytes: Uint8Array): void {
+    if (bytes[0] !== 0x89 || bytes.length < 3) return;
+    const winner = bytes[1] > 127 ? bytes[1] - 256 : bytes[1];
+    const reason = bytes[2];
+    const title = document.querySelector<HTMLElement>('[data-results="title"]');
+    const detail = document.querySelector<HTMLElement>('[data-results="detail"]');
+    if (title === null || detail === null) return;
+    if (reason === 1) {
+      title.textContent = "NO HUMAN SURVIVOR";
+      detail.textContent = "The last human fell. Bots do not win.";
+    } else if (reason === 3) {
+      title.textContent = "DRAW";
+      detail.textContent = "Every core fell on the same tick.";
+    } else if (winner === sessionTeam) {
+      title.textContent = "VICTORY";
+      detail.textContent = `Team ${winner + 1} wins.`;
+    } else {
+      title.textContent = "DEFEAT";
+      detail.textContent = `Team ${winner + 1} wins.`;
+    }
+  }
+
+  function processSnapshotEvents(frame: {
+    eventCount: number;
+    eventKind: Uint8Array;
+    eventA: Int32Array;
+    eventB: Int32Array;
+    eventC: Int32Array;
+    tick: number;
+  }): void {
+    const localId = offlineActive ? 0 : onlinePlayerId;
+    for (let i = 0; i < frame.eventCount; i += 1) {
+      const kind = frame.eventKind[i];
+      const a = frame.eventA[i];
+      const b = frame.eventB[i];
+      const c = frame.eventC[i];
+      sessionEvents.push({ kind, a, b, c, tick: frame.tick });
+      if (sessionEvents.length > 128) sessionEvents.shift();
+      if (kind === 6 && a === localId) {
+        localCarried += b;
+        hudStore.set({ crates: localCarried });
+        hud.toast(`+${b} crates`);
+      } else if (kind === 0) {
+        const recipe = recipes.find((row) => row.id === b);
+        hud.toast(`${recipe?.name ?? `Recipe ${b}`} crafted`);
+      } else if (kind === 10) {
+        const recipe = recipes.find((row) => row.id === b);
+        hud.toast(`${recipe?.name ?? `Recipe ${b}`}: buddy cap reached`);
+      } else if (kind === 8) {
+        hud.toast("Airdrop incoming");
+      } else if (kind === 4) {
+        hud.toast(`Airdrop landed: ${c} crates`);
+      } else if (kind === 3 && a === sessionTeam) {
+        hud.toast("Your core is down");
+      }
+    }
+  }
+
   function startOffline(mode = 1, teams = 2): void {
+    online?.stop();
+    online = null;
+    onlineActive = false;
+    onlineSnapshot = false;
     offline?.stop();
     offline = null;
     snapshotDecoder.reset();
@@ -364,12 +483,16 @@ async function boot(): Promise<void> {
     offlineActive = true;
     offlineSnapshot = false;
     lastOfflineInput = 0;
+    sessionTeam = 0;
+    localCarried = 0;
+    sessionEvents = [];
     lastAdvanced = { ended: false, hash: 0 };
     offline = new OfflineSession({
       seed: DEMO_SEED,
       mode,
       teams,
       onWelcome: () => {
+        sessionTeam = 0;
         hudStore.set({ hp: 100, maxHp: 100, crates: 0, carryCap: 12 });
       },
       onFrame: (bytes) => {
@@ -387,6 +510,7 @@ async function boot(): Promise<void> {
         } else if (bytes[0] === 0x84) {
           const frame = snapshotDecoder.decode(bytes);
           if (frame !== null) {
+            processSnapshotEvents(frame);
             interpolator.push(frame, performance.now());
             offlineSnapshot = true;
           }
@@ -395,7 +519,8 @@ async function boot(): Promise<void> {
           if (ack !== null) interaction?.ack(ack.seq, ack.accepted);
         }
       },
-      onEnd: () => {
+      onEnd: (bytes) => {
+        showResults(bytes);
         offlineActive = false;
         offlineSnapshot = false;
         offline?.stop();
@@ -411,6 +536,79 @@ async function boot(): Promise<void> {
           offline = null;
           screens?.show("results");
         }
+      },
+    });
+    screens?.show("match");
+  }
+
+  function startOnline(roomCode: string, serverOverride?: string): void {
+    stopSessions();
+    snapshotDecoder.reset();
+    interpolator.reset();
+    const server =
+      serverOverride ??
+      query.get("server") ??
+      (import.meta.env.VITE_WS_URL as string | undefined) ??
+      `ws://${window.location.hostname}:8080`;
+    onlineActive = true;
+    onlineSnapshot = false;
+    onlinePlayerId = 0;
+    onlineEnded = false;
+    onlineOverride = null;
+    lastOnlineInput = 0;
+    sessionTeam = 0;
+    localCarried = 0;
+    sessionEvents = [];
+    online = new OnlineSession({
+      server,
+      roomCode,
+      name: query.get("name") ?? "PLAYER",
+      onWelcome: (message) => {
+        onlinePlayerId = message.playerId;
+        sessionTeam = message.team;
+        hudStore.set({ hp: 100, maxHp: 100, crates: 0, carryCap: 12 });
+      },
+      onFrame: (bytes) => {
+        if (client === null) return;
+        if (bytes[0] === 0x83) {
+          snapshotDecoder.reset();
+          interpolator.reset();
+          onlineSnapshot = false;
+        }
+        client.onServerMessage(bytes);
+        if (bytes[0] === 0x87) {
+          chunkSync.enqueueFrame(bytes);
+          chunkSync.flush(
+            renderer.camera.position.x,
+            renderer.camera.position.z,
+            (patch) => {
+              chunks?.refreshAround(patch.cx, patch.cz);
+            },
+          );
+        } else if (bytes[0] === 0x84) {
+          const frame = snapshotDecoder.decode(bytes);
+          if (frame !== null) {
+            processSnapshotEvents(frame);
+            interpolator.push(frame, performance.now());
+            onlineSnapshot = true;
+          }
+        } else if (bytes[0] === 0x85) {
+          const ack = editAck(bytes);
+          if (ack !== null) interaction?.ack(ack.seq, ack.accepted);
+        }
+      },
+      onEnd: (bytes) => {
+        showResults(bytes);
+        onlineEnded = true;
+        onlineActive = false;
+        onlineSnapshot = false;
+        online?.stop();
+        online = null;
+        screens?.show("results");
+      },
+      onFatal: () => {
+        onlineActive = false;
+        onlineSnapshot = false;
       },
     });
     screens?.show("match");
@@ -572,6 +770,7 @@ async function boot(): Promise<void> {
     hudUpdate: (patch) => hudStore.set(patch),
     hudState: () => ({ ...hudStore.get() }),
     hudStats: () => hud.stats(),
+    hudFeed: () => Array.from(hud.feedText()),
     hudToast: (text) => hud.toast(text),
     recipeRows: () => recipes,
     recipesInfo: () => recipeBook.info(),
@@ -742,6 +941,7 @@ async function boot(): Promise<void> {
         players: interpolator.playerCount,
         buddies: interpolator.buddyCount,
         decoded: snapshotDecoder.decoded,
+        tick: snapshotDecoder.latestFrame?.tick ?? 0,
         hash: lastAdvanced.hash,
         ended: lastAdvanced.ended,
         x,
@@ -749,13 +949,67 @@ async function boot(): Promise<void> {
         z,
       };
     },
-    offlineAdvance: (ticks) => offline?.advance(ticks),
+    offlineAdvance: (ticks, post = false) => offline?.advance(ticks, post),
     offlineInput: (frame) => offline?.sendInput(Uint8Array.from(frame)),
+    offlineGrant: (player, crates) => offline?.debugGrant(player, crates),
+    offlineDamageCore: (team, amount) => offline?.debugDamageCore(team, amount),
+    offlinePlaceRecipe: (team, recipe) => offline?.debugPlaceRecipe(team, recipe),
+    offlinePlaceBlocks: (team, blocks) => offline?.debugPlaceBlocks(team, blocks),
     offlineStop: () => {
       offline?.stop();
       offline = null;
       offlineActive = false;
       offlineSnapshot = false;
+    },
+    onlineStart: (roomCode, server) => {
+      startOnline(roomCode, server);
+      return true;
+    },
+    sessionEvents: () => sessionEvents.map((event) => ({ ...event })),
+    sessionTeam: () => sessionTeam,
+    onlineStats: () => {
+      const players: Array<{ id: number; x: number; y: number; z: number }> = [];
+      let x = 0;
+      let y = 0;
+      let z = 0;
+      for (let i = 0; i < interpolator.playerCount; i += 1) {
+        const id = interpolator.playerIds[i];
+        const px = interpolator.playerX[i];
+        const py = interpolator.playerY[i];
+        const pz = interpolator.playerZ[i];
+        players.push({ id, x: px, y: py, z: pz });
+        if (id === onlinePlayerId) {
+          x = px;
+          y = py;
+          z = pz;
+        }
+      }
+      return {
+        active: onlineActive,
+        state: online?.state ?? "idle",
+        playerId: onlinePlayerId,
+        snapshot: onlineSnapshot,
+        players,
+        decoded: snapshotDecoder.decoded,
+        tick: snapshotDecoder.latestFrame?.tick ?? 0,
+        rtt: online?.rttMs ?? null,
+        frames: online?.frames ?? { snapshots: 0, chunkDiffs: 0 },
+        ended: onlineEnded,
+        x,
+        y,
+        z,
+      };
+    },
+    onlineInput: (frame) => online?.sendInput(Uint8Array.from(frame)),
+    onlineHold: (frame) => {
+      onlineOverride = frame === null ? null : Uint8Array.from(frame);
+    },
+    onlineDrop: () => online?.client.simulateDrop(),
+    onlineStop: () => {
+      online?.stop();
+      online = null;
+      onlineActive = false;
+      onlineSnapshot = false;
     },
   };
   window.__cbReady = true;
@@ -772,8 +1026,12 @@ async function boot(): Promise<void> {
       offline.sendInput(frame);
       lastOfflineInput = now;
     }
+    if (onlineActive && online !== null && now - lastOnlineInput >= 66) {
+      online.sendInput(onlineOverride ?? frame);
+      lastOnlineInput = now;
+    }
     if (client !== null) {
-      client.tick(16, offlineActive ? ZERO_FRAME : frame);
+      client.tick(16, offlineActive || onlineActive ? ZERO_FRAME : frame);
       tickCalls += 1;
     }
     const seconds = Math.floor(now / 1000);
@@ -781,9 +1039,10 @@ async function boot(): Promise<void> {
     recipeBook.setElapsed(seconds);
     const cycle = seconds % 20;
     hudStore.set({
-      matchSeconds: offlineActive
-        ? Math.floor((snapshotDecoder.latestFrame?.tick ?? 0) / 20)
-        : seconds,
+      matchSeconds:
+        offlineActive || onlineActive
+          ? Math.floor((snapshotDecoder.latestFrame?.tick ?? 0) / 20)
+          : seconds,
       // Demo countdown until the airdrop stream is wired in T-045/T-048.
       dropSeconds: cycle <= 10 ? 10 - cycle : 20 - cycle,
     });
@@ -794,7 +1053,7 @@ async function boot(): Promise<void> {
           interaction.breakBlock();
         }
         if (desktop.consumeSecondary()) {
-          interaction.place(offlineActive ? 11 : 1);
+          interaction.place(offlineActive || onlineActive ? 11 : 1);
         }
       } else if (touch !== null) {
         interaction.aimFromCamera(renderer.camera);
@@ -810,13 +1069,13 @@ async function boot(): Promise<void> {
     lastJuiceAt = now;
     juice.update(now, dt);
     audio.update(dt / 1_000);
-    if (offlineActive && offlineSnapshot) {
+    if ((offlineActive || onlineActive) && (offlineSnapshot || onlineSnapshot)) {
       interpolator.sample(now);
       entities?.updateFromInterp(
         interpolator,
         renderer.quality.entityAnimation && juice.timeScale > 0,
       );
-      followOfflineCamera();
+      followSessionCamera(offlineActive ? 0 : onlinePlayerId);
     } else if (views !== null) {
       entities?.update(views, renderer.quality.entityAnimation && juice.timeScale > 0);
     }
@@ -830,9 +1089,9 @@ async function boot(): Promise<void> {
     window.requestAnimationFrame(loop);
   };
 
-  function followOfflineCamera(): void {
+  function followSessionCamera(playerId: number): void {
     for (let i = 0; i < interpolator.playerCount; i += 1) {
-      if (interpolator.playerIds[i] !== 0) continue;
+      if (interpolator.playerIds[i] !== playerId) continue;
       const yaw = interpolator.playerYaw[i];
       const x = interpolator.playerX[i];
       const y = interpolator.playerY[i];

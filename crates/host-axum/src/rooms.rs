@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use protocol::{
-    event_kind, FixedBytes, Input, RoomConfig, S2c, SnapshotEvent, Start, Welcome, INPUT_FRAMES,
-    TOKEN_LEN,
+    end_reason, error_code, event_kind, End, ErrorMsg, FixedBytes, Input, RoomConfig, S2c,
+    SnapshotEvent, Start, Welcome, INPUT_FRAMES, TOKEN_LEN,
 };
 use room::{snapshot::SnapshotEncoder, Match, MatchEvent};
 use sim::{Mode, PlayerId, RoomSetup, Tick};
@@ -21,14 +21,20 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::telemetry;
 
-/// The one human seat a browser connection drives. Bots occupy the rest.
+/// Human seats a room accepts. The rest are bots.
+pub const HUMAN_SEATS: u8 = 2;
+/// The first human seat, kept as a name for tests and offline parity.
 pub const HUMAN_ID: PlayerId = PlayerId(0);
+/// Total players in a hosted FFA room.
+pub const ROOM_PLAYERS: u8 = 6;
 /// Deterministic development seed. The client regenerates the same terrain.
 pub const ROOM_SEED: u64 = 0x00c0_ffee;
 /// Tick duration (§6.2).
 pub const TICK_MS: u64 = 50;
 /// Seconds a room's summary stays meaningful; the host writes on shutdown.
 const ROOM_COMMAND_CAPACITY: usize = 64;
+/// An empty room is kept this long before its task is stopped (§6.10).
+const EMPTY_ROOM_GRACE: Duration = Duration::from_secs(60);
 
 /// Commands accepted by a room task.
 pub enum RoomCommand {
@@ -39,10 +45,39 @@ pub enum RoomCommand {
         /// Encoded server frames for this connection.
         to_client: mpsc::Sender<Vec<u8>>,
     },
-    /// A `C_INPUT` packet from the human seat.
-    Input(Input),
-    /// A validated `C_EDIT` from the human seat.
-    Edit(protocol::Edit),
+    /// A `C_INPUT` packet from one connection.
+    Input {
+        /// Connection id from `Join`.
+        id: u64,
+        /// Input packet.
+        packet: Input,
+    },
+    /// A validated `C_EDIT` from one connection.
+    Edit {
+        /// Connection id from `Join`.
+        id: u64,
+        /// Edit request.
+        edit: protocol::Edit,
+    },
+    /// Harness: put crates in a player's hands.
+    DebugGrant {
+        /// Target seat.
+        player: PlayerId,
+        /// Crates to add.
+        crates: u32,
+    },
+    /// Harness: damage a core outside combat.
+    DebugDamage {
+        /// Target team.
+        team: sim::TeamId,
+        /// Raw damage before the core multiplier.
+        amount: i32,
+    },
+    /// Harness: place one crate on a pad and broadcast its diff.
+    DebugPlace {
+        /// Target team.
+        team: sim::TeamId,
+    },
     /// Remove a connection.
     Leave {
         /// Connection id from `Join`.
@@ -54,6 +89,7 @@ pub enum RoomCommand {
 
 struct Client {
     id: u64,
+    seat: PlayerId,
     tx: mpsc::Sender<Vec<u8>>,
     encoder: SnapshotEncoder,
     acked: u16,
@@ -129,15 +165,25 @@ async fn run_room(code: String, mut commands: mpsc::Receiver<RoomCommand>, hub: 
     let setup = RoomSetup {
         mode: Mode::Ffa,
         teams: None,
-        humans: 1,
-        bots: 5,
+        humans: HUMAN_SEATS,
+        bots: ROOM_PLAYERS - HUMAN_SEATS,
     };
-    let mut game = Match::new(ROOM_SEED, setup).expect("1 human + 5 bots is a legal FFA room");
-    for id in 1..=5u8 {
+    let mut game =
+        Match::new(ROOM_SEED, setup).expect("two humans + four bots is a legal FFA room");
+    for id in HUMAN_SEATS..ROOM_PLAYERS {
         game.add_bot(PlayerId(id));
     }
+    if std::env::var("CB_E2E").ok().as_deref() == Some("1") {
+        // Accelerated tests put both humans on the first pad so each client is
+        // inside the other's interest radius immediately.
+        let height = game.world().surface_height(72, 59);
+        game.set_spawn(PlayerId(0), sim::Vec3::from_ints(72, height + 1, 59));
+        game.set_spawn(PlayerId(1), sim::Vec3::from_ints(74, height + 1, 59));
+    }
     let mut clients: Vec<Client> = Vec::new();
-    let mut human: Option<sim::InputFrame> = None;
+    let mut human: [Option<sim::InputFrame>; HUMAN_SEATS as usize] = std::array::from_fn(|_| None);
+    let mut end_sent = false;
+    let mut empty_since = Some(Instant::now());
     let mut metric_ticks = 0u32;
     let mut metric_us = 0u128;
     let mut metric_max_us = 0u128;
@@ -150,13 +196,24 @@ async fn run_room(code: String, mut commands: mpsc::Receiver<RoomCommand>, hub: 
             command = commands.recv() => {
                 match command {
                     Some(RoomCommand::Join { id, to_client }) => {
+                        let Some(seat) = (0..HUMAN_SEATS)
+                            .map(PlayerId)
+                            .find(|candidate| !clients.iter().any(|client| client.seat == *candidate))
+                        else {
+                            let error = S2c::Error(ErrorMsg {
+                                code: error_code::ROOM_FULL,
+                                detail: FixedBytes::from_str_lossy("room is full"),
+                            });
+                            let _ = to_client.try_send(error.encode());
+                            continue;
+                        };
                         let welcome = S2c::Welcome(Welcome {
-                            player_id: HUMAN_ID.0,
-                            team: 0,
+                            player_id: seat.0,
+                            team: seat.0,
                             seed: ROOM_SEED as u32,
                             config: RoomConfig {
                                 mode: protocol::room_mode::FFA,
-                                teams: 6,
+                                teams: ROOM_PLAYERS,
                                 per_team: 1,
                                 buddy_cap: 5,
                                 target_minutes: 20,
@@ -172,35 +229,69 @@ async fn run_room(code: String, mut commands: mpsc::Receiver<RoomCommand>, hub: 
                             let _ = to_client.try_send(start.encode());
                             clients.push(Client {
                                 id,
+                                seat,
                                 tx: to_client,
-                                encoder: SnapshotEncoder::new(HUMAN_ID),
+                                encoder: SnapshotEncoder::new(seat),
                                 acked: 0,
                             });
+                            empty_since = None;
                         }
                     }
-                    Some(RoomCommand::Input(packet)) => {
-                        for client in &mut clients {
-                            client.acked = packet.acked_seq;
-                        }
+                    Some(RoomCommand::Input { id, packet }) => {
+                        let Some(client) = clients.iter_mut().find(|client| client.id == id) else {
+                            continue;
+                        };
+                        client.acked = packet.acked_seq;
                         let last = packet.frames[INPUT_FRAMES - 1];
-                        human = Some(last.to_sim(Tick(packet.first_tick.0 + 2)));
+                        human[client.seat.0 as usize] =
+                            Some(last.to_sim(Tick(packet.first_tick.0 + 2)));
                     }
-                    Some(RoomCommand::Edit(edit)) => {
-                        let result = game.submit_edit(HUMAN_ID, &edit);
+                    Some(RoomCommand::Edit { id, edit }) => {
+                        let Some(seat) = clients
+                            .iter()
+                            .find(|client| client.id == id)
+                            .map(|client| client.seat)
+                        else {
+                            continue;
+                        };
+                        let result = game.submit_edit(seat, &edit);
                         let ack = S2c::EditAck(protocol::EditAck {
                             seq: result.seq,
                             accepted: result.accepted,
                             reason: result.reason,
                         });
-                        broadcast(&mut clients, ack.encode());
+                        let encoded = ack.encode();
+                        if let Some(client) = clients.iter_mut().find(|client| client.id == id) {
+                            let _ = client.tx.try_send(encoded);
+                        }
                         if result.accepted {
                             for diff in game.take_diffs() {
                                 broadcast(&mut clients, S2c::ChunkDiff(diff).encode());
                             }
                         }
                     }
+                    Some(RoomCommand::DebugGrant { player, crates }) => {
+                        game.grant_crates(player, crates);
+                    }
+                    Some(RoomCommand::DebugDamage { team, amount }) => {
+                        game.damage_core(team, amount);
+                    }
+                    Some(RoomCommand::DebugPlace { team }) => {
+                        if game.debug_place_crate(team).is_some() {
+                            for diff in game.take_diffs() {
+                                broadcast(&mut clients, S2c::ChunkDiff(diff).encode());
+                            }
+                        }
+                    }
                     Some(RoomCommand::Leave { id }) => {
-                        clients.retain(|client| client.id != id);
+                        if let Some(index) = clients.iter().position(|client| client.id == id) {
+                            let seat = clients[index].seat;
+                            clients.remove(index);
+                            human[seat.0 as usize] = None;
+                        }
+                        if clients.is_empty() {
+                            empty_since = Some(Instant::now());
+                        }
                     }
                     Some(RoomCommand::Shutdown(ack)) => {
                         persist(&code, &game, &hub.summaries);
@@ -215,10 +306,32 @@ async fn run_room(code: String, mut commands: mpsc::Receiver<RoomCommand>, hub: 
             }
             _ = interval.tick() => {
                 let tick_begin = Instant::now();
-                let frames = human.take().map(|frame| vec![(HUMAN_ID, frame)]).unwrap_or_default();
+                let frames: Vec<(PlayerId, sim::InputFrame)> = human
+                    .iter_mut()
+                    .enumerate()
+                    .filter_map(|(index, slot)| {
+                        slot.take().map(|frame| (PlayerId(index as u8), frame))
+                    })
+                    .collect();
                 game.tick(&frames);
                 let events = snapshot_events(game.events());
                 let now = game.now();
+                if game.is_over() && !end_sent {
+                    let outcome = game.outcome();
+                    let reason = match outcome.reason() {
+                        Some(sim::EndReason::LastTeamStanding) => end_reason::CORE_DESTROYED,
+                        Some(sim::EndReason::Draw) => end_reason::DRAW,
+                        Some(sim::EndReason::NoHumans) => end_reason::NO_HUMANS,
+                        None => end_reason::CORE_DESTROYED,
+                    };
+                    let end = S2c::End(End {
+                        winner_team: outcome.winner().map(|team| team.0 as i8).unwrap_or(-1),
+                        reason,
+                        stats: Vec::new(),
+                    });
+                    broadcast(&mut clients, end.encode());
+                    end_sent = true;
+                }
                 let mut alive = Vec::with_capacity(clients.len());
                 let mut tick_bytes = 0usize;
                 for mut client in clients.drain(..) {
@@ -231,6 +344,18 @@ async fn run_room(code: String, mut commands: mpsc::Receiver<RoomCommand>, hub: 
                     }
                 }
                 clients = alive;
+                if clients.is_empty() {
+                    if let Some(since) = empty_since {
+                        if since.elapsed() >= EMPTY_ROOM_GRACE {
+                            persist(&code, &game, &hub.summaries);
+                            break;
+                        }
+                    } else {
+                        empty_since = Some(Instant::now());
+                    }
+                } else {
+                    empty_since = None;
+                }
                 let elapsed = tick_begin.elapsed().as_micros();
                 metric_ticks += 1;
                 metric_us += elapsed;
@@ -306,6 +431,12 @@ fn snapshot_events(events: &[MatchEvent]) -> Vec<SnapshotEvent> {
                 a: i32::from(team.0),
                 b: i32::from(recipe.0),
                 c: i32::from(buddy.is_some()),
+            },
+            MatchEvent::CraftBlocked { team, recipe } => SnapshotEvent {
+                kind: event_kind::CRAFT_BLOCKED,
+                a: i32::from(team.0),
+                b: i32::from(recipe.0),
+                c: 0,
             },
             MatchEvent::CoreHit { team, amount, by } => SnapshotEvent {
                 kind: event_kind::BASE_HIT,

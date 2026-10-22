@@ -187,8 +187,26 @@ export function decodeHello(bytes: Uint8Array): HelloFields {
   return { protocol: protocol.value, name, roomCode, token };
 }
 
-export function decodeS2c(data: ArrayBuffer | Uint8Array): ServerMessage {
-  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+/** Sequence number from an `S_SNAPSHOT` frame: tag, tick varint, seq varint. */
+export function snapshotSeq(bytes: Uint8Array): number | null {
+  let at = 1;
+  const skip = (): number | null => {
+    let value = 0;
+    let shift = 0;
+    for (;;) {
+      if (at >= bytes.length || shift > 35) return null;
+      const byte = bytes[at];
+      at += 1;
+      value += (byte & 0x7f) * 2 ** shift;
+      if ((byte & 0x80) === 0) return value >>> 0;
+      shift += 7;
+    }
+  };
+  if (skip() === null) return null;
+  return skip();
+}
+
+export function decodeS2c(data: ArrayBuffer | Uint8Array): ServerMessage {  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
   if (bytes.length === 0) {
     throw new Error("empty frame");
   }
@@ -479,6 +497,11 @@ export class NetClient {
     if (this.transport === null || this.stateValue !== "open") return false;
     this.transport.send(bytes);
     return true;
+  }
+
+  /** Test hook: drop the socket like a network failure, keeping reconnect on. */
+  simulateDrop(): void {
+    this.transport?.close(4001, "simulated drop");
   }
 
   destroy(): void {

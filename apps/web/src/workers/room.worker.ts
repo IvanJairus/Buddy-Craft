@@ -25,6 +25,7 @@ interface WorkerMessage {
 interface WorkerAdvance {
   type: "advance";
   ticks: number;
+  post?: boolean;
 }
 
 interface WorkerClose {
@@ -79,6 +80,10 @@ scope.onmessage = (event: MessageEvent<Incoming>): void => {
         const view = new Uint8Array(wasm.memory.buffer, outPtr, written);
         if (view[0] === 0x89) ended = true;
         final = written;
+        if (message.post) {
+          const copy = view.slice();
+          scope.postMessage({ type: "frame", bytes: copy.buffer }, [copy.buffer]);
+        }
       }
     }
     scope.postMessage({

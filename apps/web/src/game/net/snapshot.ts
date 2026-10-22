@@ -49,6 +49,11 @@ export interface SnapshotFrame {
   readonly buddyY: Int32Array;
   readonly buddyZ: Int32Array;
   readonly buddyHp: Uint8Array;
+  eventCount: number;
+  readonly eventKind: Uint8Array;
+  readonly eventA: Int32Array;
+  readonly eventB: Int32Array;
+  readonly eventC: Int32Array;
 }
 
 function fail(reason: string): never {
@@ -114,6 +119,11 @@ function frameOf(): SnapshotFrame {
     buddyY: new Int32Array(MAX_SNAPSHOT_BUDDIES),
     buddyZ: new Int32Array(MAX_SNAPSHOT_BUDDIES),
     buddyHp: new Uint8Array(MAX_SNAPSHOT_BUDDIES),
+    eventCount: 0,
+    eventKind: new Uint8Array(MAX_SNAPSHOT_EVENTS),
+    eventA: new Int32Array(MAX_SNAPSHOT_EVENTS),
+    eventB: new Int32Array(MAX_SNAPSHOT_EVENTS),
+    eventC: new Int32Array(MAX_SNAPSHOT_EVENTS),
   };
 }
 
@@ -294,9 +304,12 @@ export class SnapshotDecoder {
     const eventCount = reader.varint();
     if (eventCount > MAX_SNAPSHOT_EVENTS) fail("too many events");
     for (let i = 0; i < eventCount; i += 1) {
-      reader.u8();
-      for (let j = 0; j < 3; j += 1) reader.signed();
+      target.eventKind[i] = reader.u8();
+      target.eventA[i] = reader.signed();
+      target.eventB[i] = reader.signed();
+      target.eventC[i] = reader.signed();
     }
+    target.eventCount = eventCount;
     if (reader.at !== bytes.length) fail(`${bytes.length - reader.at} trailing bytes`);
 
     target.seq = seq;

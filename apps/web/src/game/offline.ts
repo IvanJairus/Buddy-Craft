@@ -6,7 +6,7 @@
  * offline is a transport substitution, not a second game loop.
  */
 
-import { NetClient, encodeEdit, encodeInput } from "./net/client";
+import { NetClient, encodeEdit, encodeInput, snapshotSeq } from "./net/client";
 import type { Transport, TransportState, CloseInfo } from "./net/transport";
 
 export interface OfflineOptions {
@@ -14,7 +14,7 @@ export interface OfflineOptions {
   mode: number;
   teams: number;
   onFrame: (bytes: Uint8Array) => void;
-  onEnd: () => void;
+  onEnd: (bytes: Uint8Array) => void;
   onWelcome?: () => void;
   onAdvanced?: (ended: boolean, hash: number) => void;
 }
@@ -80,8 +80,8 @@ class WorkerTransport implements Transport {
     this.worker.postMessage({ type: "message", bytes: message });
   }
 
-  advance(ticks: number): void {
-    this.worker?.postMessage({ type: "advance", ticks });
+  advance(ticks: number, post = false): void {
+    this.worker?.postMessage({ type: "advance", ticks, post });
   }
 
   close(_code = 1000, _reason = ""): void {
@@ -123,7 +123,7 @@ export class OfflineSession {
           if (parsed !== null) this.acked = parsed;
         }
         options.onFrame(bytes);
-        if (bytes[0] === 0x89) options.onEnd();
+        if (bytes[0] === 0x89) options.onEnd(bytes);
       },
     });
     this.client.connect();
@@ -164,31 +164,45 @@ export class OfflineSession {
     return seq;
   }
 
-  advance(ticks: number): void {
-    this.transport.advance(ticks);
+  advance(ticks: number, post = false): void {
+    this.transport.advance(ticks, post);
+  }
+
+  debugGrant(player: number, crates: number): void {
+    this.debug([0xf0, 1, player, crates & 0xff, (crates >> 8) & 0xff]);
+  }
+
+  debugDamageCore(team: number, amount: number): void {
+    const value = amount >>> 0;
+    this.debug([
+      0xf0,
+      2,
+      team,
+      value & 0xff,
+      (value >>> 8) & 0xff,
+      (value >>> 16) & 0xff,
+      (value >>> 24) & 0xff,
+    ]);
+  }
+
+  debugPlaceRecipe(team: number, recipe: number): void {
+    this.debug([0xf0, 3, team, recipe & 0xff, (recipe >> 8) & 0xff]);
+  }
+
+  debugPlaceBlocks(team: number, blocks: ReadonlyArray<readonly [number, number, number]>): void {
+    if (blocks.length === 0 || blocks.length > 32) return;
+    const bytes = [0xf0, 4, team, blocks.length];
+    for (const [x, y, z] of blocks) bytes.push(x & 0xff, y & 0xff, z & 0xff);
+    this.debug(bytes);
+  }
+
+  private debug(bytes: number[]): void {
+    if (this.state === "open") {
+      this.client.sendRaw(Uint8Array.from(bytes));
+    }
   }
 
   stop(): void {
     this.client.destroy();
   }
-}
-
-function snapshotSeq(bytes: Uint8Array): number | null {
-  // tag, tick varint, seq varint
-  let at = 1;
-  const skip = (): number | null => {
-    let value = 0;
-    let shift = 0;
-    for (;;) {
-      if (at >= bytes.length || shift > 35) return null;
-      const byte = bytes[at];
-      at += 1;
-      value += (byte & 0x7f) * 2 ** shift;
-      if ((byte & 0x80) === 0) return value >>> 0;
-      shift += 7;
-    }
-  };
-  if (skip() === null) return null;
-  const seq = skip();
-  return seq === null ? null : seq;
 }

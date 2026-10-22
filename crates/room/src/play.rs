@@ -101,6 +101,13 @@ pub enum MatchEvent {
         /// The buddy it spawned, when the recipe makes one.
         buddy: Option<BuddyKind>,
     },
+    /// A recipe matched but the cap vetoed it. Nothing was consumed.
+    CraftBlocked {
+        /// Whose pad.
+        team: TeamId,
+        /// Which recipe.
+        recipe: RecipeId,
+    },
     /// A player hit a core.
     CoreHit {
         /// The core's team.
@@ -138,6 +145,7 @@ pub struct Match {
     next_buddy: u32,
     seen_eliminated: [bool; MAX_TEAMS],
     events: Vec<MatchEvent>,
+    pending_events: Vec<MatchEvent>,
 }
 
 impl Match {
@@ -195,6 +203,7 @@ impl Match {
             next_buddy: MAX_PLAYERS as u32,
             seen_eliminated: [false; MAX_TEAMS],
             events: Vec::new(),
+            pending_events: Vec::new(),
         })
     }
 
@@ -281,6 +290,7 @@ impl Match {
     /// produced inside.
     pub fn tick(&mut self, human: &[(PlayerId, InputFrame)]) -> Outcome {
         self.events.clear();
+        self.events.append(&mut self.pending_events);
         if self.state.is_over() {
             return self.state.outcome();
         }
@@ -345,6 +355,126 @@ impl Match {
     /// single line that mutates the world and the pad together. A refused
     /// placement refunds the crate, so an illegal click costs nothing but the
     /// round trip.
+    /// Harness hook: move one body and set its respawn point.
+    ///
+    /// Only scripts and tests use this. The host keeps normal spawns unless it
+    /// explicitly opts into an accelerated end-to-end room.
+    pub fn set_spawn(&mut self, player: PlayerId, pos: Vec3) -> bool {
+        self.state.set_spawn(player, pos)
+    }
+
+    /// Harness hook: put crates in a player's hands without an airdrop.
+    ///
+    /// This is for accelerated E2E setup, not a game rule. The economy audit
+    /// will not balance after this call, which is the point: the test is about
+    /// the edit/craft/UI path, not about drop pacing.
+    pub fn grant_crates(&mut self, player: PlayerId, count: u32) {
+        self.airdrops.grant(player, count);
+        self.pending_events
+            .push(MatchEvent::Picked { player, count });
+    }
+
+    /// Harness hook: place one crate on a team's pad and queue its diff.
+    ///
+    /// Picks the first free, unblocked pad cell. Returns the world cell so a
+    /// caller can assert where the edit landed.
+    pub fn debug_place_crate(&mut self, team: TeamId) -> Option<[i32; 3]> {
+        let origin = self.state.pads().get(team)?.origin();
+        let pad = self.state.pads().get(team)?;
+        let mut chosen = None;
+        for y in 0..world::gen::PAD_SIZE {
+            for z in 0..world::gen::PAD_SIZE {
+                for x in 0..world::gen::PAD_SIZE {
+                    let local = [x, y, z];
+                    if !pad.get(local) && !pad.is_blocked(local) {
+                        chosen = Some(local);
+                        break;
+                    }
+                }
+                if chosen.is_some() {
+                    break;
+                }
+            }
+            if chosen.is_some() {
+                break;
+            }
+        }
+        let local = chosen?;
+        self.state.pads_mut().get_mut(team)?.set(local, true);
+        let world = [
+            origin[0] + local[0],
+            origin[1] + local[1],
+            origin[2] + local[2],
+        ];
+        self.world
+            .set_block(world[0], world[1], world[2], world::block::CRATE);
+        Some(world)
+    }
+
+    /// Harness hook: place an authored recipe on a team's pad.
+    ///
+    /// Tries translations that stay inside the pad and avoid the core's
+    /// blocked cells. The next tick still runs the ordinary crafting pass, so
+    /// this only skips the crate-walking part of an E2E setup.
+    pub fn debug_place_recipe(&mut self, team: TeamId, recipe: RecipeId) -> bool {
+        let Some(recipe) = RecipeBook::embedded().get(recipe) else {
+            return false;
+        };
+        self.debug_place_blocks(team, &recipe.blocks)
+    }
+
+    /// Harness hook: place arbitrary pad-local blocks, translated to fit.
+    pub fn debug_place_blocks(&mut self, team: TeamId, blocks: &[[i32; 3]]) -> bool {
+        if blocks.is_empty() {
+            return false;
+        }
+        let max_x = blocks.iter().map(|b| b[0]).max().unwrap_or(0);
+        let max_z = blocks.iter().map(|b| b[2]).max().unwrap_or(0);
+        let Some(origin) = self.state.pads().get(team).map(|pad| pad.origin()) else {
+            return false;
+        };
+        for dz in 0..=(PAD_SIZE - 1 - max_z) {
+            for dx in 0..=(PAD_SIZE - 1 - max_x) {
+                let translated: Vec<[i32; 3]> = blocks
+                    .iter()
+                    .map(|b| [b[0] + dx, b[1], b[2] + dz])
+                    .collect();
+                let pad = self.state.pads().get(team).expect("pad checked above");
+                if !translated
+                    .iter()
+                    .all(|b| sim::pad::Pad::in_bounds(*b) && !pad.get(*b) && !pad.is_blocked(*b))
+                {
+                    continue;
+                }
+                let pad = self
+                    .state
+                    .pads_mut()
+                    .get_mut(team)
+                    .expect("pad checked above");
+                for b in &translated {
+                    pad.set(*b, true);
+                }
+                let player = self
+                    .state
+                    .players()
+                    .iter()
+                    .find(|slot| slot.team == team && slot.is_live_human())
+                    .map(|slot| slot.id);
+                for b in &translated {
+                    let cell = [origin[0] + b[0], origin[1] + b[1], origin[2] + b[2]];
+                    self.world
+                        .set_block(cell[0], cell[1], cell[2], world::block::CRATE);
+                    if let Some(player) = player {
+                        self.pending_events
+                            .push(MatchEvent::Deposited { player, cell });
+                    }
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn submit_edit(&mut self, player: PlayerId, message: &Edit) -> EditResult {
         let refuse = |reason: u8| EditResult {
             seq: message.seq,
@@ -593,8 +723,15 @@ impl Match {
             let Some(outcome) = self.state.craft(team, self.now) else {
                 continue;
             };
-            let CraftOutcome::Crafted(craft) = outcome else {
-                continue;
+            let craft = match outcome {
+                CraftOutcome::Crafted(craft) => craft,
+                CraftOutcome::Blocked(craft) => {
+                    self.events.push(MatchEvent::CraftBlocked {
+                        team,
+                        recipe: craft.recipe,
+                    });
+                    continue;
+                }
             };
             let Some(recipe) = RecipeBook::embedded().get(craft.recipe) else {
                 continue;

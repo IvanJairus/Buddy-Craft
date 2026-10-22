@@ -300,6 +300,16 @@ impl Airdrops {
     }
 
     /// Crates a player is carrying.
+    /// Harness hook: add carried crates without a drop.
+    ///
+    /// Used by accelerated E2E setup. It intentionally does not touch the
+    /// audit counters, because there is no source drop to book it against.
+    pub fn grant(&mut self, player: PlayerId, crates: u32) {
+        if let Some(carried) = self.carried.get_mut(player.0 as usize) {
+            *carried = carried.saturating_add(crates);
+        }
+    }
+
     pub fn carried(&self, player: PlayerId) -> u32 {
         self.carried.get(player.0 as usize).copied().unwrap_or(0)
     }

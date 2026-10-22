@@ -124,6 +124,7 @@ apps/
   web/scripts/             wasm bridge build step (M2)
   web/public/assets/       generated block atlas and GLB models (T-051)
   web/tests/               Playwright specs for the browser contract (M2)
+  web/tests/e2e/           ten L5 specs on four browser projects (T-054)
 data/
   tuning.ron    every designer-facing number, single source of truth
   buddies.ron   the six buddy roles, one row each, validated at load
@@ -163,7 +164,7 @@ Open the printed URL, choose OFFLINE, and the bot-filled Worker match starts.
 The rest of the commands below are for development, the network host and gates.
 
 ```bash
-cargo test --workspace --all-targets              # 496 Rust tests
+cargo test --workspace --all-targets              # 497 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
@@ -252,7 +253,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-051 | art atlas and GLB models | done at the asset boundary: 24-tile atlas, 9 GLB models; renderer still boxes |
 | T-052 | content pass and recipe editor | done: 14 recipes, 6 buddies, grid editor with duplicate guard |
 | T-053 | 20-room bot swarm: p99 0.455 ms, 27 MB RSS, 240-player Oracle estimate | done |
-| T-054 | cross-browser two-client E2E suite | not started: needs T-048 |
+| T-054 | cross-browser two-client E2E suite | done: 10 specs x 4 browser projects, 67 s locally |
 | T-055 | perf gates: size, frame p95, wasm tick, first playable, juice, draw calls | done |
 | T-056 | telemetry: JSON host logs, room metrics, crash endpoint, kill switches, runbook | partial: worker/Sentry ingest not configured |
 | T-057 | Vercel/Cloudflare deployment pipelines | not started: live deploy not authorized |
@@ -1433,7 +1434,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 658.5 KB raw and 167.9 KB gzipped,
+device deterministically. The JS bundle is 663.7 KB raw and 169.4 KB gzipped,
 under §8.10's 450 KB gzip target; the offline worker adds a 2.9 KB module. The
 wasm asset is measured in the chunk section below.
 
@@ -1452,7 +1453,7 @@ budget when they want a steady state without waiting.
 | Triangles | 104,862 (gate 350k) |
 | 200 load/unload cycles | 34 KB heap growth after GC (gate 5 MB) |
 | 64 MB `memory.grow` | views rebuilt, geometry unchanged, new meshes still work |
-| wasm asset | 604.1 KB raw, 197.8 KB gzipped (target 700 KB) |
+| wasm asset | 608.4 KB raw, 198.7 KB gzipped (target 700 KB) |
 
 The mesher is neighbour-aware: each column is meshed with the four columns
 around it, so interior chunk borders do not draw walls. The payload is a
@@ -1695,7 +1696,7 @@ unlock clock.
 | Near-miss parity | 500 random clusters; every predicted completion matched the matcher |
 | Banner | `SWORD: needs 1 more crate` |
 | Ghost | one `InstancedMesh`, count = recipe cost |
-| wasm asset | 604.1 KB raw, 197.8 KB gzipped |
+| wasm asset | 608.4 KB raw, 198.7 KB gzipped |
 
 `cb_near_miss` runs the Rust canonicaliser over rotations and translations and
 returns `recipe_id << 8 | missing`. Rust maps the missing blocks back into the
@@ -1967,10 +1968,13 @@ allowed for CLI clients. A room is created lazily on its first connection; one
 snapshots cannot race. A connection gets its own bounded send queue and snapshot
 encoder, and a full queue drops frames rather than stalling the room.
 
-The human connection drives seat 0; bots fill seats 1 to 5. Input allows the
-existing §6.2 ack to reach the snapshot encoder, edits go through
+Two connections drive the two human seats; bots fill seats 2 to 5. Each
+connection has its own seat, snapshot encoder and edit acknowledgements, so two
+browsers can share a room without controlling the same body. Input allows the
+existing §6.2 ack to reach that client's encoder, edits go through
 `Match::submit_edit` and broadcast `S_CHUNK_DIFF`, and snapshot events are mapped
 to the T-044 vocabulary. Each tick sends a per-client delta snapshot at 20 Hz.
+An empty room is stopped after 60 s, matching the lifecycle grace period.
 
 `/healthz` returns `{"status":"ok","rooms":N,"uptime_s":S}`. SIGINT and SIGTERM
 drain every room, write a JSON summary under `target/room-summaries/<code>.json`
@@ -1984,8 +1988,10 @@ start runs it with `--release`. The debug suite still has a real TCP test for
 `/healthz`, a real WebSocket upgrade that receives `S_WELCOME`, and a foreign
 Origin rejected with 403.
 
-The browser does not connect yet. Start still enters the demo match, and every
-WebSocket client shares the single human seat. Offline play is now available; the online lobby path is still T-057/T-058.
+The lobby now starts a real online session through `OnlineSession`; the browser
+registers the host URL as `ws://127.0.0.1:8080` by default and accepts a
+`?server=` override for the E2E host. Offline and online share the same
+`NetClient`, snapshot decoder and chunk stream.
 
 ## Offline: the room runs in a Worker
 
@@ -2007,10 +2013,45 @@ The specs prove the player moves while `context.setOffline(true)` is active,
 both modes start, and the full bot match reaches results. `offline_and_online_share_rules`
 compares the offline state hash with a native match ticked by the same input.
 
-Not yet covered: a mode selector in the menu (Teams is the default), and a
-scripted human mine-craft-buddy-core walkthrough. Bots perform the craft and
-core loop in the full-match test; the human can move, break, place and follow
-the same wire path.
+Not yet covered: a mode selector in the menu (Teams is the default), and an
+unaided human mine-craft-buddy-core walkthrough. T-054's accelerated harness
+does exercise the pickup, deposit and craft events through the real room and
+HUD; the T-060 balance pass is where unaided human runs are measured.
+
+## E2E: ten specs, four browser engines
+
+T-054 adds ten L5 specs under `apps/web/tests/e2e`: boot, offline match,
+recipe-negative, buddy-cap, base-destroy, touch-controls, reconnect,
+two-client, airdrop and bot-win. The same ten run on Chromium, Firefox, WebKit
+and a 430 x 900 mobile Chromium viewport, 40 tests in total.
+
+One `host-axum` process serves the whole suite through a global fixture. It
+runs the normal binary with `CB_E2E=1`, which enables two human seats, a shared
+spawn point for movement checks, and a `/debug/command` endpoint used only to
+grant crates, damage a core, or place a crate for the replication check. The
+offline specs use an `0xF0` admin frame inside the local Worker for the same
+kind of setup. Neither path exists on a normal host or in the wire protocol.
+
+| Check | Measured |
+| --- | --- |
+| Browser projects | Chromium, Firefox, WebKit, mobile Chromium |
+| Specs | 10 per project, 40 total |
+| Local wall time | 67 s |
+| CI gate | suite step fails above 360 s |
+| Boot bound | under 3 s; Chromium also throttled to 8 Mbps / 150 ms |
+| Two-client | two contexts, one room, movement and chunk diff replicate |
+| Reconnect | socket drop, automatic reconnect, same seat, no duplicate |
+
+The first full run caught two real issues: buddy keyframes set `presence::ALL`
+even though a buddy has no yaw, flags or animation fields, and host rooms kept
+ticking after the last client left. The keyframe now sends `POS | HP` and has a
+unit assertion; an empty room stops after 60 s. The suite also found that a
+single `onlineInput` frame can be overwritten by the next idle render frame, so
+the test hook uses a sustained `onlineHold` override instead.
+
+The remaining L5 caveat is the same as §12.7: headless WebGL is SwiftShader, not
+a phone GPU, and the accelerated setup is not a substitute for T-060's human
+playtest.
 
 ## Swarm: 20 rooms on one core
 
@@ -2063,14 +2104,16 @@ The batch reached T-061 only partially. T-048 is now playable and T-049 has a
 real graph and 30 procedural cues, but no recorded OGG assets and no WebKit/iOS
 run. T-047's registry policy and Crockford codes are native-tested, but its
 HTTP/DO surface is blocked behind T-046. T-059 and T-061 are complete locally.
-T-046 and T-057 need a live Cloudflare/Vercel deployment, T-054 needs the online
-host path plus Firefox/WebKit, and T-062/T-063/T-064 need physical devices, six
-humans on production and a week of telemetry. Those are not marked done.
+T-046 and T-057 need a live Cloudflare/Vercel deployment, T-060 needs the
+balance instrumentation and ten bot-vs-bot reports, and T-062/T-063/T-064 need
+physical devices, six humans on production and a week of telemetry. Those are
+not marked done.
 
-The current gates are 496 Rust tests, 96 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
+The current gates are 497 Rust tests, 136 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
 20 wasm exports. T-050 has the 15 named threat tests, but `tools/cheat-client`
 and host wiring for the new connection/token guards are still missing. The last full-browser run is Chromium plus the headed pointer
-lock project; Firefox and WebKit are not installed on this machine.
+lock project; Firefox and WebKit are now installed through Playwright and the
+T-054 suite runs on both.
 
 ## Content discrepancies, resolved rather than guessed
 

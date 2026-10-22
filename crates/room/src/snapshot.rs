@@ -489,7 +489,7 @@ fn buddy_entry(row: &SentBuddy, base: Option<&SentBuddy>, full: bool) -> Snapsho
         }
         _ => SnapshotBuddy {
             id: row.id,
-            presence: presence::ALL,
+            presence: presence::POS | presence::HP,
             x: row.x,
             y: row.y,
             z: row.z,
@@ -817,5 +817,10 @@ mod tests {
         let snapshot = decode(&encoded);
         assert_eq!(snapshot.buddies.len(), 1);
         assert_eq!(snapshot.buddies[0].id, 1);
+        assert_eq!(
+            snapshot.buddies[0].presence,
+            presence::POS | presence::HP,
+            "a buddy has no yaw, flags or animation fields to send"
+        );
     }
 }
