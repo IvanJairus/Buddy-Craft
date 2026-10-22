@@ -412,6 +412,18 @@ impl Airdrops {
             return None;
         }
         let centre = centre_of(&self.sites);
+        // The opening drop is the one the 60-90 s first-buddy target depends
+        // on. Weighted selection still sends it to the edges on some seeds, so
+        // the first drop takes the candidate closest to the centre; later
+        // drops keep the §4.4.2 weighting.
+        if self.drops_made == 0 && self.last_site.is_none() {
+            return self
+                .sites
+                .iter()
+                .enumerate()
+                .min_by_key(|(index, site)| (metres_between(centre, **site), *index))
+                .map(|(index, _)| index);
+        }
         let mut max_dist = 1i32;
         let mut weights = Vec::with_capacity(self.sites.len());
         for (index, site) in self.sites.iter().enumerate() {
@@ -909,15 +921,18 @@ mod tests {
         // Regenerate deliberately, never to make a red test green: the client
         // draws its telegraph from the same seed, and a silent change here is a
         // marker in the wrong place for every player at once.
+        // Regenerated deliberately for T-060: the first drop now takes the
+        // candidate closest to the centre without consuming an RNG draw, so
+        // every later pick in this vector also moved.
         const GOLDEN: [[i32; 3]; 8] = [
-            [128, 40, 64],
-            [192, 40, 128],
             [88, 40, 128],
-            [128, 40, 64],
-            [128, 40, 76],
-            [192, 40, 128],
             [168, 40, 168],
-            [128, 40, 88],
+            [128, 40, 76],
+            [168, 40, 128],
+            [192, 40, 64],
+            [76, 40, 76],
+            [168, 40, 128],
+            [180, 40, 128],
         ];
         assert_eq!(first_sites(0xDEAD_BEEF, 8), GOLDEN);
 

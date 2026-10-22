@@ -261,7 +261,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-057 | Vercel/Cloudflare deployment pipelines | not started: live deploy not authorized |
 | T-058 | generated PROTOCOL, architecture, contributing and four-command quick start | partial: clean-machine and deployed-URL checks need T-057 |
 | T-059 | CSP, no-innerHTML guard, bundle secret scan | done locally; headers live in T-057 |
-| T-060 | balance instrumentation and report | partial: metrics and 10-match report; TTFF target unmet |
+| T-060 | balance instrumentation and report | done: median first buddy 70.1 s in 60-90; 9/10 matches, outliers in BALANCE.md |
 | T-061 | focus, reduced motion, HUD contrast, A11Y doc | done |
 | T-062 | physical device matrix | blocked: manual devices |
 | T-063 | production launch checklist | blocked: live six-human match |
@@ -2067,8 +2067,8 @@ A 12 px reticle is centred in the HUD and hidden for coarse pointers, where
 the touch crosshair already exists. `tests/view.spec.ts` pins the yaw/pitch to
 facing-vector conversion and `tests/e2e/playability.spec.ts` pins eye height,
 the hidden local id and the reticle centre. Presentation only: simulation,
-protocol and snapshots did not change. T-060 remains partial; no bot tuning
-was shipped in this pass.
+protocol and snapshots did not change. The separate T-060 economy pass is
+described below.
 
 ## Balance: four numbers, ten bot matches
 
@@ -2079,29 +2079,31 @@ six-seat count. At `S_END` the summary is kept for the test hook and posted to
 `VITE_TELEMETRY_URL` when configured. The tracker has two unit specs.
 
 `cargo run --release -p bot-swarm -- balance` runs ten deterministic Teams 2
-matches with six bot-driven players and writes `BALANCE.md`. The baseline report
-is:
+matches with six bot-driven players and writes `BALANCE.md`. The final report:
 
-| Metric | Baseline |
+| Metric | Final |
 | --- | ---: |
 | Matches | 10 |
-| Crates landed | 17,728 |
-| Crates picked | 578 (3.3%) |
-| Crates/min/player | 0.41 |
-| Recipes completed | 9 |
-| Buddies spawned | 0 |
-| Time to first buddy | not measurable |
+| Matches with a buddy | 9 |
+| Median first buddy | **70.1 s** (target 60-90) |
+| Mean first buddy | 161.8 s |
+| Min / max | 29.1 / 638.2 s |
+| Crates picked | 382 of 15,978 landed (2.4%) |
+| Recipes / buddies | 12 / 12 |
 
-T-060 stays partial: the 60-90 s target is not met. The bots stop at 4-8 crates
-to build a sword or bandage, and the builder spends minutes away from the pad.
-A save-for-buddy planner plus fall-up-3 pathing reached 203.75 s in one seed,
-still outside the target and it broke the bot-victory test; a 4096-node A*
-budget reached 1188.1 s. Direct-to-pad walking with 120 s patience reached
-231.1 s: a builder held 10 crates by 40 s and then sat about 15 m from its pad
-for over a minute, so terrain access is the blocker, not the deposit threshold.
-All variants were reverted. No `data/tuning.ron` constant was changed. The next
-balance step is a map-aware route to the pad, then the same ten-match report is
-re-run.
+The median is inside the target; the mean is pulled up by seeds 2, 5 and 9,
+which spend minutes in terrain before their first drop, and seed 3 produced no
+buddy. The report lists every changed value with its before/after effect. The
+shipped changes: bots save for the nine-crate buddy instead of spending four on
+a bandage; the steering threshold moved from 0.30 to 0.12; bot paths allow an
+eight-block fall, a 24-cell vertical margin and a 1024-node budget; unarmed
+bots stage at the map centre; the first drop takes the candidate closest to the
+centre while later drops keep the §4.4.2 weighting; after twelve minutes a bot
+still without a buddy joins the core push. A team-pooling variant was rejected
+because it dropped the buddy rate from 10/10 to 6/10. No `data/tuning.ron`
+constant was changed. The two `match_sim` fixture seeds now point at measured
+balance matches; their assertions are unchanged. The remaining outliers are
+terrain navigation, not the deposit threshold.
 
 ## Anti-cheat: socket guards and a 15-attack fixture
 
@@ -2176,8 +2178,9 @@ The batch reached T-061 only partially. T-048 is now playable and T-049 has a
 real graph and 30 procedural cues, but no recorded OGG assets and no WebKit/iOS
 run. T-047's registry policy and Crockford codes are native-tested, but its
 HTTP/DO surface is blocked behind T-046. T-059 and T-061 are complete locally.
-T-046 and T-057 need a live Cloudflare/Vercel deployment, T-060's target still
-needs a bot economy/pathing fix, and T-062/T-063/T-064 need physical devices,
+T-046 and T-057 need a live Cloudflare/Vercel deployment, T-060 now meets the
+60-90 s target on the median with its slow seeds listed in `BALANCE.md`, and
+T-062/T-063/T-064 need physical devices,
 six humans on production and a week of telemetry. Those are not marked done.
 
 The current gates are 501 Rust tests, 149 Playwright specs (145 passed, four

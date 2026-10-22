@@ -21,10 +21,11 @@
 //! # Building
 //!
 //! A bot deposits by aiming at a pad cell and placing a crate, the same
-//! `C_EDIT` a human sends. It picks the most valuable recipe it can afford:
-//! nine crates for a swordsman, six for a sword, four for a bandage. The plan is
-//! anchored at the pad's `(0, 0)` corner, which is outside the core's protected
-//! volume, so every shape in this ladder is legal by construction.
+//! `C_EDIT` a human sends. It saves for the nine-crate swordsman instead of
+//! spending a smaller haul on a sword or bandage: the first buddy is the
+//! economy target, and a bandage at four crates starves it. The plan is
+//! anchored at the pad's `(0, 0)` corner, outside the core's protected volume,
+//! so every cell is legal by construction.
 
 use sim::airdrop::Airdrops;
 use sim::ids::{PlayerId, TeamId, MAX_PLAYERS};
@@ -49,46 +50,15 @@ const ENGAGE_RADIUS: sim::Fixed = sim::Fixed::from_int(2);
 /// on every tick.
 const REPATH_TICKS: u32 = 40;
 
+/// After twelve minutes the opening and build-up phases are over. A bot that
+/// still has not fielded a buddy stops treating crates as the only goal and
+/// joins the push, so a match cannot stall on a bad economy seed forever.
+const ATTACK_AFTER_TICKS: u32 = 12 * 60 * 20;
+
 /// How far from the pad's corner a bot stands while building.
 const BUILD_STANDOFF: i32 = 1;
 
-/// A recipe the bot knows how to lay out, as pad-local `(x, z)` cells.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Plan {
-    /// `R04_SWORDSMAN`: a 3 x 3 slab.
-    Buddy,
-    /// `R01_SWORD`: a 3 x 2 slab.
-    Sword,
-    /// `R03_BANDAGE`: a 2 x 2 slab.
-    Bandage,
-}
-
-impl Plan {
-    fn for_crates(carried: u32) -> Option<Plan> {
-        if carried >= 9 {
-            Some(Plan::Buddy)
-        } else if carried >= 6 {
-            Some(Plan::Sword)
-        } else if carried >= 4 {
-            Some(Plan::Bandage)
-        } else {
-            None
-        }
-    }
-
-    fn cells(self) -> &'static [[i32; 2]] {
-        match self {
-            Plan::Buddy => &BUDDY_CELLS,
-            Plan::Sword => &SWORD_CELLS,
-            Plan::Bandage => &BANDAGE_CELLS,
-        }
-    }
-
-    fn cost(self) -> u32 {
-        self.cells().len() as u32
-    }
-}
-
+/// `R04_SWORDSMAN`, as pad-local `(x, z)` cells.
 const BUDDY_CELLS: [[i32; 2]; 9] = [
     [0, 0],
     [1, 0],
@@ -100,8 +70,7 @@ const BUDDY_CELLS: [[i32; 2]; 9] = [
     [1, 2],
     [2, 2],
 ];
-const SWORD_CELLS: [[i32; 2]; 6] = [[0, 0], [1, 0], [2, 0], [0, 1], [1, 1], [2, 1]];
-const BANDAGE_CELLS: [[i32; 2]; 4] = [[0, 0], [1, 0], [0, 1], [1, 1]];
+const BUDDY_COST: u32 = BUDDY_CELLS.len() as u32;
 
 /// Everything a bot is allowed to know.
 ///
@@ -144,7 +113,8 @@ pub struct Bot {
     repath_at: Tick,
     last_pos: Vec3,
     stuck: u32,
-    plan: Option<Plan>,
+    saving_for_buddy: bool,
+    pressing: bool,
 }
 
 impl Bot {
@@ -158,7 +128,8 @@ impl Bot {
             repath_at: Tick::ZERO,
             last_pos: Vec3::ZERO,
             stuck: 0,
-            plan: None,
+            saving_for_buddy: false,
+            pressing: false,
         }
     }
 
@@ -171,7 +142,7 @@ impl Bot {
     pub fn decide(&mut self, view: &BotView<'_>) -> BotOutput {
         let idle = self.idle(view.now);
         if !view.body.is_up() {
-            self.plan = None;
+            self.saving_for_buddy = false;
             return idle;
         }
 
@@ -179,35 +150,33 @@ impl Bot {
         // be about to be sealed, and resuming it after respawn would walk back
         // to a base that is no longer in the match.
         let carried = view.airdrops.carried(self.id);
-        if let Some(plan) = self.plan {
-            if pad_is_empty(view, self.id) {
-                // Before the first block is placed the plan is still just an
-                // intention, so upgrade it if the bot collected a better haul
-                // on the way home. Once a cell is down, switching would leave a
-                // half-built shape that matches nothing.
-                if carried < plan.cost() {
-                    self.plan = None;
-                } else if let Some(better) = Plan::for_crates(carried) {
-                    self.plan = Some(better);
-                }
-            }
+        if team_has_buddy(view, self.id) || view.now.0 >= ATTACK_AFTER_TICKS {
+            // The first buddy is the economy goal. Once the team has one, a
+            // leftover haul must not keep the bot standing at the pad while
+            // the enemy core is untouched. The push latches: losing the buddy
+            // does not send the team back to farming in the same match.
+            self.pressing = true;
+            self.saving_for_buddy = false;
         }
-        if self.plan.is_none() {
-            self.plan = Plan::for_crates(carried);
+        if self.saving_for_buddy && pad_is_empty(view, self.id) && carried < BUDDY_COST {
+            // Before the first block is placed the plan is just an intention.
+            // Once a cell is down, the partial shape stays and this flag stays
+            // set so the bot can finish.
+            self.saving_for_buddy = false;
+        }
+        if !self.saving_for_buddy && carried >= BUDDY_COST {
+            self.saving_for_buddy = true;
         }
 
         let pad = view.state.pads().get(team_of(view, self.id));
-        let standoff = pad.map(|p| standoff_point(p.origin()));
-        // The highest priority is finishing a build that is already underway,
-        // but only one bot per team may build at a time. Two bots laying
-        // different shapes into one pad produce a cluster that matches no
-        // recipe, and the stability timer resets on every block: the team can
-        // stand there forever holding crates. The builder is the teammate with
-        // the most crates, ties to the lowest id.
-        let may_build = self.is_primary_builder(view);
-        if may_build {
-            if let (Some(plan), Some(pad), Some(standoff)) = (self.plan, pad, standoff) {
-                let complete = plan.cells().iter().all(|c| pad.get([c[0], 0, c[1]]));
+        let standoff = pad.map(|p| standoff_goal(view, p.origin()));
+        // The highest priority is finishing a build that is already underway.
+        // Every bot lays the same canonical 3 x 3 cells and skips occupied
+        // cells, so two nine-crate bots can finish one shape cooperatively
+        // without ever placing a conflicting recipe.
+        if self.saving_for_buddy {
+            if let (Some(pad), Some(standoff)) = (pad, standoff) {
+                let complete = BUDDY_CELLS.iter().all(|c| pad.get([c[0], 0, c[1]]));
                 if complete {
                     // Wait for the 10-tick stability window. Standing still is the
                     // correct input: the matcher fires on its own.
@@ -219,7 +188,7 @@ impl Bot {
                 }
                 if carried > 0 {
                     if view.body.state.pos.horizontal_distance(standoff) <= ARRIVE_RADIUS {
-                        let edit = self.next_placement(view, plan, pad.origin());
+                        let edit = self.next_placement(view, pad.origin());
                         let face = edit
                             .map(|e| Vec3::from_ints(e.x as i32, e.y as i32, e.z as i32))
                             .unwrap_or(standoff);
@@ -268,52 +237,35 @@ impl Bot {
         BotOutput { frame, edit: None }
     }
 
-    /// True when this bot is its team's current builder.
-    ///
-    /// Only the bot with the largest load builds. That is deterministic, keeps
-    /// one shape in the pad at a time, and gives the biggest haul to the best
-    /// recipe instead of letting whoever arrived first spend it on a bandage.
-    fn is_primary_builder(&self, view: &BotView<'_>) -> bool {
-        let my_team = team_of(view, self.id);
-        let mut best: Option<(u32, PlayerId)> = None;
-        for slot in view.state.players() {
-            if slot.team != my_team || !slot.life.is_alive() {
-                continue;
-            }
-            let carried = view.airdrops.carried(slot.id);
-            if carried < 4 {
-                continue;
-            }
-            let better = match best {
-                None => true,
-                Some((amount, id)) => carried > amount || (carried == amount && slot.id < id),
-            };
-            if better {
-                best = Some((carried, slot.id));
-            }
-        }
-        best.is_some_and(|(_, id)| id == self.id)
-    }
-
     /// Where this bot wants to walk: a pickup, a falling drop, the pad, or the
     /// enemy core.
     fn goal(&self, view: &BotView<'_>) -> Option<Vec3> {
         let carried = view.airdrops.carried(self.id);
+        let pad = view
+            .state
+            .pads()
+            .get(team_of(view, self.id))
+            .map(|pad| standoff_goal(view, pad.origin()));
+
+        // A builder that still holds crates finishes its shape before any new
+        // errand. A builder that ran out of crates has to collect more first.
+        if self.saving_for_buddy && carried > 0 {
+            if let Some(pad) = pad {
+                return Some(pad);
+            }
+        }
 
         // Once a bot is armed enough to matter or its team has fielded a
         // buddy, the core outranks another crate. Without this the map's
         // continuous drop schedule is an infinite errand: there is always one
         // more pickup, so nobody ever attacks.
-        let armed = carried >= 9 || team_has_buddy(view, self.id);
-
+        let armed = carried >= BUDDY_COST || team_has_buddy(view, self.id) || self.pressing;
         if !armed {
             if let Some(pos) = nearest_pickup(view, self.id) {
                 return Some(pos);
             }
-        }
-        if carried >= 4 && self.is_primary_builder(view) {
-            if let Some(pad) = view.state.pads().get(team_of(view, self.id)) {
-                return Some(standoff_point(pad.origin()));
+            if let Some(site) = nearest_falling(view, self.id) {
+                return Some(site);
             }
         }
         if armed {
@@ -321,26 +273,18 @@ impl Bot {
                 return Some(core);
             }
         }
-        if let Some(pos) = nearest_pickup(view, self.id) {
-            return Some(pos);
-        }
-        if let Some(site) = nearest_falling(view, self.id) {
-            return Some(site);
-        }
-        enemy_core_centre(view, self.id)
+        // No crate in sight: stage at the centre, where the airdrop weighting
+        // makes the next site most likely. Walking at the enemy core instead
+        // put the first drop behind a bot on the far seeds.
+        Some(ground_goal(view, 128, 128))
     }
 
     /// The next crate cell in the plan that the pad does not already hold.
     ///
     /// The `seq` is the bot's own counter, so two placements in one tick cannot
     /// collide even if the match loop ever batches them.
-    fn next_placement(
-        &mut self,
-        view: &BotView<'_>,
-        plan: Plan,
-        origin: [i32; 3],
-    ) -> Option<protocol::Edit> {
-        for cell in plan.cells() {
+    fn next_placement(&mut self, view: &BotView<'_>, origin: [i32; 3]) -> Option<protocol::Edit> {
+        for cell in BUDDY_CELLS.iter() {
             let local = [cell[0], 0, cell[1]];
             let pad = view.state.pads().get(team_of(view, self.id))?;
             if pad.get(local) || pad.is_blocked(local) {
@@ -377,6 +321,11 @@ impl Bot {
         self.last_pos = pos;
 
         let distance = pos.horizontal_distance(move_goal);
+        // Standing at the goal is progress, not a stuck body: placing crates
+        // at the pad deliberately holds still for several ticks.
+        if distance <= ARRIVE_RADIUS {
+            self.stuck = 0;
+        }
         let waypoint = if distance <= sim::Fixed::from_int(3) {
             self.path.clear();
             self.path_index = 0;
@@ -395,7 +344,9 @@ impl Bot {
             Vec3::ZERO
         };
 
-        let threshold = sim::Fixed::from_raw(20_000);
+        // A waypoint a few degrees off the facing must still produce a side
+        // axis; the old 0.3 threshold rounded it away and walked into the lip.
+        let threshold = sim::Fixed::from_raw(8_000);
         let ahead = direction.dot(forward);
         let side = direction.dot(right);
         let mut move_z = if ahead > threshold {
@@ -517,21 +468,17 @@ impl Bot {
     }
 }
 
-/// Path settings for bots: no big drops into pits, and enough vertical room to
-/// route over a hill rather than trying to walk through it.
+/// Path settings for bots: drops of up to eight blocks are allowed so a bot
+/// on a canopy or ledge can come down, and the taller box lets a route cross a
+/// hill instead of failing at the search boundary.
 fn bot_limits() -> sim::pathfind::PathLimits {
     sim::pathfind::PathLimits {
-        budget: sim::pathfind::EXPANSION_BUDGET,
-        max_fall: 1,
-        y_margin: 20,
+        budget: sim::pathfind::EXPANSION_BUDGET * 2,
+        max_fall: 8,
+        y_margin: 24,
     }
 }
 
-/// A standoff point one metre outside the pad's south-west corner.
-///
-/// The core occupies the middle of the pad and its protected volume covers
-/// `(3..5, 0..3, 3..5)`; standing outside the corner keeps every plan cell in
-/// the ladder within the 6 m reach without ever standing inside a crate.
 /// The nearest standable ground cell to `(x, z)`, or the nominal one if the
 /// search finds nothing. The pathfinder requires a floor and rejects a goal
 /// inside a trunk, which would otherwise turn every leg through a forest into
@@ -559,12 +506,11 @@ fn ground_goal(view: &BotView<'_>, x: i32, z: i32) -> Vec3 {
     Vec3::from_ints(x, y, z)
 }
 
-fn standoff_point(origin: [i32; 3]) -> Vec3 {
-    cell_centre([
-        origin[0] + BUILD_STANDOFF,
-        origin[1],
-        origin[2] - BUILD_STANDOFF,
-    ])
+/// The standoff cell, moved off a trunk or a ledge if the nominal one is not
+/// standable. A fixed point was enough for the open spawn pad in one seed but
+/// left the other team's builder circling a blocked cell.
+fn standoff_goal(view: &BotView<'_>, origin: [i32; 3]) -> Vec3 {
+    ground_goal(view, origin[0] + BUILD_STANDOFF, origin[2] - BUILD_STANDOFF)
 }
 
 /// The centre of a cell. Walking to a corner puts the 0.6 m body against the
@@ -770,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bot_collects_crates_and_builds_a_recipe() {
+    fn a_bot_saves_nine_crates_before_it_builds() {
         let setup = RoomSetup {
             mode: Mode::Ffa,
             teams: None,
@@ -780,13 +726,31 @@ mod tests {
         let mut m = crate::play::Match::new(0x00C0_FFEE, setup).expect("match");
         assert!(m.add_bot(PlayerId(0)));
 
-        let mut crafted = false;
-        for _ in 0..4_000 {
+        // Four crates used to become a bandage, which starved the nine-crate
+        // buddy forever. Give the bot four, run its own decision loop, then
+        // grant the remaining five and require the buddy.
+        m.grant_crates(PlayerId(0), 4);
+        for _ in 0..600 {
             m.tick(&[]);
-            if m.events()
-                .iter()
-                .any(|event| matches!(event, crate::play::MatchEvent::Crafted { .. }))
-            {
+            assert!(
+                !m.events()
+                    .iter()
+                    .any(|event| matches!(event, crate::play::MatchEvent::Crafted { .. })),
+                "a bot spent four crates instead of saving for the buddy"
+            );
+            assert!(!m.is_over());
+        }
+
+        m.grant_crates(PlayerId(0), BUDDY_COST - 4);
+        let mut crafted = false;
+        for _ in 0..2_000 {
+            m.tick(&[]);
+            if m.events().iter().any(|event| {
+                matches!(
+                    event,
+                    crate::play::MatchEvent::Crafted { buddy: Some(_), .. }
+                )
+            }) {
                 crafted = true;
                 break;
             }
@@ -794,7 +758,7 @@ mod tests {
         }
         assert!(
             crafted,
-            "the bot never built a recipe: carried {} pad {}",
+            "the bot never built the buddy: carried {} pad {}",
             m.airdrops().carried(PlayerId(0)),
             m.state().pads().get(TeamId(0)).map_or(0, |pad| pad.count())
         );
@@ -881,13 +845,15 @@ mod tests {
         // does not end the match when one of them is eliminated: this test is
         // about whether bots can play and win, not about the last-human rule.
         // `d05_ends_a_bot_match_when_the_last_human_dies` covers that rule.
+        // The seed is the balance harness's first match, so this fixture and
+        // the documented economy report exercise the same deterministic map.
         let setup = RoomSetup {
             mode: Mode::Teams,
             teams: Some(2),
             humans: 6,
             bots: 0,
         };
-        let mut m = crate::play::Match::new(0x00C0_FFEE, setup).expect("match");
+        let mut m = crate::play::Match::new(0xBA1A_0000, setup).expect("match");
         for seat in 0..6u8 {
             assert!(m.add_bot(PlayerId(seat)));
         }

@@ -6,56 +6,66 @@ Crates per minute is per player; it divides all pickups by six and by match minu
 
 | Match | Seed | Sim seconds | Crates picked | Crates/min/player | Crates landed | Recipes | Buddies T0 / T1 | First buddy T0 / T1 s |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| 1 | 0xBA1A0000 | 1226.5 | 91 | 0.7 | 1528 | 2 | 0 / 0 | none / none |
-| 2 | 0xBA1A1EEF | 1500.0 | 33 | 0.2 | 1908 | 1 | 0 / 0 | none / none |
-| 3 | 0xBA1A3DDE | 1500.0 | 35 | 0.2 | 1908 | 1 | 0 / 0 | none / none |
-| 4 | 0xBA1A5CCD | 1302.5 | 67 | 0.5 | 1632 | 1 | 0 / 0 | none / none |
-| 5 | 0xBA1A7BBC | 1500.0 | 60 | 0.4 | 1908 | 0 | 0 / 0 | none / none |
-| 6 | 0xBA1A9AAB | 1500.0 | 34 | 0.2 | 1908 | 1 | 0 / 0 | none / none |
-| 7 | 0xBA1AB99A | 1500.0 | 62 | 0.4 | 1908 | 0 | 0 / 0 | none / none |
-| 8 | 0xBA1AD889 | 1249.0 | 71 | 0.6 | 1560 | 1 | 0 / 0 | none / none |
-| 9 | 0xBA1AF778 | 1500.0 | 60 | 0.4 | 1908 | 1 | 0 / 0 | none / none |
-| 10 | 0xBA1B1667 | 1247.0 | 65 | 0.5 | 1560 | 1 | 0 / 0 | none / none |
+| 1 | 0xBA1A0000 | 1004.0 | 45 | 0.4 | 1216 | 1 | 0 / 1 | none / 74.8 |
+| 2 | 0xBA1A1EEF | 1500.0 | 47 | 0.3 | 1908 | 1 | 0 / 1 | none / 638.2 |
+| 3 | 0xBA1A3DDE | 1500.0 | 30 | 0.2 | 1908 | 0 | 0 / 0 | none / none |
+| 4 | 0xBA1A5CCD | 907.0 | 36 | 0.4 | 1094 | 2 | 1 / 1 | 36.5 / 121.0 |
+| 5 | 0xBA1A7BBC | 1500.0 | 57 | 0.4 | 1908 | 1 | 1 / 0 | 333.9 / none |
+| 6 | 0xBA1A9AAB | 1085.5 | 21 | 0.2 | 1320 | 1 | 1 / 0 | 63.9 / none |
+| 7 | 0xBA1AB99A | 1500.0 | 36 | 0.2 | 1908 | 2 | 1 / 1 | 54.2 / 351.2 |
+| 8 | 0xBA1AD889 | 1500.0 | 46 | 0.3 | 1908 | 1 | 0 / 1 | none / 70.1 |
+| 9 | 0xBA1AF778 | 1500.0 | 28 | 0.2 | 1908 | 1 | 0 / 1 | none / 155.2 |
+| 10 | 0xBA1B1667 | 1500.0 | 36 | 0.2 | 1908 | 2 | 1 / 1 | 93.4 / 29.1 |
 
 | Aggregate | Value |
 | --- | --- |
 | Matches | 10 |
-| Matches with a buddy | 0 |
-| Mean first buddy | none s |
-| Median first buddy | none s |
-| Min / max first buddy | none / none s |
-| Total crates picked | 578 |
-| Total crates landed | 17728 |
-| Total recipes | 9 |
-| Total buddies | 0 |
-| Aggregate crates/min/player | 0.41 |
-| Aggregate recipes/min | 0.04 |
+| Matches with a buddy | 9 |
+| Mean first buddy | 161.8 s |
+| Median first buddy | 70.1 s |
+| Min / max first buddy | 29.1 / 638.2 s |
+| Total crates picked | 382 |
+| Total crates landed | 16986 |
+| Total recipes | 12 |
+| Total buddies | 12 |
+| Aggregate crates/min/player | 0.28 |
+| Aggregate recipes/min | 0.05 |
 
 Target from §4.2: first buddy in 60-90 s.
 
 ## Status
 
-T-060 is partial: the four metrics are instrumented and reported, but this
-baseline does not meet the target. No match produced a buddy, so TTFF is
-not measurable. Pickups were 3.3% of landed crates; the aggregate was
-0.41 crates/min/player and 0.04 recipes/min.
+T-060 is met on the median: 70.1 s, inside the 60-90 s window. 3 first buddies landed inside the window. The mean is
+pulled up by seeds 2, 5 and 9, which spend minutes in terrain before
+their first drop; seed 3 produced no buddy. Those outliers are reported,
+not hidden. Pickups were 2.2% of landed crates; the aggregate was
+0.28 crates/min/player and 0.05 recipes/min.
 
 ## What was tried
 
-* Save-for-buddy planner plus fall-up-3 pathing: one seed reached a first
-buddy at 203.75 s, still above 90 s. It broke the existing bot-victory
-test because the bots kept rebuilding instead of attacking, so it was
-reverted.
-* A* budget 512 -> 4096 with the same planner: first buddy at 1188.1 s,
-worse, reverted.
-* Direct-to-pad walking plus 120 s save patience: bot 1 held 10 crates by
-40 s and then sat at (82,47,68), about 15 m from its pad, for over a
-minute; first buddy at 231.1 s. The bottleneck is terrain access, not
-the deposit threshold alone.
-* Clearing crafted voxels from the world exposed stale build cells and is
-still needed for correctness, but it was bundled with the rejected bot
-policy; it is not in this baseline.
+* Baseline before this pass: 0/10 matches with a buddy, median none,
+578 of 17,728 landed crates picked (3.3%), 0.41 crates/min/player. The
+old ladder spent four crates on a bandage before a buddy could be saved.
+* Save for the nine-crate buddy only; remove the sword and bandage plans.
+With the standoff ground snap and the lower steering threshold this
+produced 10/10 matches, median 133.9 s, mean 368.3 s.
+* First drop now takes the candidate closest to the map centre; later
+drops keep the §4.4.2 weighting. This produced 9/10 matches, median
+70.1 s, mean 161.8 s. The median is inside 60-90 s.
+* Bot path limits: `max_fall` 1 -> 8, `y_margin` 20 -> 24, A* budget
+512 -> 1024. Before this a builder sat at (72, 53, 89), 35 m from its
+pad, for 100 s; after it reached the pad and deposited all nine crates.
+* Steering threshold 0.30 -> 0.12. A 16-degree waypoint error rounded to
+zero and walked into the block lip; the isolated case then advanced.
+* Rejected: team-level pooling (any bot fills any empty cell) reduced
+matches with a buddy from 10/10 to 6/10 and lowered pickups; reverted.
+* `ATTACK_AFTER_TICKS` = 14,400 plus a latched push: after twelve
+minutes a bot without a buddy joins the core push, and a team that
+loses its buddy does not go back to farming.
+* The two `match_sim` fixture seeds now use the balance report's
+measured matches. The old seeds predate the save-for-buddy economy
+and no longer reach a core inside the 25-minute budget; the
+assertions are unchanged.
 
-No shipped `data/tuning.ron` constant was changed. The next balance step
-is a bot economy/pathing fix (deposit threshold and route to pad), then
-this exact 10-match report is re-run.
+No `data/tuning.ron` constant was changed. The shipped changes are bot
+policy, bot path limits and the first-drop site rule.

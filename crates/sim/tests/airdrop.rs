@@ -162,8 +162,11 @@ fn site_selection_is_portable() {
 
     assert_eq!(drops, 17, "six minutes of drops");
     assert_eq!(drops, airdrops.drops_made());
+    // Regenerated deliberately for T-060: the first drop now takes the
+    // closest centre candidate without consuming an RNG draw, so later picks
+    // shift with it. The portability contract is unchanged.
     assert_eq!(
-        hash, 0xc5ab_e12a_2d0e_4091,
+        hash, 0x46ab_ee9e_3430_dad1,
         "site sequence changed: native and wasm must produce this exact hash"
     );
 }
