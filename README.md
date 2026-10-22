@@ -122,6 +122,7 @@ apps/
   web/src/ui/              store, HUD, recipe book, screens, settings (M2)
   web/src/wasm/loader.ts   raw wasm loader and render views (M2)
   web/scripts/             wasm bridge build step (M2)
+  web/public/assets/       generated block atlas (T-051)
   web/tests/               Playwright specs for the browser contract (M2)
 data/
   tuning.ron    every designer-facing number, single source of truth
@@ -131,8 +132,9 @@ data/
 docs/
   PLAN.md       the specification this repo implements
 tools/
+  asset-pipeline/  deterministic PNG atlas generator (T-051)
   wasm-golden.mjs  runs the wasm build of the golden test under node:wasi
-  wasm-exports.mjs checks the bridge's 13-function export contract
+  wasm-exports.mjs checks the bridge's 20-function export contract
 fuzz/
   fuzz_targets/decode.rs  libFuzzer harness for the decoder (not a workspace member)
 ```
@@ -160,7 +162,7 @@ Open the printed URL, choose OFFLINE, and the bot-filled Worker match starts.
 The rest of the commands below are for development, the network host and gates.
 
 ```bash
-cargo test --workspace --all-targets              # 493 Rust tests
+cargo test --workspace --all-targets              # 494 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
@@ -246,7 +248,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-048 | offline Web Worker match with bots and the online wire frames | done |
 | T-049 | audio graph, 24 voices, 30 procedural cues, rumble worklet | partial: WebKit/iOS and recorded assets not verified |
 | T-050 | anti-cheat: 15 named threat tests, connection cap, token revocation | partial: cheat-client and host wiring missing |
-| T-051 | art atlas and GLB models | not started: no art assets |
+| T-051 | art atlas and GLB models | partial: textured atlas and terrain shader shipped; no GLB models |
 | T-052 | content pass and recipe editor | not started |
 | T-053 | 20-room bot swarm: p99 0.455 ms, 27 MB RSS, 240-player Oracle estimate | done |
 | T-054 | cross-browser two-client E2E suite | not started: needs T-048 |
@@ -1430,7 +1432,7 @@ The specs run against `vite preview`, not the dev server: the benchmark and the
 adaptive loop are the things under test, and a dev-only path would prove
 nothing about the shipped bundle. They drive the loop through
 `window.__cbTest.setFrameTime`, which is how a 60 Hz runner tests a 25 ms
-device deterministically. The JS bundle is 649.5 KB raw and 166.6 KB gzipped,
+device deterministically. The JS bundle is 658.4 KB raw and 167.9 KB gzipped,
 under §8.10's 450 KB gzip target; the offline worker adds a 2.9 KB module. The
 wasm asset is measured in the chunk section below.
 
@@ -1471,6 +1473,36 @@ The page uses the real bridge. The streaming unit tests use a fake source: one
 runs the default 6/7 policy and checks a kept column at distance 7 and an
 unloaded one at distance 8, the other runs 2/3 and asserts the whole set,
 including the ring.
+
+## Atlas: one texture, a shader that tiles it
+
+T-051 is partial: the atlas and textured terrain exist, the nine GLB models do
+not. `tools/asset-pipeline/generate-atlas.mjs` writes a 256 x 256 RGBA PNG with
+no image dependency, only zlib and a CRC32 table. The sheet has 24 authored
+16 x 16 slots in a 16 x 16 grid: slots 1-19 are the non-air blocks in
+`data/blocks.ron` order, slot 0 is transparent air, slots 20-23 are spare, and
+the rest of the grid stays empty. The file is 5,400 bytes against the 30 KB
+budget, and it is the only blocking asset, so the total is 5.4 KB against 90 KB.
+
+The mesher already emitted a tile index, in-plane cell coordinates, an AO
+level, a face index and a flags byte. The chunk shader consumes them instead of
+a flat green material: the fragment shader interpolates the cell coordinates
+and applies `fract` per block, so a greedy quad repeats the tile instead of
+stretching it, a 0.02 inset keeps bilinear bleeding inside the cell, face
+normals and AO darken vertices, and the water/marker flag lowers alpha.
+Transparent texels discard, so the air slot never draws. The texture uses
+nearest filtering and no mipmaps, which keeps the pixel grid readable at 16 px
+and avoids a mip chain that would blend neighbouring tiles.
+
+Two guards pin the contract. `every_block_has_a_tile()` reads the shipped PNG
+header and asserts every registry tile is below the 24 authored slots; it was
+shown red by changing the marker tile to 30, then green again. The browser spec
+decodes the PNG, checks 256 x 256, the transparent air slot, 23 visible slots,
+four spare and empty remainder, then boots a high-quality match, fails on a
+missing atlas request or a shader error, and reads two canvas pixels so an
+all-transparent sample (the wrong `flipY` was exactly that) cannot pass. Player
+and buddy models remain boxes; the six buddy and three player GLB meshes of
+T-051 are not authored yet.
 
 ## Entities: three boxes and a float contract
 
@@ -1980,12 +2012,12 @@ The batch reached T-061 only partially. T-048 is now playable and T-049 has a
 real graph and 30 procedural cues, but no recorded OGG assets and no WebKit/iOS
 run. T-047's registry policy and Crockford codes are native-tested, but its
 HTTP/DO surface is blocked behind T-046. T-059 and T-061 are complete locally.
-T-046 and T-057 need a live Cloudflare/Vercel deployment, T-051 needs art,
-T-054 needs the online host path plus Firefox/WebKit, and T-062/T-063/T-064 need
-physical devices, six humans on production and a week of telemetry. Those are
-not marked done.
+T-046 and T-057 need a live Cloudflare/Vercel deployment, T-051 still needs
+the nine GLB models, T-054 needs the online host path plus Firefox/WebKit, and
+T-062/T-063/T-064 need physical devices, six humans on production and a week of
+telemetry. Those are not marked done.
 
-The current gates are 493 Rust tests, 92 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
+The current gates are 494 Rust tests, 95 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
 20 wasm exports. T-050 has the 15 named threat tests, but `tools/cheat-client`
 and host wiring for the new connection/token guards are still missing. The last full-browser run is Chromium plus the headed pointer
 lock project; Firefox and WebKit are not installed on this machine.

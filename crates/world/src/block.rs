@@ -243,6 +243,33 @@ mod tests {
     }
 
     #[test]
+    fn every_block_has_a_tile() {
+        // Read the shipped asset rather than copied constants so replacing the
+        // atlas with fewer or smaller tiles fails here.
+        const ATLAS_TILES: u32 = 24;
+        const ATLAS: &[u8] = include_bytes!("../../../apps/web/public/assets/atlas.png");
+        assert_eq!(&ATLAS[..8], b"\x89PNG\r\n\x1a\n", "atlas is not a PNG");
+        let width = u32::from_be_bytes(ATLAS[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(ATLAS[20..24].try_into().unwrap());
+        assert_eq!((width, height), (256, 256), "atlas must be 256x256");
+        let slots = (width / 16) * (height / 16);
+        assert!(
+            ATLAS_TILES <= slots,
+            "atlas has fewer than {ATLAS_TILES} tiles"
+        );
+        let r = registry();
+        for i in 0..r.len() as u8 {
+            let def = r.def(BlockId(i));
+            let tile = u32::from(def.tile);
+            assert!(
+                tile < ATLAS_TILES,
+                "{} uses tile {tile}, outside the {ATLAS_TILES} authored tiles",
+                def.name
+            );
+        }
+    }
+
+    #[test]
     fn invalid_registries_are_rejected() {
         // Two placeable blocks.
         let bad = EMBEDDED_RON.replace(

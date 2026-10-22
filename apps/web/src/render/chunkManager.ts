@@ -19,9 +19,11 @@
  *
  * `u32 vertex_bytes`, `u32 index_bytes`, then 12-byte vertices and `u32`
  * triangle indices. Positions are the mesher's local block coordinates; the
- * mesh's world position is the column origin. The header is necessary because
- * the mesher picks the AO-safe diagonal per quad, which cannot be recovered
- * from vertex order alone.
+ * mesh's world position is the column origin. The vertex also carries a tile
+ * index and in-plane cell coordinates, so the shader can tile the shared
+ * 256x256 block atlas once per block. The header is necessary because the
+ * mesher picks the AO-safe diagonal per quad, which cannot be recovered from
+ * vertex order alone.
  */
 
 import * as THREE from "three";
@@ -66,10 +68,12 @@ export interface ChunkInfo {
   drawCalls: number;
   meshed: number;
   lastMeshBytes: number;
+  /** True once the browser swapped the 1x1 placeholder for the real atlas. */
+  atlasReady: boolean;
 }
 
 interface ChunkEntry {
-  mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
+  mesh: THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>;
   cx: number;
   cz: number;
   /** Top solid boundary per local (x, z), 0 when empty. */
@@ -87,12 +91,15 @@ export class ChunkManager {
   private readonly loadRadius: number;
   private readonly keepRadius: number;
   private readonly meshCapacity: number;
-  private readonly material = new THREE.MeshBasicMaterial({ color: 0x8aa96b });
+  private atlas: THREE.Texture;
+  private readonly material: THREE.ShaderMaterial;
   private readonly loaded = new Set<string>();
   private readonly meshes = new Map<string, ChunkEntry>();
   private pending: Array<{ cx: number; cz: number; distance: number }> = [];
   private meshed = 0;
   private lastMeshBytes = 0;
+  private atlasReady = false;
+  private disposed = false;
 
   constructor(parent: THREE.Object3D, source: MeshSource, options: ChunkOptions = {}) {
     this.source = source;
@@ -102,6 +109,21 @@ export class ChunkManager {
       options.keepRadius ?? DEFAULT_KEEP_RADIUS,
     );
     this.meshCapacity = options.meshCapacity ?? DEFAULT_MESH_CAPACITY;
+    this.atlas = createPlaceholderAtlas();
+    this.material = createTerrainMaterial(this.atlas);
+    if (typeof document !== "undefined") {
+      loadAtlas((texture) => {
+        if (this.disposed) {
+          texture.dispose();
+          return;
+        }
+        const placeholder = this.atlas;
+        this.atlas = texture;
+        this.material.uniforms.uAtlas.value = texture;
+        placeholder.dispose();
+        this.atlasReady = true;
+      });
+    }
     parent.add(this.group);
   }
 
@@ -231,15 +253,18 @@ export class ChunkManager {
       drawCalls: this.meshes.size,
       meshed: this.meshed,
       lastMeshBytes: this.lastMeshBytes,
+      atlasReady: this.atlasReady,
     };
   }
 
   dispose(): void {
+    this.disposed = true;
     for (const key of [...this.loaded]) {
       this.unload(key);
     }
     this.group.removeFromParent();
     this.material.dispose();
+    this.atlas.dispose();
     this.pending = [];
   }
 
@@ -289,8 +314,28 @@ export class ChunkManager {
       12 + vertexBytes + indexBytes + heightBytes,
     );
 
+    const faces = new Float32Array(vertexCount);
+    const tiles = new Float32Array(vertexCount);
+    const ao = new Float32Array(vertexCount);
+    const uvs = new Float32Array(vertexCount * 2);
+    const flags = new Float32Array(vertexCount);
+    for (let i = 0; i < vertexCount; i += 1) {
+      const at = 12 + i * VERTEX_BYTES;
+      faces[i] = payload[at + 3];
+      tiles[i] = payload[at + 4];
+      ao[i] = payload[at + 5];
+      uvs[i * 2] = payload[at + 6];
+      uvs[i * 2 + 1] = payload[at + 7];
+      flags[i] = payload[at + 10];
+    }
+
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("aFace", new THREE.BufferAttribute(faces, 1));
+    geometry.setAttribute("aTile", new THREE.BufferAttribute(tiles, 1));
+    geometry.setAttribute("aAo", new THREE.BufferAttribute(ao, 1));
+    geometry.setAttribute("aUv", new THREE.BufferAttribute(uvs, 2));
+    geometry.setAttribute("aFlags", new THREE.BufferAttribute(flags, 1));
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     geometry.computeBoundingSphere();
 
@@ -312,4 +357,91 @@ export class ChunkManager {
     }
     this.loaded.delete(key);
   }
+}
+
+const TERRAIN_VERTEX = /* glsl */ `
+attribute float aFace;
+attribute float aTile;
+attribute float aAo;
+attribute vec2 aUv;
+attribute float aFlags;
+
+varying vec2 vCellUv;
+varying float vTile;
+varying float vShade;
+varying float vAlpha;
+
+void main() {
+  int face = int(aFace + 0.5);
+  float light = 0.78;
+  if (face == 3) light = 1.0;
+  else if (face == 2) light = 0.5;
+  else if (face == 1 || face == 0) light = 0.84;
+  vShade = light * (0.62 + 0.1266667 * clamp(aAo, 0.0, 3.0));
+  vAlpha = aFlags > 0.5 ? 0.78 : 1.0;
+  vCellUv = aUv;
+  vTile = aTile;
+
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * mv;
+}
+`;
+
+const TERRAIN_FRAGMENT = /* glsl */ `
+uniform sampler2D uAtlas;
+varying vec2 vCellUv;
+varying float vTile;
+varying float vShade;
+varying float vAlpha;
+
+void main() {
+  // Interpolated cell coordinates repeat once per block, including across a
+  // greedy quad. The inset keeps the sample inside the authored tile.
+  vec2 tile = vec2(mod(vTile, 16.0), floor(vTile / 16.0));
+  vec2 local = fract(vCellUv) * 0.96 + 0.02;
+  vec4 texel = texture2D(uAtlas, (tile + local) / 16.0);
+  if (texel.a < 0.15) discard;
+  gl_FragColor = vec4(texel.rgb * vShade, texel.a * vAlpha);
+}
+`;
+
+function createPlaceholderAtlas(): THREE.Texture {
+  // Node unit tests construct ChunkManager without a DOM. A one-pixel texture
+  // keeps the shader valid there; the browser swaps in the real atlas.
+  const texture = new THREE.DataTexture(
+    new Uint8Array([124, 145, 106, 255]),
+    1,
+    1,
+  );
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
+  texture.colorSpace = THREE.NoColorSpace;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function loadAtlas(onLoad: (texture: THREE.Texture) => void): void {
+  // A DataTexture keeps uploading its small pixel buffer after its image is
+  // replaced, so the loaded texture becomes the material uniform instead.
+  new THREE.TextureLoader().load("/assets/atlas.png", (texture) => {
+    texture.flipY = false;
+    texture.magFilter = THREE.NearestFilter;
+    texture.minFilter = THREE.NearestFilter;
+    texture.generateMipmaps = false;
+    texture.colorSpace = THREE.NoColorSpace;
+    texture.needsUpdate = true;
+    onLoad(texture);
+  });
+}
+
+function createTerrainMaterial(atlas: THREE.Texture): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: { uAtlas: { value: atlas } },
+    vertexShader: TERRAIN_VERTEX,
+    fragmentShader: TERRAIN_FRAGMENT,
+    transparent: true,
+    depthWrite: true,
+    side: THREE.FrontSide,
+  });
 }

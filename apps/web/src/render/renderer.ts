@@ -242,6 +242,21 @@ export class GameRenderer {
     };
   }
 
+  /** Read one canvas pixel at CSS coordinates after a fresh render. */
+  readPixel(x: number, y: number): [number, number, number, number] {
+    this.renderer.render(this.scene, this.camera);
+    const gl = this.renderer.getContext();
+    const ratio = this.renderer.getPixelRatio();
+    const px = Math.min(this.canvas.width - 1, Math.max(0, Math.floor(x * ratio)));
+    const py = Math.min(
+      this.canvas.height - 1,
+      Math.max(0, Math.floor((this.canvas.clientHeight - y) * ratio)),
+    );
+    const pixel = new Uint8Array(4);
+    gl.readPixels(px, py, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+    return [pixel[0], pixel[1], pixel[2], pixel[3]];
+  }
+
   private applyQuality(): void {
     this.scene.fog = new THREE.Fog(SKY_COLOR, this.settings.fogStart, this.settings.fogEnd);
     this.camera.far = this.settings.fogEnd;
