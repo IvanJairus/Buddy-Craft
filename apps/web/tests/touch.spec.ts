@@ -66,8 +66,10 @@ test("stick_and_look_are_independent", async ({ page }) => {
   expect(touch.moveX).toBeGreaterThan(0);
   expect(touch.moveY).toBeGreaterThan(0);
   expect(touch.yaw).not.toBe(0);
+  const yawDelta = ((touch.yaw + 384) % 256) - 128;
+  expect(yawDelta).toBeLessThan(0);
   expect(touch.frame[3] >> 4).toBeGreaterThan(0);
-  expect(touch.frame[3] & 0x0f).toBeGreaterThan(0);
+  expect(touch.frame[3] & 0x0f).toBeGreaterThanOrEqual(8);
 
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
   await page.waitForTimeout(100);

@@ -297,7 +297,7 @@ export class TouchInput {
     this.polls += 1;
     const state: PackedState = {
       forward: this.moveY,
-      strafe: this.moveX,
+      strafe: -this.moveX,
       jump: this.jumpHeld,
       fire: false,
       use: this.useHeld,
@@ -502,7 +502,7 @@ export class TouchInput {
     const dy = touch.clientY - this.lookLastY;
     this.lookLastX = touch.clientX;
     this.lookLastY = touch.clientY;
-    this.yaw = (((this.yaw + dx * LOOK_UNITS_PER_PX) % 256) + 256) % 256;
+    this.yaw = (((this.yaw - dx * LOOK_UNITS_PER_PX) % 256) + 256) % 256;
     this.pitch = Math.max(-64, Math.min(64, this.pitch - dy * LOOK_UNITS_PER_PX));
   }
 

@@ -12,6 +12,7 @@ import {
   JUMP,
   USE,
   packFrame,
+  turnYaw,
   type InputAction,
 } from "../src/game/inputDesktop";
 
@@ -86,6 +87,12 @@ test("packs the wire frame", () => {
   expect(right[3]).toBe(7);
 });
 
+test("mouse right turns the view right", () => {
+  // The sim's yaw increases toward +X, which is screen-left in the camera.
+  expect(turnYaw(0, 40, 0.25)).toBe(246);
+  expect(turnYaw(246, -40, 0.25)).toBe(0);
+});
+
 async function boot(page: Page): Promise<void> {
   await page.goto("/?quality=high&scene=clear&screen=match");
   await page.waitForFunction(() => (window as unknown as TestWindow).__cbReady === true, null, {
@@ -117,7 +124,9 @@ test("WASD, jump and mouse buttons fill the frame", async ({ page }) => {
   await page.keyboard.down("d");
   await page.waitForTimeout(100);
   input = await state(page);
-  expect(input.frame[3]).toBe((7 << 4) | 7);
+  // Physical right is a negative wire axis because the world's +X is the
+  // player's left in this right-handed camera.
+  expect(input.frame[3]).toBe((7 << 4) | 8);
 
   await page.keyboard.down("Space");
   await page.waitForTimeout(100);

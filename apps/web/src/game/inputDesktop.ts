@@ -122,6 +122,14 @@ export interface PackedState {
   pitch: number;
 }
 
+/**
+ * Screen-right is negative yaw: the sim's +X is screen-left for the rendered
+ * camera, so a rightward mouse delta subtracts from the yaw byte.
+ */
+export function turnYaw(yaw: number, movementX: number, sensitivity: number): number {
+  return (((yaw - movementX * sensitivity) % 256) + 256) % 256;
+}
+
 function axisNibble(value: number): number {
   // Desktop passes -1..1; the touch stick passes its analogue fraction. Scale
   // to the signed 4-bit range and keep -8 as full back, matching the decoder.
@@ -249,8 +257,7 @@ export class DesktopInput {
       return;
     }
     const scale = this.sensitivity * (this.invertY ? 1 : -1);
-    this.yaw =
-      (((this.yaw + event.movementX * this.sensitivity) % 256) + 256) % 256;
+    this.yaw = turnYaw(this.yaw, event.movementX, this.sensitivity);
     this.pitch = clamp(this.pitch + event.movementY * scale, -64, 64);
   };
   private readonly onWheel = (event: WheelEvent): void => {
@@ -301,8 +308,8 @@ export class DesktopInput {
       Number(this.held.has(this.keyMap.forward) || this.held.has("ArrowUp")) -
       Number(this.held.has(this.keyMap.back) || this.held.has("ArrowDown"));
     const strafe =
-      Number(this.held.has(this.keyMap.right) || this.held.has("ArrowRight")) -
-      Number(this.held.has(this.keyMap.left) || this.held.has("ArrowLeft"));
+      Number(this.held.has(this.keyMap.left) || this.held.has("ArrowLeft")) -
+      Number(this.held.has(this.keyMap.right) || this.held.has("ArrowRight"));
     return packFrame(
       {
         forward,
