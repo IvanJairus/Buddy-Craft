@@ -47,8 +47,8 @@ async function dispatchTouch(page: Page, type: string, points: TouchPoint[]): Pr
   );
 }
 
-function position(stats: Stats): number {
-  return Math.hypot(stats.x, stats.z);
+function displacement(before: Stats, after: Stats): number {
+  return Math.hypot(after.x - before.x, after.z - before.z);
 }
 
 test("stick moves, look turns, tap breaks and place mode deposits", async ({
@@ -98,7 +98,9 @@ test("stick moves, look turns, tap breaks and place mode deposits", async ({
         __cbTest: { offlineStats(): Stats };
       }).__cbTest.offlineStats(),
     );
-    expect(position(after) - position(before)).toBeGreaterThan(0.05);
+    // The spawn is not at the origin, so distance-from-origin can shrink on a
+    // valid move; displacement is the property the stick actually promises.
+    expect(displacement(before, after)).toBeGreaterThan(0.05);
 
     const breaks = (await touchState(page)).breaks;
     await page.touchscreen.tap(330, 300);

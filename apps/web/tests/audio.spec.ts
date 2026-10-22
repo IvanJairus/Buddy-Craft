@@ -1,6 +1,7 @@
 /**
- * T-049 audio specs. Chromium is used because WebKit is not installed in this
- * workspace; the WebKit unlock row is therefore documented as not verified.
+ * T-049 audio specs. The default project runs them in Chromium; the
+ * `webkit-audio` project runs the same file in WebKit, including the real
+ * pointerdown unlock path.
  */
 
 import { expect, test, type Page } from "@playwright/test";
@@ -50,6 +51,24 @@ test("the first pointerdown unlocks the context", async ({ page }: { page: Page 
     (window as unknown as TestWindow).__cbTest!.audioStats(),
   );
   expect(stats.state).toBe("running");
+});
+
+test("the real pointerdown listener unlocks without the test hook", async ({ page }: { page: Page }) => {
+  await page.goto("/?screen=match");
+  await page.waitForFunction(() => (window as unknown as TestWindow).__cbReady === true, null, {
+    timeout: 30_000,
+  });
+  // WebKit starts suspended; Chromium may already be running. Either way the
+  // trusted click must leave the context running through the window listener.
+  await page.locator("#game").click({ position: { x: 40, y: 40 } });
+  await page.waitForFunction(
+    () => (window as unknown as TestWindow).__cbTest!.audioStats().state === "running",
+    null,
+    { timeout: 5_000 },
+  );
+  expect(await page.evaluate(() =>
+    (window as unknown as TestWindow).__cbTest!.audioStats().state,
+  )).toBe("running");
 });
 
 test("a left-side cue pans left and the voice cap holds at 24", async ({ page }: { page: Page }) => {

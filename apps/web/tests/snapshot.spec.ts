@@ -174,5 +174,7 @@ test("a decoded snapshot reaches the entity renderer", async ({ page }: { page: 
   expect(result.players).toBe(1);
   expect(result.buddies).toBe(0);
   expect(result.entity?.players).toBe(1);
-  expect(result.entity?.drawCalls).toBe(3);
+  // T-051: the local snapshot now renders through one instanced model mesh,
+  // not the three-part box fallback.
+  expect(result.entity?.drawCalls).toBe(1);
 });

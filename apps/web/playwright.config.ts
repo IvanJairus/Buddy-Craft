@@ -24,6 +24,11 @@ export default defineConfig({
       use: { headless: false },
     },
     {
+      name: "webkit-audio",
+      testMatch: /audio\.spec\.ts$/,
+      use: { browserName: "webkit" },
+    },
+    {
       name: "chromium-e2e",
       testMatch: /e2e\/.*\.spec\.ts$/,
       use: { browserName: "chromium" },

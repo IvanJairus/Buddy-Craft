@@ -171,7 +171,7 @@ cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 100 specs passed, 4 perf-gated skipped, 1 headed
+cd apps/web && npm ci && npm run test:e2e          # 106 specs passed, 4 perf-gated skipped, 1 headed
 cd apps/web && PERF_GATE=1 npx playwright test tests/perf.spec.ts --project=headless
 
 # Host (local dev). `CB_ADDR`, `CB_ALLOWED_ORIGINS` and `CB_SUMMARY_DIR` override defaults.
@@ -250,12 +250,12 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-046 | Durable Object adapter and `wrangler deploy` | blocked: deploy/runtime verification |
 | T-047 | Crockford codes, registry collision, lockout and quota policy | partial: HTTP/DO blocked behind T-046 |
 | T-048 | offline Web Worker match with bots and the online wire frames | done |
-| T-049 | audio graph, 24 voices, 30 procedural cues, rumble worklet | partial: WebKit/iOS and recorded assets not verified |
+| T-049 | audio graph, 24 voices, 30 procedural cues, rumble worklet | done: Chromium and WebKit unlock, panning, culling and worklet verified; procedural bank is 0 bytes |
 | T-050 | anti-cheat: 15 named threat tests, connection cap, token revocation | done: AC met; registry HTTP/DO surface remains T-046/T-047 |
-| T-051 | art atlas and GLB models | done at the asset boundary: 24-tile atlas, 9 GLB models; renderer still boxes |
+| T-051 | art atlas and GLB models | done: authored 24-tile atlas, 9 GLB models, instanced character pools and per-face tiles |
 | T-052 | content pass and recipe editor | done: 14 recipes, 6 buddies, grid editor with duplicate guard |
 | T-053 | 20-room bot swarm: p99 0.455 ms, 27 MB RSS, 240-player Oracle estimate | done |
-| T-054 | cross-browser two-client E2E suite | done: 10 specs x 4 browser projects, 67 s locally |
+| T-054 | cross-browser two-client E2E suite | done: 11 specs x 4 browser projects, CI gate <= 6 min |
 | T-055 | perf gates: size, frame p95, wasm tick, first playable, juice, draw calls | done |
 | T-056 | telemetry: JSON host logs, room metrics, crash endpoint, kill switches, runbook | partial: worker/Sentry ingest not configured |
 | T-057 | Vercel/Cloudflare deployment pipelines | not started: live deploy not authorized |
@@ -1961,6 +1961,19 @@ rows in §4.9 belong to T-049 and are not faked here. Knockback is authoritative
 simulation, not presentation; the current sim has no impulse, so T-044 does not
 invent one in the renderer.
 
+## Audio: a procedural bank, WebKit verified
+
+T-049 builds master -> compressor (-12 dB, 4:1) -> sfx/ui/music buses. The sfx
+bus admits 24 voices, culls beyond 40 m and uses equal-power panning on LOW or
+HRTF otherwise; the UI bus is stereo. A 55 Hz AudioWorklet rumble follows the
+base-under-attack intensity. The 30 §8.8 cues are synthesized from oscillators
+and one shared noise buffer, so the sample payload is 0 bytes; the recorded OGG
+bank in the plan's file list is a deliberate deviation. The audio spec runs in
+Chromium and in a dedicated `webkit-audio` project: a real canvas `pointerdown`
+must unlock the suspended context, a left-side `PannerNode` keeps x = -4, the
+24-voice cap holds, a 100 m source is culled and the worklet reports ready. All
+six WebKit tests pass.
+
 ## Host: one task per room at 20 Hz
 
 `host-axum` serves `/healthz` and `/ws?room=CODE`. The room code is validated,
@@ -2174,22 +2187,23 @@ The clean-machine and deployed-URL verification remain T-057/T-063 work.
 
 ## Where this batch stops
 
-The batch reached T-061 only partially. T-048 is now playable and T-049 has a
-real graph and 30 procedural cues, but no recorded OGG assets and no WebKit/iOS
-run. T-047's registry policy and Crockford codes are native-tested, but its
-HTTP/DO surface is blocked behind T-046. T-059 and T-061 are complete locally.
-T-046 and T-057 need a live Cloudflare/Vercel deployment, T-060 now meets the
-60-90 s target on the median with its slow seeds listed in `BALANCE.md`, and
-T-062/T-063/T-064 need physical devices,
-six humans on production and a week of telemetry. Those are not marked done.
+The batch is code-complete through T-061 except for the deployment-dependent
+rows. T-049 is verified in Chromium and WebKit with a procedural bank; T-051's
+models and atlas are rendered; T-060 meets the 60-90 s target on the median,
+with its slow seeds listed in `BALANCE.md`. T-047's registry policy and
+Crockford codes are native-tested, but its HTTP/DO surface is blocked behind
+T-046. T-046 and T-057 need a live Cloudflare/Vercel deployment, T-056's worker
+and live Sentry ingest need the same, and T-062/T-063/T-064 need physical
+devices, six humans on production and a week of telemetry. Those are not
+marked done.
 
-The current gates are 501 Rust tests, 149 Playwright specs (145 passed, four
+The current gates are 501 Rust tests, 160 Playwright specs (156 passed, four
 perf-gated skipped), clippy/fmt clean, and 20 wasm exports. T-050 is done at
 its AC boundary: 15 named threat tests, the socket guards, chat/creation rate
 limits and the committed 15-attack fixture. The registry's HTTP/DO surface
 remains T-046/T-047. The last full-browser run covers Chromium, Firefox,
-WebKit and mobile Chromium (44 E2E specs) plus the headed pointer lock
-project.
+WebKit and mobile Chromium (44 E2E specs), the WebKit audio project and the
+headed pointer lock project.
 
 ## Content discrepancies, resolved rather than guessed
 
