@@ -42,6 +42,7 @@ import { SnapshotDecoder } from "./game/net/snapshot";
 import { Interpolator } from "./game/interp";
 import { OfflineSession } from "./game/offline";
 import { OnlineSession } from "./game/online";
+import { eyePose } from "./game/view";
 import { Hud, type HudStats } from "./ui/hud";
 import { RecipeBookUi, type RecipeBookInfo } from "./ui/recipeBook";
 import { LobbyScreen } from "./ui/lobby";
@@ -87,6 +88,7 @@ interface TestApi {
   growWasm(pages: number): GrowResult;
   leakCycle(cycles: number): void;
   wasm(): { viewsAlive: boolean; memoryBytes: number };
+  camera(): { x: number; y: number; z: number; yaw: number; pitch: number };
   entities(): EntityInfo | null;
   entityBenchmark(frames?: number): (EntityInfo & { averageMs: number }) | null;
   particles(): ParticleInfo | null;
@@ -275,6 +277,7 @@ async function boot(): Promise<void> {
   // The world is 16 x 16 columns; (128, 128) is the middle of column (8, 8).
   renderer.camera.position.set(128, 78, 128);
   renderer.camera.lookAt(128, 48, 96);
+  renderer.camera.rotation.order = "YXZ";
 
   if (chunksEnabled) {
     chunks = new ChunkManager(renderer.scene, clientMeshSource(wasmClient), {
@@ -407,6 +410,7 @@ async function boot(): Promise<void> {
     onlineSnapshot = false;
     onlineEnded = false;
     onlineOverride = null;
+    entities?.hideLocalPlayer(-1);
   }
 
   function leaveMatch(): void {
@@ -490,6 +494,7 @@ async function boot(): Promise<void> {
     chunkSync.reset();
     offlineActive = true;
     offlineSnapshot = false;
+    entities?.hideLocalPlayer(0);
     lastOfflineInput = 0;
     sessionTeam = 0;
     localCarried = 0;
@@ -534,6 +539,7 @@ async function boot(): Promise<void> {
         showResults(bytes);
         offlineActive = false;
         offlineSnapshot = false;
+        entities?.hideLocalPlayer(-1);
         offline?.stop();
         offline = null;
         screens?.show("results");
@@ -543,6 +549,7 @@ async function boot(): Promise<void> {
         if (ended) {
           offlineActive = false;
           offlineSnapshot = false;
+          entities?.hideLocalPlayer(-1);
           offline?.stop();
           offline = null;
           screens?.show("results");
@@ -576,6 +583,7 @@ async function boot(): Promise<void> {
       name: query.get("name") ?? "PLAYER",
       onWelcome: (message) => {
         onlinePlayerId = message.playerId;
+        entities?.hideLocalPlayer(message.playerId);
         sessionTeam = message.team;
         hudStore.set({ hp: 100, maxHp: 100, crates: 0, carryCap: 12 });
       },
@@ -614,6 +622,7 @@ async function boot(): Promise<void> {
         onlineEnded = true;
         onlineActive = false;
         onlineSnapshot = false;
+        entities?.hideLocalPlayer(-1);
         online?.stop();
         online = null;
         screens?.show("results");
@@ -621,6 +630,7 @@ async function boot(): Promise<void> {
       onFatal: () => {
         onlineActive = false;
         onlineSnapshot = false;
+        entities?.hideLocalPlayer(-1);
       },
     });
     screens?.show("match");
@@ -665,6 +675,13 @@ async function boot(): Promise<void> {
     wasm: () => ({
       viewsAlive: client?.viewsAlive() ?? false,
       memoryBytes: client?.memoryBytes() ?? 0,
+    }),
+    camera: () => ({
+      x: renderer.camera.position.x,
+      y: renderer.camera.position.y,
+      z: renderer.camera.position.z,
+      yaw: renderer.camera.rotation.y,
+      pitch: renderer.camera.rotation.x,
     }),
     entities: () => entities?.info() ?? null,
     entityBenchmark: (frames = 60) => {
@@ -1105,16 +1122,18 @@ async function boot(): Promise<void> {
   function followSessionCamera(playerId: number): void {
     for (let i = 0; i < interpolator.playerCount; i += 1) {
       if (interpolator.playerIds[i] !== playerId) continue;
-      const yaw = interpolator.playerYaw[i];
-      const x = interpolator.playerX[i];
-      const y = interpolator.playerY[i];
-      const z = interpolator.playerZ[i];
-      renderer.camera.position.set(
-        x - Math.sin(yaw) * 4.2,
-        y + 2.6,
-        z - Math.cos(yaw) * 4.2,
+      const snapshotYaw = (interpolator.playerYaw[i] * 256) / (Math.PI * 2);
+      const yaw = desktop?.yawValue ?? touch?.yawValue ?? snapshotYaw;
+      const pitch = desktop?.pitchValue ?? touch?.pitchValue ?? 0;
+      const pose = eyePose(
+        interpolator.playerX[i],
+        interpolator.playerY[i],
+        interpolator.playerZ[i],
+        yaw,
+        pitch,
       );
-      renderer.camera.lookAt(x, y + 1.1, z);
+      renderer.camera.position.set(pose.x, pose.y, pose.z);
+      renderer.camera.rotation.set(pose.rotationX, pose.rotationY, 0);
       hudStore.set({ hp: interpolator.playerHp[i], maxHp: 100 });
       return;
     }

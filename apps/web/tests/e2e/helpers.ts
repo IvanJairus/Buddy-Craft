@@ -41,6 +41,14 @@ interface TestWindow {
   __cbReady?: boolean;
   __cbTest?: {
     screen(): string;
+    camera(): { x: number; y: number; z: number; yaw: number; pitch: number };
+    entities(): {
+      drawCalls: number;
+      players: number;
+      buddies: number;
+      hiddenLocal: number;
+      lastUpdateMs: number;
+    } | null;
     offlineStart(mode?: number, teams?: number): boolean;
     offlineStats(): Stats;
     offlineAdvance(ticks: number, post?: boolean): void;

@@ -69,6 +69,7 @@ export interface EntityInfo {
   drawCalls: number;
   players: number;
   buddies: number;
+  hiddenLocal: number;
   lastUpdateMs: number;
 }
 
@@ -174,6 +175,7 @@ export class EntityRenderer {
   private readonly flashUntil = new Map<number, number>();
   private playerCount = 0;
   private buddyCount = 0;
+  private localId = -1;
   private lastUpdateMs = 0;
 
   constructor(parent: THREE.Object3D) {
@@ -284,6 +286,11 @@ export class EntityRenderer {
     return this.info();
   }
 
+  /** First-person view: the local body must not cover the reticle. */
+  hideLocalPlayer(id: number): void {
+    this.localId = id;
+  }
+
   /** A one-event hit flash on one network id. Duration is presentation-only. */
   flash(id: number, nowMs = performance.now(), durationMs = 80): void {
     this.flashUntil.set(id, nowMs + durationMs);
@@ -323,6 +330,7 @@ export class EntityRenderer {
       drawCalls,
       players: this.playerCount,
       buddies: this.buddyCount,
+      hiddenLocal: this.localId,
       lastUpdateMs: this.lastUpdateMs,
     };
   }
@@ -390,7 +398,7 @@ export class EntityRenderer {
     const bob = animate ? bobOffset(value.anim) : 0;
     const tilt = tiltAngle(value.pitch);
     const weaponScale = animate ? attackScale(value.flags, value.anim) : 1;
-    const alpha = dissolveAlpha(value.flags, value.hp, value.anim);
+    const alpha = value.id === this.localId ? 0 : dissolveAlpha(value.flags, value.hp, value.anim);
     const [body, head, weapon] = parts;
 
     place(body, index, value.x, value.y + BODY_HEIGHT / 2 + bob, value.z, tilt, value.yaw, 1);

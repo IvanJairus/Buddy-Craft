@@ -75,6 +75,9 @@ export class Hud {
   constructor(parent: HTMLElement, store: Store<HudState>) {
     this.root = make("div", "hud");
     this.root.setAttribute("aria-label", "Match HUD");
+    const reticle = make("div", "hud-reticle");
+    reticle.dataset.hud = "reticle";
+    this.root.append(reticle);
 
     const top = make("div", "hud-top");
     const left = make("div", "hud-stack");

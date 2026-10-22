@@ -171,7 +171,7 @@ cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Client (first run also needs `npx playwright install chromium`)
-cd apps/web && npm ci && npm run test:e2e          # 98 specs passed, 4 perf-gated skipped, 1 headed
+cd apps/web && npm ci && npm run test:e2e          # 100 specs passed, 4 perf-gated skipped, 1 headed
 cd apps/web && PERF_GATE=1 npx playwright test tests/perf.spec.ts --project=headless
 
 # Host (local dev). `CB_ADDR`, `CB_ALLOWED_ORIGINS` and `CB_SUMMARY_DIR` override defaults.
@@ -2055,6 +2055,21 @@ The remaining L5 caveat is the same as §12.7: headless WebGL is SwiftShader, no
 a phone GPU, and the accelerated setup is not a substitute for T-060's human
 playtest.
 
+## Local view: first person and a reticle
+
+The first UI playtest on 2026-10-22 exposed three aiming problems that the
+state-only specs did not: the third-person camera put the local body exactly
+on the aim point, it had no pitch so a player could not aim up or down, and
+desktop had no reticle. The local view is now first person. The camera sits at
+1.62 m, follows the same yaw byte and ±64 pitch the server reads, and the local
+instance is alpha-zeroed in `EntityRenderer` so remote bodies stay visible.
+A 12 px reticle is centred in the HUD and hidden for coarse pointers, where
+the touch crosshair already exists. `tests/view.spec.ts` pins the yaw/pitch to
+facing-vector conversion and `tests/e2e/playability.spec.ts` pins eye height,
+the hidden local id and the reticle centre. Presentation only: simulation,
+protocol and snapshots did not change. T-060 remains partial; no bot tuning
+was shipped in this pass.
+
 ## Balance: four numbers, ten bot matches
 
 T-060 adds `EconomyTracker` in `apps/web/src/telemetry/economy.ts`. It folds the
@@ -2165,12 +2180,13 @@ T-046 and T-057 need a live Cloudflare/Vercel deployment, T-060's target still
 needs a bot economy/pathing fix, and T-062/T-063/T-064 need physical devices,
 six humans on production and a week of telemetry. Those are not marked done.
 
-The current gates are 501 Rust tests, 138 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
-20 wasm exports. T-050 is done at its AC boundary: 15 named threat tests, the
-socket guards, chat/creation rate limits and the committed 15-attack fixture.
-The registry's HTTP/DO surface remains T-046/T-047. The last full-browser run is Chromium plus the headed pointer
-lock project; Firefox and WebKit are now installed through Playwright and the
-T-054 suite runs on both.
+The current gates are 501 Rust tests, 149 Playwright specs (145 passed, four
+perf-gated skipped), clippy/fmt clean, and 20 wasm exports. T-050 is done at
+its AC boundary: 15 named threat tests, the socket guards, chat/creation rate
+limits and the committed 15-attack fixture. The registry's HTTP/DO surface
+remains T-046/T-047. The last full-browser run covers Chromium, Firefox,
+WebKit and mobile Chromium (44 E2E specs) plus the headed pointer lock
+project.
 
 ## Content discrepancies, resolved rather than guessed
 

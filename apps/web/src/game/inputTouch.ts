@@ -336,6 +336,14 @@ export class TouchInput {
     return this.polls;
   }
 
+  get yawValue(): number {
+    return this.yaw;
+  }
+
+  get pitchValue(): number {
+    return this.pitch;
+  }
+
   get stanceValue(): Stance {
     return STANCES[this.stanceIndex];
   }
