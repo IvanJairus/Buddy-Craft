@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /**
- * T-051 placeholder atlas generator.
+ * T-051 block atlas.
  *
- * 256 x 256 RGBA, sixteen 16x16 tiles per row. The first 20 tiles correspond to
- * `data/blocks.ron` in order; the last four are spare. The palette is deliberately
- * flat and low-noise so the PNG stays inside the 30 KB blocking budget.
+ * 256 x 256 RGBA, sixteen 16x16 tiles per row. Tiles 0..19 follow
+ * `data/blocks.ron`; 20 is a log end, 21 a grass side, 22 a crate top and 23 a
+ * core top. The face remap in `chunkManager.ts` uses 20 and 21. The output is
+ * deterministic and stays under the 30 KB blocking budget.
  */
+
 import { deflateSync } from "node:zlib";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -16,92 +18,387 @@ const TILE = 16;
 const TILES = 16;
 const pixels = new Uint8Array(SIZE * SIZE * 4);
 
-const palette = [
-  [0, 0, 0, 0],         // air
-  [125, 128, 127, 255], // stone
-  [122, 82, 48, 255],   // dirt
-  [94, 156, 74, 255],   // grass
-  [217, 193, 122, 255], // sand
-  [139, 131, 120, 255], // gravel
-  [47, 111, 159, 210],  // water
-  [107, 74, 42, 255],   // log
-  [63, 122, 58, 255],   // leaves
-  [58, 58, 64, 255],    // bedrock
-  [93, 102, 112, 255],  // pad floor
-  [169, 119, 63, 255],  // crate
-  [75, 36, 64, 255],    // core
-  [166, 107, 85, 255],  // clay
-  [232, 238, 242, 255], // snow
-  [78, 107, 61, 255],   // moss
-  [76, 77, 85, 255],    // basalt
-  [201, 169, 110, 255], // sandstone
-  [109, 111, 113, 255], // cobble
-  [212, 212, 74, 120],  // marker
-  [86, 140, 100, 255],
-  [140, 100, 86, 255],
-  [110, 120, 150, 255],
-  [150, 120, 80, 255],
-];
+const clamp = (value) => Math.max(0, Math.min(255, Math.round(value)));
 
-let seed = 0x51a7e;
-function rand() {
-  seed = (seed * 1664525 + 1013904223) >>> 0;
-  return seed;
+function hash(x, y, salt) {
+  let h = Math.imul(x ^ salt, 374761393) ^ Math.imul(y + salt, 668265263);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
 }
 
-function put(x, y, color) {
-  const at = (y * SIZE + x) * 4;
-  pixels[at] = color[0];
-  pixels[at + 1] = color[1];
-  pixels[at + 2] = color[2];
-  pixels[at + 3] = color[3] ?? 255;
+function put(tile, x, y, color, alpha = 255) {
+  if (x < 0 || y < 0 || x >= TILE || y >= TILE) return;
+  // PNG row 0 lands on texture v=0, which is the bottom of a vertical face;
+  // flip inside the tile so authored y=0 is the world top.
+  const row = TILE - 1 - y;
+  const at = ((Math.floor(tile / TILES) * TILE + row) * SIZE + (tile % TILES) * TILE + x) * 4;
+  pixels[at] = clamp(color[0]);
+  pixels[at + 1] = clamp(color[1]);
+  pixels[at + 2] = clamp(color[2]);
+  pixels[at + 3] = alpha;
 }
 
-for (let tile = 0; tile < 24; tile += 1) {
-  const tx = (tile % TILES) * TILE;
-  const ty = Math.floor(tile / TILES) * TILE;
-  const base = palette[tile];
+function shade(color, delta) {
+  return [color[0] + delta, color[1] + delta, color[2] + delta];
+}
+
+function base(tile, color, variance, alpha = 255) {
   for (let y = 0; y < TILE; y += 1) {
     for (let x = 0; x < TILE; x += 1) {
-      const noise = ((rand() >>> 28) & 3) * 4 - 6;
-      const shade = (value) => Math.max(0, Math.min(255, value + noise));
-      put(tx + x, ty + y, [shade(base[0]), shade(base[1]), shade(base[2]), base[3]]);
+      const n = (hash(x, y, tile) - 0.5) * 2;
+      put(tile, x, y, shade(color, n * variance), alpha);
     }
-  }
-  // A few deliberate marks make the tiles readable at 16 px.
-  if ([1, 2, 5, 9, 13, 16, 18].includes(tile)) {
-    for (let i = 2; i < 14; i += 4) put(tx + i, ty + 11, [base[0] - 18, base[1] - 18, base[2] - 18, 255]);
-  }
-  if (tile === 3) {
-    for (let i = 2; i < 16; i += 5) put(tx + i, ty + 3, [45, 95, 45, 255]);
-  }
-  if (tile === 7) {
-    for (let y = 1; y < 15; y += 3) put(tx + 7, ty + y, [70, 45, 25, 255]);
-  }
-  if (tile === 10) {
-    for (let x = 1; x < 15; x += 2) put(tx + x, ty + 2, [130, 140, 148, 255]);
-    for (let y = 1; y < 15; y += 2) put(tx + 2, ty + y, [130, 140, 148, 255]);
-  }
-  if (tile === 11) {
-    for (let x = 1; x < 15; x += 1) {
-      put(tx + x, ty + 2, [80, 48, 22, 255]);
-      put(tx + x, ty + 13, [80, 48, 22, 255]);
-    }
-    for (let y = 3; y < 13; y += 1) put(tx + 8, ty + y, [110, 70, 34, 255]);
-  }
-  if (tile === 12) {
-    for (let i = 4; i < 12; i += 1) {
-      put(tx + i, ty + 7, [220, 110, 190, 255]);
-      put(tx + 7, ty + i, [220, 110, 190, 255]);
-    }
-  }
-  if (tile === 6) {
-    for (let x = 1; x < 16; x += 4) put(tx + x, ty + 5, [110, 180, 220, 230]);
-  }
-  if (tile === 14) {
-    for (let x = 1; x < 16; x += 3) put(tx + x, ty + 1, [255, 255, 255, 255]);
   }
 }
+
+function rect(tile, x0, y0, x1, y1, color, alpha = 255) {
+  for (let y = y0; y <= y1; y += 1) {
+    for (let x = x0; x <= x1; x += 1) put(tile, x, y, color, alpha);
+  }
+}
+
+function line(tile, x0, y0, x1, y1, color, alpha = 255) {
+  const dx = Math.abs(x1 - x0);
+  const dy = -Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1;
+  const sy = y0 < y1 ? 1 : -1;
+  let error = dx + dy;
+  let x = x0;
+  let y = y0;
+  for (;;) {
+    put(tile, x, y, color, alpha);
+    if (x === x1 && y === y1) break;
+    const e2 = 2 * error;
+    if (e2 >= dy) {
+      error += dy;
+      x += sx;
+    }
+    if (e2 <= dx) {
+      error += dx;
+      y += sy;
+    }
+  }
+}
+
+function speckle(tile, count, salt, color, min = 0, max = TILE - 1) {
+  for (let i = 0; i < count; i += 1) {
+    const x = min + Math.floor(hash(i, salt, tile) * (max - min + 1));
+    const y = min + Math.floor(hash(salt, i, tile + 7) * (max - min + 1));
+    put(tile, x, y, color);
+  }
+}
+
+function stone() {
+  base(1, [120, 122, 124], 10);
+  line(1, 2, 3, 6, 8, [96, 98, 101]);
+  line(1, 6, 8, 5, 13, [96, 98, 101]);
+  line(1, 10, 1, 13, 6, [104, 106, 109]);
+  line(1, 13, 6, 11, 11, [104, 106, 109]);
+  speckle(1, 7, 2, [148, 150, 152]);
+  speckle(1, 5, 9, [102, 104, 106]);
+}
+
+function dirt() {
+  base(2, [121, 82, 50], 12);
+  for (const [x, y] of [[2, 4], [7, 10], [12, 3], [4, 13], [10, 6]]) {
+    rect(2, x, y, x + 1, y + 1, [100, 64, 38]);
+  }
+  speckle(2, 9, 3, [146, 105, 68]);
+  speckle(2, 5, 11, [88, 56, 34]);
+  line(2, 13, 12, 14, 15, [92, 58, 34]);
+}
+
+function grassTop() {
+  base(3, [88, 150, 70], 9);
+  for (let i = 0; i < 18; i += 1) {
+    const x = Math.floor(hash(i, 1, 3) * TILE);
+    const y = Math.floor(hash(1, i, 3) * TILE);
+    const light = hash(i, i, 13) > 0.55;
+    put(3, x, y, light ? [126, 184, 92] : [66, 120, 54]);
+    if (hash(x, y, 21) > 0.6) put(3, x, y - 1, light ? [146, 200, 108] : [76, 134, 60]);
+  }
+  for (const [x, y] of [[4, 5], [12, 11]]) {
+    put(3, x, y, [240, 220, 120]);
+    put(3, x + 1, y, [255, 240, 170]);
+  }
+  speckle(3, 4, 17, [54, 104, 46]);
+}
+
+function sand() {
+  base(4, [214, 190, 124], 8);
+  speckle(4, 10, 4, [196, 170, 108]);
+  speckle(4, 8, 14, [232, 210, 150]);
+  for (const y of [4, 10]) {
+    for (let x = 1; x < 14; x += 1) {
+      if (hash(x, y, 4) > 0.45) put(4, x, y, [202, 176, 112]);
+    }
+  }
+}
+
+function gravel() {
+  base(5, [126, 120, 112], 12);
+  for (const [x, y, w, h, c] of [
+    [1, 2, 2, 2, [156, 148, 138]],
+    [6, 1, 2, 3, [148, 140, 128]],
+    [11, 3, 3, 2, [166, 156, 144]],
+    [2, 8, 3, 3, [142, 134, 122]],
+    [8, 9, 2, 2, [162, 152, 140]],
+    [12, 11, 2, 3, [150, 142, 132]],
+  ]) {
+    rect(5, x, y, x + w - 1, y + h - 1, c);
+    rect(5, x, y + h - 1, x + w - 1, y + h - 1, shade(c, -28));
+  }
+  speckle(5, 6, 5, [92, 88, 84]);
+}
+
+function water() {
+  base(6, [48, 112, 160], 7, 210);
+  for (const y of [3, 8, 12]) {
+    for (let x = 0; x < TILE; x += 1) {
+      if (hash(x, y, 6) > 0.3) put(6, x, y, [92, 160, 202], 210);
+    }
+  }
+  speckle(6, 5, 16, [196, 226, 244], 1, 14);
+}
+
+function logSide() {
+  base(7, [104, 72, 42], 8);
+  for (const x of [2, 5, 9, 13]) {
+    for (let y = 0; y < TILE; y += 1) {
+      if (hash(x, y, 7) > 0.15) put(7, x, y, [78, 51, 28]);
+    }
+  }
+  for (const x of [3, 11]) {
+    for (let y = 2; y < 13; y += 4) put(7, x, y, [128, 92, 56]);
+  }
+  put(7, 8, 6, [62, 40, 22]);
+  put(7, 7, 7, [142, 102, 62]);
+  put(7, 8, 8, [62, 40, 22]);
+}
+
+function leaves() {
+  base(8, [56, 116, 52], 12);
+  for (let i = 0; i < 9; i += 1) {
+    const x = Math.floor(hash(i, 8, 8) * TILE);
+    const y = Math.floor(hash(8, i, 8) * TILE);
+    const light = hash(i, i, 9) > 0.4;
+    const c = light ? [86, 152, 68] : [40, 90, 40];
+    rect(8, x, y, x + 1, y + 1, c);
+    if (hash(x, y, 10) > 0.5) put(8, x + 2, y + 1, shade(c, 14));
+  }
+  speckle(8, 6, 12, [32, 74, 34]);
+}
+
+function bedrock() {
+  base(9, [50, 52, 56], 12);
+  line(9, 1, 4, 6, 3, [34, 36, 40]);
+  line(9, 6, 3, 9, 7, [34, 36, 40]);
+  line(9, 9, 7, 14, 10, [34, 36, 40]);
+  rect(9, 2, 11, 5, 13, [70, 72, 78]);
+  rect(9, 10, 2, 13, 5, [66, 68, 74]);
+  speckle(9, 5, 9, [84, 86, 92]);
+}
+
+function padFloor() {
+  base(10, [84, 94, 106], 5);
+  for (const at of [0, 8]) {
+    for (let i = 0; i < TILE; i += 1) {
+      put(10, at, i, [62, 72, 84]);
+      put(10, i, at, [62, 72, 84]);
+      put(10, at + 1, i, [96, 106, 118]);
+    }
+  }
+  for (const [x, y] of [[2, 2], [10, 2], [2, 10], [10, 10]]) {
+    put(10, x, y, [126, 136, 148]);
+    put(10, x + 1, y, [110, 120, 132]);
+  }
+  speckle(10, 4, 10, [72, 82, 94]);
+}
+
+function crate() {
+  base(11, [162, 112, 58], 8);
+  for (const y of [5, 10]) {
+    for (let x = 0; x < TILE; x += 1) put(11, x, y, [96, 62, 30]);
+  }
+  line(11, 1, 1, 14, 14, [118, 78, 38]);
+  line(11, 14, 1, 1, 14, [118, 78, 38]);
+  line(11, 2, 1, 15, 14, [138, 92, 46]);
+  line(11, 13, 1, 0, 14, [138, 92, 46]);
+  for (const [x, y] of [[1, 1], [14, 1], [1, 14], [14, 14]]) {
+    put(11, x, y, [196, 198, 202]);
+    put(11, x + (x < 8 ? 1 : -1), y, [160, 162, 166]);
+  }
+  rect(11, 0, 0, 15, 0, [82, 52, 26]);
+  rect(11, 0, 15, 15, 15, [82, 52, 26]);
+}
+
+function core() {
+  base(12, [72, 32, 62], 8);
+  for (let x = 0; x < TILE; x += 1) {
+    put(12, x, 0, [48, 20, 42]);
+    put(12, x, 15, [48, 20, 42]);
+  }
+  line(12, 8, 2, 13, 8, [220, 90, 180]);
+  line(12, 13, 8, 8, 14, [220, 90, 180]);
+  line(12, 8, 14, 3, 8, [220, 90, 180]);
+  line(12, 3, 8, 8, 2, [220, 90, 180]);
+  rect(12, 7, 7, 8, 8, [255, 170, 230]);
+  speckle(12, 5, 12, [255, 210, 240]);
+}
+
+function clay() {
+  base(13, [162, 104, 84], 11);
+  for (const [x, y] of [[2, 3], [9, 2], [5, 9], [11, 11]]) {
+    rect(13, x, y, x + 1, y + 1, [142, 88, 70]);
+  }
+  speckle(13, 7, 13, [184, 124, 100]);
+  speckle(13, 5, 23, [126, 76, 60]);
+}
+
+function snow() {
+  base(14, [236, 242, 246], 4);
+  for (const [x, y] of [[2, 3], [9, 5], [5, 11], [12, 12]]) {
+    rect(14, x, y, x + 1, y, [214, 228, 240]);
+  }
+  speckle(14, 7, 14, [255, 255, 255]);
+  speckle(14, 3, 24, [206, 220, 234]);
+}
+
+function moss() {
+  base(15, [74, 104, 58], 10);
+  for (const [x, y] of [[2, 2], [7, 4], [11, 8], [4, 11]]) {
+    rect(15, x, y, x + 2, y + 1, [96, 132, 70]);
+  }
+  rect(15, 12, 2, 13, 3, [98, 96, 92]);
+  rect(15, 3, 7, 4, 8, [104, 102, 98]);
+  speckle(15, 6, 15, [54, 82, 44]);
+}
+
+function basalt() {
+  base(16, [66, 68, 74], 9);
+  for (const x of [3, 8, 12]) {
+    for (let y = 0; y < TILE; y += 1) {
+      if (hash(x, y, 16) > 0.2) put(16, x, y, [48, 50, 56]);
+      if (hash(y, x, 16) > 0.75) put(16, x + 1, y, [84, 86, 92]);
+    }
+  }
+  line(16, 1, 12, 5, 14, [42, 44, 50]);
+  speckle(16, 5, 26, [92, 94, 100]);
+}
+
+function sandstone() {
+  base(17, [196, 166, 110], 7);
+  for (const y of [3, 7, 12]) {
+    for (let x = 0; x < TILE; x += 1) {
+      if (hash(x, y, 17) > 0.2) put(17, x, y, [172, 142, 90]);
+    }
+  }
+  for (let x = 0; x < TILE; x += 1) {
+    if (hash(x, 5, 17) > 0.3) put(17, x, 5, [216, 190, 136]);
+  }
+  speckle(17, 5, 27, [146, 118, 78]);
+}
+
+function cobble() {
+  base(18, [96, 98, 100], 8);
+  const stones = [
+    [1, 1, 5, 5, [134, 136, 138]],
+    [8, 1, 13, 5, [124, 126, 128]],
+    [1, 8, 5, 13, [142, 144, 146]],
+    [7, 7, 12, 12, [130, 132, 134]],
+    [13, 9, 15, 14, [120, 122, 124]],
+  ];
+  for (const [x0, y0, x1, y1, c] of stones) {
+    rect(18, x0 + 1, y0, x1 - 1, y1, c);
+    rect(18, x0, y0 + 1, x1, y1 - 1, c);
+    rect(18, x0, y1, x1, y1, shade(c, -26));
+  }
+  speckle(18, 6, 18, [168, 170, 172]);
+}
+
+function marker() {
+  base(19, [208, 198, 76], 6, 120);
+  for (const y of [4, 9]) {
+    line(19, 3, y + 2, 8, y - 2, [255, 236, 130], 170);
+    line(19, 8, y - 2, 12, y + 2, [255, 236, 130], 170);
+  }
+  rect(19, 0, 0, 15, 0, [236, 224, 96], 160);
+  rect(19, 0, 15, 15, 15, [236, 224, 96], 160);
+}
+
+function logTop() {
+  base(20, [158, 124, 78], 6);
+  for (let y = 0; y < TILE; y += 1) {
+    for (let x = 0; x < TILE; x += 1) {
+      const d = Math.max(Math.abs(x - 7.5), Math.abs(y - 7.5));
+      if (d > 6.7) put(20, x, y, [92, 62, 34]);
+      else if (Math.abs(d - 5.2) < 0.55) put(20, x, y, [126, 92, 52]);
+      else if (Math.abs(d - 3.4) < 0.55) put(20, x, y, [132, 98, 58]);
+      else if (Math.abs(d - 1.5) < 0.55) put(20, x, y, [124, 90, 50]);
+    }
+  }
+  put(20, 7, 7, [86, 58, 34]);
+  put(20, 8, 8, [86, 58, 34]);
+  speckle(20, 4, 20, [176, 142, 94]);
+}
+
+function grassSide() {
+  base(21, [121, 82, 50], 10);
+  for (let x = 0; x < TILE; x += 1) {
+    const depth = 3 + Math.floor(hash(x, 1, 21) * 3);
+    for (let y = 0; y < depth; y += 1) {
+      const light = hash(x, y, 22) > 0.6;
+      put(21, x, y, light ? [110, 172, 80] : [76, 134, 58]);
+    }
+    put(21, x, depth, [58, 104, 46]);
+    if (hash(x, depth, 23) > 0.7) put(21, x, depth + 1, [70, 96, 48]);
+  }
+  speckle(21, 5, 31, [146, 105, 68]);
+}
+
+function crateTop() {
+  base(22, [156, 108, 56], 6);
+  rect(22, 0, 0, 15, 1, [112, 74, 36]);
+  rect(22, 0, 14, 15, 15, [112, 74, 36]);
+  rect(22, 0, 0, 1, 15, [112, 74, 36]);
+  rect(22, 14, 0, 15, 15, [112, 74, 36]);
+  for (let i = 2; i < 14; i += 4) line(22, i, 2, i + 3, 13, [136, 92, 46]);
+  for (const [x, y] of [[3, 3], [12, 3], [3, 12], [12, 12]]) put(22, x, y, [192, 194, 198]);
+}
+
+function coreTop() {
+  base(23, [64, 28, 56], 6);
+  line(23, 8, 2, 13, 8, [210, 86, 170]);
+  line(23, 13, 8, 8, 14, [210, 86, 170]);
+  line(23, 8, 14, 3, 8, [210, 86, 170]);
+  line(23, 3, 8, 8, 2, [210, 86, 170]);
+  rect(23, 7, 7, 8, 8, [255, 190, 236]);
+  speckle(23, 6, 23, [150, 60, 120]);
+}
+
+stone();
+dirt();
+grassTop();
+sand();
+gravel();
+water();
+logSide();
+leaves();
+bedrock();
+padFloor();
+crate();
+core();
+clay();
+snow();
+moss();
+basalt();
+sandstone();
+cobble();
+marker();
+logTop();
+grassSide();
+crateTop();
+coreTop();
 
 function chunk(type, data) {
   const name = Buffer.from(type, "ascii");

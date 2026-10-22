@@ -30,6 +30,7 @@
 import * as THREE from "three";
 import { DESC_BUDDY_COUNT, DESC_PLAYER_COUNT, GPU_PLAYER_BYTES } from "../wasm/loader";
 import type { RenderViews } from "../wasm/loader";
+import type { CharacterModels } from "./characters";
 
 export const FLAG_ALIVE = 1 << 0;
 export const FLAG_ON_GROUND = 1 << 1;
@@ -122,6 +123,8 @@ interface Part {
   alpha: THREE.InstancedBufferAttribute;
 }
 
+type ModelPool = Part;
+
 function makePart(
   material: THREE.MeshBasicMaterial,
   size: [number, number, number],
@@ -138,8 +141,24 @@ function makePart(
   return { mesh, alpha };
 }
 
-function createMaterial(): THREE.MeshBasicMaterial {
-  const material = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true });
+function makeModelPool(
+  material: THREE.MeshBasicMaterial,
+  source: THREE.BufferGeometry,
+  max: number,
+): ModelPool {
+  const geometry = source.clone();
+  const alpha = new THREE.InstancedBufferAttribute(new Float32Array(max).fill(1), 1);
+  geometry.setAttribute("instanceAlpha", alpha);
+  const mesh = new THREE.InstancedMesh(geometry, material, max);
+  mesh.count = 0;
+  mesh.visible = false;
+  mesh.frustumCulled = false;
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  return { mesh, alpha };
+}
+
+function createMaterial(vertexColors: boolean, key: string): THREE.MeshBasicMaterial {
+  const material = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, vertexColors });
   material.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader.replace(
       "#include <common>",
@@ -158,16 +177,20 @@ function createMaterial(): THREE.MeshBasicMaterial {
       "#include <dithering_fragment>\ngl_FragColor.a *= vInstanceAlpha;",
     );
   };
-  material.customProgramCacheKey = () => "entity-instance-alpha";
+  material.customProgramCacheKey = () => key;
   return material;
 }
 
 export class EntityRenderer {
   readonly group = new THREE.Group();
 
-  private readonly material = createMaterial();
+  private readonly material = createMaterial(false, "entity-instance-alpha");
+  private readonly modelMaterial: THREE.MeshBasicMaterial | null;
   private readonly playerParts: [Part, Part, Part];
   private readonly roleParts: Array<[Part, Part, Part]>;
+  private readonly playerModelPools: ModelPool[] = [];
+  private readonly buddyModelPools: ModelPool[] = [];
+  private readonly slotCounts = new Uint16Array(BUDDY_ROLE_COUNT);
   private readonly players: EntityValue[] = [];
   private readonly buddies: EntityValue[] = [];
   private readonly color = new THREE.Color();
@@ -178,7 +201,7 @@ export class EntityRenderer {
   private localId = -1;
   private lastUpdateMs = 0;
 
-  constructor(parent: THREE.Object3D) {
+  constructor(parent: THREE.Object3D, models: CharacterModels | null = null) {
     this.playerParts = [
       makePart(this.material, [0.6, BODY_HEIGHT, 0.4], MAX_PLAYERS),
       makePart(this.material, [0.4, 0.4, 0.4], MAX_PLAYERS),
@@ -195,6 +218,23 @@ export class EntityRenderer {
         this.group.add(part.mesh);
       }
     }
+
+    if (models !== null && models.players.length > 0 && models.buddies.length > 0) {
+      this.modelMaterial = createMaterial(true, "entity-model-alpha");
+      for (const geometry of models.players) {
+        const pool = makeModelPool(this.modelMaterial, geometry, MAX_PLAYERS);
+        this.playerModelPools.push(pool);
+        this.group.add(pool.mesh);
+      }
+      for (const geometry of models.buddies) {
+        const pool = makeModelPool(this.modelMaterial, geometry, MAX_BUDDIES);
+        this.buddyModelPools.push(pool);
+        this.group.add(pool.mesh);
+      }
+    } else {
+      this.modelMaterial = null;
+    }
+
     for (let i = 0; i < MAX_PLAYERS; i += 1) {
       this.players.push(emptyEntity());
     }
@@ -318,12 +358,18 @@ export class EntityRenderer {
 
   info(): EntityInfo {
     let drawCalls = 0;
-    if (this.playerCount > 0) {
-      drawCalls += this.playerParts.length;
-    }
-    for (let role = 0; role < BUDDY_ROLE_COUNT; role += 1) {
-      if (this.roleCount(role) > 0) {
-        drawCalls += this.roleParts[role].length;
+    if (this.modelMaterial !== null) {
+      for (const pool of [...this.playerModelPools, ...this.buddyModelPools]) {
+        if (pool.mesh.visible) drawCalls += 1;
+      }
+    } else {
+      if (this.playerCount > 0) {
+        drawCalls += this.playerParts.length;
+      }
+      for (let role = 0; role < BUDDY_ROLE_COUNT; role += 1) {
+        if (this.roleCount(role) > 0) {
+          drawCalls += this.roleParts[role].length;
+        }
       }
     }
     return {
@@ -343,6 +389,11 @@ export class EntityRenderer {
       }
     }
     this.material.dispose();
+    for (const pool of [...this.playerModelPools, ...this.buddyModelPools]) {
+      pool.mesh.geometry.dispose();
+      this.group.remove(pool.mesh);
+    }
+    this.modelMaterial?.dispose();
     this.group.removeFromParent();
   }
 
@@ -361,32 +412,94 @@ export class EntityRenderer {
     this.buddyCount = buddyCount;
     const now = performance.now();
 
-    for (let i = 0; i < playerCount; i += 1) {
-      const value = this.players[i];
-      const base = PLAYER_COLORS[value.team & 1] ?? PLAYER_COLORS[0];
-      this.color.setHex((this.flashUntil.get(value.id) ?? 0) > now ? 0xffffff : base);
-      this.writeEntity(this.playerParts, i, value, animate);
-    }
-    this.finishParts(this.playerParts, playerCount);
-
-    for (let role = 0; role < BUDDY_ROLE_COUNT; role += 1) {
-      const parts = this.roleParts[role];
-      let slot = 0;
-      for (let i = 0; i < buddyCount; i += 1) {
-        const value = this.buddies[i];
-        if (value.role !== role) {
-          continue;
-        }
-        this.color.setHex(
-          (this.flashUntil.get(value.id) ?? 0) > now ? 0xffffff : ROLE_COLORS[role],
-        );
-        this.writeEntity(parts, slot, value, animate);
-        slot += 1;
+    if (this.modelMaterial !== null) {
+      this.applyModels(this.playerModelPools, this.players, playerCount, animate, now);
+      this.applyModels(this.buddyModelPools, this.buddies, buddyCount, animate, now);
+    } else {
+      for (let i = 0; i < playerCount; i += 1) {
+        const value = this.players[i];
+        const base = PLAYER_COLORS[value.team & 1] ?? PLAYER_COLORS[0];
+        this.color.setHex((this.flashUntil.get(value.id) ?? 0) > now ? 0xffffff : base);
+        this.writeEntity(this.playerParts, i, value, animate);
       }
-      this.finishParts(parts, slot);
+      this.finishParts(this.playerParts, playerCount);
+
+      for (let role = 0; role < BUDDY_ROLE_COUNT; role += 1) {
+        const parts = this.roleParts[role];
+        let slot = 0;
+        for (let i = 0; i < buddyCount; i += 1) {
+          const value = this.buddies[i];
+          if (value.role !== role) {
+            continue;
+          }
+          this.color.setHex(
+            (this.flashUntil.get(value.id) ?? 0) > now ? 0xffffff : ROLE_COLORS[role],
+          );
+          this.writeEntity(parts, slot, value, animate);
+          slot += 1;
+        }
+        this.finishParts(parts, slot);
+      }
     }
 
     this.lastUpdateMs = performance.now() - start;
+  }
+
+  private applyModels(
+    pools: ModelPool[],
+    values: EntityValue[],
+    count: number,
+    animate: boolean,
+    now: number,
+  ): void {
+    this.slotCounts.fill(0);
+    for (let i = 0; i < count; i += 1) {
+      const value = values[i];
+      const poolIndex = pools === this.playerModelPools
+        ? value.team % pools.length
+        : value.role % pools.length;
+      const slot = this.slotCounts[poolIndex];
+      const pool = pools[poolIndex];
+      if (slot >= pool.mesh.instanceMatrix.count) {
+        continue;
+      }
+      this.slotCounts[poolIndex] = slot + 1;
+
+      const hidden = value.id === this.localId;
+      const bob = animate ? bobOffset(value.anim) : 0;
+      const tilt = tiltAngle(value.pitch);
+      const pulse = animate ? (attackScale(value.flags, value.anim) - 1) / ATTACK_PULSE : 0;
+      const forwardX = Math.sin(value.yaw);
+      const forwardZ = Math.cos(value.yaw);
+      SCRATCH.position.set(
+        value.x + forwardX * pulse * 0.14,
+        value.y + bob,
+        value.z + forwardZ * pulse * 0.14,
+      );
+      SCRATCH.rotation.set(tilt, value.yaw, 0);
+      SCRATCH.scale.setScalar(hidden ? 0 : 1);
+      SCRATCH.updateMatrix();
+      pool.mesh.setMatrixAt(slot, SCRATCH.matrix);
+
+      pool.alpha.setX(slot, dissolveAlpha(value.flags, value.hp, value.anim));
+      const flash = (this.flashUntil.get(value.id) ?? 0) > now;
+      this.color.setHex(flash ? 0xffc7b8 : 0xffffff);
+      pool.mesh.setColorAt(slot, this.color);
+    }
+
+    for (let i = 0; i < pools.length; i += 1) {
+      const pool = pools[i];
+      const used = this.slotCounts[i];
+      pool.mesh.count = used;
+      pool.mesh.visible = used > 0;
+      if (used > 0) {
+        pool.mesh.instanceMatrix.needsUpdate = true;
+        pool.alpha.needsUpdate = true;
+        if (pool.mesh.instanceColor !== null) {
+          pool.mesh.instanceColor.needsUpdate = true;
+        }
+      }
+    }
   }
 
   private writeEntity(
@@ -398,11 +511,12 @@ export class EntityRenderer {
     const bob = animate ? bobOffset(value.anim) : 0;
     const tilt = tiltAngle(value.pitch);
     const weaponScale = animate ? attackScale(value.flags, value.anim) : 1;
-    const alpha = value.id === this.localId ? 0 : dissolveAlpha(value.flags, value.hp, value.anim);
+    const alpha = dissolveAlpha(value.flags, value.hp, value.anim);
+    const shown = value.id === this.localId ? 0 : 1;
     const [body, head, weapon] = parts;
 
-    place(body, index, value.x, value.y + BODY_HEIGHT / 2 + bob, value.z, tilt, value.yaw, 1);
-    place(head, index, value.x, value.y + BODY_HEIGHT + 0.35 + bob, value.z, tilt, value.yaw, 1);
+    place(body, index, value.x, value.y + BODY_HEIGHT / 2 + bob, value.z, tilt, value.yaw, shown);
+    place(head, index, value.x, value.y + BODY_HEIGHT + 0.35 + bob, value.z, tilt, value.yaw, shown);
 
     const forwardX = Math.sin(value.yaw);
     const forwardZ = Math.cos(value.yaw);
@@ -416,7 +530,7 @@ export class EntityRenderer {
       value.z + forwardZ * 0.34 + rightZ * 0.3,
       tilt,
       value.yaw,
-      weaponScale,
+      shown === 0 ? 0 : weaponScale,
     );
 
     const tint = this.color;

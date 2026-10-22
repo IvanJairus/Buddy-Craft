@@ -368,6 +368,7 @@ attribute float aFlags;
 
 varying vec2 vCellUv;
 varying float vTile;
+varying float vFace;
 varying float vShade;
 varying float vAlpha;
 
@@ -381,6 +382,7 @@ void main() {
   vAlpha = aFlags > 0.5 ? 0.78 : 1.0;
   vCellUv = aUv;
   vTile = aTile;
+  vFace = aFace;
 
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   gl_Position = projectionMatrix * mv;
@@ -391,6 +393,7 @@ const TERRAIN_FRAGMENT = /* glsl */ `
 uniform sampler2D uAtlas;
 varying vec2 vCellUv;
 varying float vTile;
+varying float vFace;
 varying float vShade;
 varying float vAlpha;
 
@@ -398,6 +401,15 @@ void main() {
   // Interpolated cell coordinates repeat once per block, including across a
   // greedy quad. The inset keeps the sample inside the authored tile.
   vec2 tile = vec2(mod(vTile, 16.0), floor(vTile / 16.0));
+  // Tiles 20 and 21 hold a log end and a grass side; 0..19 stay the block
+  // registry order so the content test keeps its literal mapping.
+  if (abs(vTile - 3.0) < 0.5) {
+    if (vFace > 1.5 && vFace < 2.5) tile = vec2(2.0, 0.0);
+    else if (vFace < 2.5 || vFace > 3.5) tile = vec2(5.0, 1.0);
+  }
+  if (abs(vTile - 7.0) < 0.5 && vFace > 1.5 && vFace < 3.5) {
+    tile = vec2(4.0, 1.0);
+  }
   vec2 local = fract(vCellUv) * 0.96 + 0.02;
   vec4 texel = texture2D(uAtlas, (tile + local) / 16.0);
   if (texel.a < 0.15) discard;

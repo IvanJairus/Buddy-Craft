@@ -25,6 +25,7 @@ import {
   type EntityValue,
 } from "./render/entities";
 import { ParticleSystem, type ParticleInfo } from "./render/particles";
+import { loadCharacterModels, type CharacterModels } from "./render/characters";
 import { Juice, EVENT_HIT, type JuiceStats } from "./render/juice";
 import { AudioEngine, type AudioStats } from "./audio/engine";
 import { CrashReporter, type CrashReport } from "./telemetry";
@@ -89,6 +90,7 @@ interface TestApi {
   leakCycle(cycles: number): void;
   wasm(): { viewsAlive: boolean; memoryBytes: number };
   camera(): { x: number; y: number; z: number; yaw: number; pitch: number };
+  characters(): { loaded: boolean; players: number; buddies: number };
   entities(): EntityInfo | null;
   entityBenchmark(frames?: number): (EntityInfo & { averageMs: number }) | null;
   particles(): ParticleInfo | null;
@@ -229,6 +231,7 @@ const renderer = new GameRenderer({ canvas, tier: tier ?? "MED" });
 let client: ClientWasm | null = null;
 let chunks: ChunkManager | null = null;
 let entities: EntityRenderer | null = null;
+let loadedCharacters: { players: number; buddies: number } | null = null;
 let particles: ParticleSystem | null = null;
 let offline: OfflineSession | null = null;
 let offlineActive = false;
@@ -260,6 +263,15 @@ let elapsedSeconds = 0;
 const stanceOrder: HudStance[] = ["follow", "hold", "assault"];
 
 async function boot(): Promise<void> {
+  const characterModelsPromise: Promise<CharacterModels | null> = clearScene
+    ? Promise.resolve(null)
+    : loadCharacterModels().catch((error: unknown) => {
+        console.warn(
+          `character models unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return null;
+      });
+
   if (tier === null) {
     const averageFrameMs = await renderer.benchmark(2000);
     tier = tierForFrameTime(averageFrameMs);
@@ -288,7 +300,16 @@ async function boot(): Promise<void> {
   const chunkSync = new ChunkSync();
   const snapshotDecoder = new SnapshotDecoder();
   const interpolator = new Interpolator(snapshotDecoder.playerTeam, snapshotDecoder.buddyRole);
-  entities = clearScene ? null : new EntityRenderer(renderer.scene);
+  if (!clearScene) {
+    const characterModels = await characterModelsPromise;
+    if (characterModels !== null) {
+      loadedCharacters = {
+        players: characterModels.players.length,
+        buddies: characterModels.buddies.length,
+      };
+    }
+    entities = new EntityRenderer(renderer.scene, characterModels);
+  }
   particles = clearScene ? null : new ParticleSystem(renderer.scene, 256);
   const juice = new Juice({
     camera: renderer.camera,
@@ -682,6 +703,11 @@ async function boot(): Promise<void> {
       z: renderer.camera.position.z,
       yaw: renderer.camera.rotation.y,
       pitch: renderer.camera.rotation.x,
+    }),
+    characters: () => ({
+      loaded: loadedCharacters !== null,
+      players: loadedCharacters?.players ?? 0,
+      buddies: loadedCharacters?.buddies ?? 0,
     }),
     entities: () => entities?.info() ?? null,
     entityBenchmark: (frames = 60) => {
