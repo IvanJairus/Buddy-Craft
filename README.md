@@ -133,6 +133,7 @@ docs/
   PLAN.md       the specification this repo implements
 tools/
   asset-pipeline/  deterministic PNG atlas generator (T-051)
+  recipe-editor/   local grid editor and validator for data/recipes.ron (T-052)
   wasm-golden.mjs  runs the wasm build of the golden test under node:wasi
   wasm-exports.mjs checks the bridge's 20-function export contract
 fuzz/
@@ -162,7 +163,7 @@ Open the printed URL, choose OFFLINE, and the bot-filled Worker match starts.
 The rest of the commands below are for development, the network host and gates.
 
 ```bash
-cargo test --workspace --all-targets              # 494 Rust tests
+cargo test --workspace --all-targets              # 496 Rust tests
 cargo bench -p world --bench gen                  # asserts the worldgen and mesh budgets
 cargo build --target wasm32-unknown-unknown -p sim
 cargo clippy --workspace --all-targets -- -D warnings
@@ -249,7 +250,7 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-049 | audio graph, 24 voices, 30 procedural cues, rumble worklet | partial: WebKit/iOS and recorded assets not verified |
 | T-050 | anti-cheat: 15 named threat tests, connection cap, token revocation | partial: cheat-client and host wiring missing |
 | T-051 | art atlas and GLB models | partial: textured atlas and terrain shader shipped; no GLB models |
-| T-052 | content pass and recipe editor | not started |
+| T-052 | content pass and recipe editor | done: 14 recipes, 6 buddies, grid editor with duplicate guard |
 | T-053 | 20-room bot swarm: p99 0.455 ms, 27 MB RSS, 240-player Oracle estimate | done |
 | T-054 | cross-browser two-client E2E suite | not started: needs T-048 |
 | T-055 | perf gates: size, frame p95, wasm tick, first playable, juice, draw calls | done |
@@ -494,7 +495,7 @@ recorded here rather than quietly skipped:
 - **The recipe book's CSS is a third file.** The task names two TypeScript
   files; the panel needs layout styles, so `recipeBook.css` is added. The
   prediction and the ghost are not yet wired to pad state; their APIs are
-  exercised by the page specs; T-052 will feed them from pad state.
+  exercised by the page specs; the live pad feed remains match integration work.
 - **The lobby is local until the online client wiring.** The room code, copy button and join
   validation are real and tested; T-040 supplies the WebSocket client and T-045
   the host, but the browser does not connect them yet, so Start enters the demo
@@ -1656,8 +1657,8 @@ invalidating the whole screen.
 
 The app's values are demo numbers until the match stream lands: the clock and
 drop countdown are local, HP and crates start at their full and empty values,
-and the stance is wired to F and the touch button. The store is the seam that
-T-052 will feed.
+and the stance is wired to F and the touch button. The store remains the seam
+a live match writes through.
 
 Plan §8.7 says the store batches DOM writes into a `requestAnimationFrame`; the
 acceptance criterion says a 20 Hz value is sampled on a 100 ms timer. The timer
@@ -1691,14 +1692,48 @@ also has an extra crate.
 
 The ghost is one translucent instanced copy of a recipe row. The book opens from
 E on desktop and from its own 44 px button on touch; the near-miss banner is
-driven by the same Rust call. The pad state that will feed an anchor and a live
-cluster is T-052's job; the prediction and overlay APIs are already tested.
+driven by the same Rust call. The anchor and live-pad feed are match
+integration work; the prediction and overlay APIs are already tested.
 
 This task is why the wasm boundary grew from 13 to 15 exports; T-048 later added the five offline names, for 20. §5.1 says JS
 never decides whether a recipe matches, so porting the canonicaliser into
 TypeScript was not an option. The two new exports are read-only data and
 prediction helpers; the state exports are unchanged and the export check now
 pins 15.
+
+## Content and the editor: one table, two validators
+
+T-052 pins the content tables to §4.5.3 and §4.6. The task is done locally;
+T-051's GLB models are still missing and do not change these numbers.
+`content_matches_the_plan_table()` checks all 14 recipe ids, outputs, costs,
+unlock clocks and cooldowns. `buddy_content_matches_the_plan()` does the same
+for the six roles, including the weapon damage, cadence and reach that live in
+`data/tuning.ron`. `content_is_reachable()` places every authored shape one
+cell in from the pad edge, waits the 10-tick stability window and runs the real
+crafting pass: each recipe consumes exactly its cost and leaves the pad empty.
+The test was shown red by deleting one placed crate, then green again.
+
+`tools/recipe-editor` serves a local editor on `127.0.0.1:5174`. Every recipe
+is an 8 x 8 grid with y0..y3 tabs; clicking a cell adds or removes a crate.
+Save is disabled while validation fails, and the server validates the whole
+table again before writing, so a duplicate canonical form or an unsupported
+shape cannot reach `data/recipes.ron`. The server rewrites only the edited
+`blocks` arrays, which keeps every comment and metadata field intact, and
+replaces the file atomically. Six Node tests cover parsing, rotation-invariant
+duplicates, mirrors, all unsupported cases, and the save endpoint accepting a
+valid edit while leaving the file untouched for both rejection cases.
+
+The plan's layout calls this a Vite app. It is a dependency-free Node server
+plus ES modules instead: the tool is local and single-page, so a second
+bundler and a second install buy nothing. The UI was exercised in Chromium:
+14 cards, 14 grids, 56 layer tabs, a valid save, and a duplicate rejected with
+HTTP 400.
+
+```bash
+node tools/recipe-editor/server.mjs
+# http://127.0.0.1:5174
+node --test tools/recipe-editor/test/editor.test.mjs
+```
 
 ## Shell: one manager and no dead ends
 
@@ -2017,7 +2052,7 @@ the nine GLB models, T-054 needs the online host path plus Firefox/WebKit, and
 T-062/T-063/T-064 need physical devices, six humans on production and a week of
 telemetry. Those are not marked done.
 
-The current gates are 494 Rust tests, 95 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
+The current gates are 496 Rust tests, 95 Playwright specs plus four perf-gated specs, clippy/fmt clean, and
 20 wasm exports. T-050 has the 15 named threat tests, but `tools/cheat-client`
 and host wiring for the new connection/token guards are still missing. The last full-browser run is Chromium plus the headed pointer
 lock project; Firefox and WebKit are not installed on this machine.

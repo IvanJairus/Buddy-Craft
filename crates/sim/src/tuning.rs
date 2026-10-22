@@ -1016,6 +1016,37 @@ mod tests {
     }
 
     #[test]
+    fn buddy_content_matches_the_plan() {
+        // §4.6: hp, speed, aggro, cost, per-team cap, then weapon damage,
+        // cooldown ticks and reach. Damage and cadence live in the weapon
+        // table, so this one row checks both files cannot drift apart.
+        let expected = [
+            (BuddyKind::Swordsman, 120, 3.4, 12.0, 9, 4, 14, 12, 1.8),
+            (BuddyKind::Archer, 80, 3.2, 16.0, 8, 4, 12, 22, 14.0),
+            (BuddyKind::Mage, 70, 3.0, 14.0, 12, 3, 22, 36, 10.0),
+            (BuddyKind::Healer, 75, 3.2, 12.0, 10, 2, 15, 30, 8.0),
+            (BuddyKind::Berserker, 200, 3.8, 14.0, 18, 2, 20, 10, 1.8),
+            (BuddyKind::Sniper, 60, 2.8, 32.0, 15, 2, 40, 50, 28.0),
+        ];
+        let t = embedded();
+        for (kind, hp, speed, aggro, cost, cap, damage, cooldown, reach) in expected {
+            let stats = &t.buddies[kind as usize];
+            assert_eq!(stats.kind, kind);
+            assert_eq!(stats.hp, hp, "{kind:?} hp");
+            assert!(close(stats.speed.to_f32(), speed), "{kind:?} speed");
+            assert!(close(stats.aggro.to_f32(), aggro), "{kind:?} aggro");
+            assert_eq!(stats.cost, cost, "{kind:?} cost");
+            assert_eq!(stats.cap, cap, "{kind:?} cap");
+            assert_eq!(stats.weapon.damage, damage, "{kind:?} damage");
+            assert_eq!(
+                stats.weapon.cooldown_ticks, cooldown,
+                "{kind:?} cooldown ticks"
+            );
+            assert!(close(stats.weapon.reach.to_f32(), reach), "{kind:?} reach");
+        }
+    }
+
+    #[test]
     fn the_roster_takes_its_weapons_from_the_weapon_table() {
         // One table of damage numbers: the buddy row must not restate them.
         let t = embedded();

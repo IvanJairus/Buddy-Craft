@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cratebound recipe editor</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div>
+        <h1>Recipe editor</h1>
+        <p class="hint">
+          Click a cell to add or remove a crate. Every layer is editable. Saves
+          are refused when a shape breaks the pad rules or duplicates another
+          recipe under rotation.
+        </p>
+      </div>
+      <div class="actions">
+        <span id="status" class="status"></span>
+        <button id="reset" type="button" class="button">Reset</button>
+        <button id="save" type="button" class="button primary">Save changes</button>
+      </div>
+    </header>
+    <p id="message" class="message" role="status"></p>
+    <main id="recipes" aria-label="Recipes"></main>
+    <script type="module" src="/src/main.mjs"></script>
+  </body>
+</html>

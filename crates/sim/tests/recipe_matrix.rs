@@ -7,9 +7,11 @@
 //!
 //! Rows are numbered to match the table so a failure names the row.
 
-use sim::pad::{Pad, Pads, PlaceError, PAD_HEIGHT, PAD_SIZE};
+use sim::buddy::BuddyKind;
+use sim::pad::{Pad, Pads, PlaceError, PAD_HEIGHT, PAD_SIZE, STABILITY_TICKS};
 use sim::recipe::{
-    find_match, tick, tick_with, BlockPos, CraftOutcome, RecipeBook, RecipeId, MIN_CLUSTER,
+    find_match, tick, tick_with, BlockPos, CraftOutcome, RecipeBook, RecipeId, RecipeOutput,
+    MIN_CLUSTER,
 };
 use sim::time::Tick;
 
@@ -554,19 +556,98 @@ fn locked_recipes_do_not_eat_crates() {
 }
 
 #[test]
-fn every_recipe_is_buildable_on_an_empty_pad() {
+fn content_matches_the_plan_table() {
+    let expected = [
+        ("R01_SWORD", RecipeOutput::Sword, 6, 0, 20),
+        ("R02_BOW", RecipeOutput::Bow, 5, 0, 20),
+        ("R03_BANDAGE", RecipeOutput::Bandage, 4, 0, 15),
+        (
+            "R04_SWORDSMAN",
+            RecipeOutput::Buddy(BuddyKind::Swordsman),
+            9,
+            0,
+            40,
+        ),
+        (
+            "R05_ARCHER",
+            RecipeOutput::Buddy(BuddyKind::Archer),
+            8,
+            180,
+            45,
+        ),
+        (
+            "R06_MAGE",
+            RecipeOutput::Buddy(BuddyKind::Mage),
+            12,
+            180,
+            60,
+        ),
+        (
+            "R07_HEALER",
+            RecipeOutput::Buddy(BuddyKind::Healer),
+            10,
+            180,
+            60,
+        ),
+        ("R08_SPEAR", RecipeOutput::Spear, 7, 180, 30),
+        ("R09_TOWER", RecipeOutput::Tower, 16, 180, 90),
+        ("R10_RAM", RecipeOutput::Ram, 24, 480, 120),
+        ("R11_CATAPULT", RecipeOutput::Catapult, 20, 480, 120),
+        (
+            "R12_BERSERKER",
+            RecipeOutput::Buddy(BuddyKind::Berserker),
+            18,
+            480,
+            90,
+        ),
+        ("R13_WARD", RecipeOutput::Ward, 14, 480, 120),
+        (
+            "R14_SNIPER",
+            RecipeOutput::Buddy(BuddyKind::Sniper),
+            15,
+            480,
+            90,
+        ),
+    ];
+    let book = book();
+    assert_eq!(book.len(), expected.len(), "§4.5.3 has 14 recipes");
+    for (recipe, (name, output, cost, unlock, cooldown)) in book.recipes().iter().zip(expected) {
+        assert_eq!(recipe.name, name);
+        assert_eq!(recipe.output, output, "{name} output");
+        assert_eq!(recipe.cost(), cost, "{name} cost");
+        assert_eq!(recipe.unlock_s, unlock, "{name} unlock");
+        assert_eq!(recipe.cooldown_s, cooldown, "{name} cooldown");
+    }
+}
+
+#[test]
+fn content_is_reachable() {
     // Load-time validation already checks bounds, ground support and
-    // connectivity; this proves the shipped table is also *reachable* through
-    // the matcher, which is the property that actually matters. A recipe that
-    // validates but never matches is the worst kind of content bug.
+    // connectivity; this proves every shipped shape is also reachable through
+    // a real crafting pass after being placed one cell in from the pad edge.
+    // A recipe that validates but never matches is the worst content bug.
     for recipe in book().recipes() {
-        let pad = pad_with(&recipe.blocks);
-        let craft = find_match(&pad, book(), u32::MAX)
-            .unwrap_or_else(|| panic!("{} is in the table but cannot be matched", recipe.name));
+        let placed: Vec<BlockPos> = recipe
+            .blocks
+            .iter()
+            .map(|b| [b[0] + 1, b[1], b[2] + 1])
+            .collect();
+        let mut pad = pad_with(&placed);
+        let outcome = tick(&mut pad, book(), Tick(STABILITY_TICKS), u32::MAX)
+            .unwrap_or_else(|| panic!("{} is in the table but cannot be crafted", recipe.name));
+        assert!(outcome.crafted(), "{} was blocked", recipe.name);
         assert_eq!(
-            craft.recipe, recipe.id,
+            outcome.recipe(),
+            recipe.id,
             "{} matched the wrong recipe",
             recipe.name
         );
+        assert_eq!(
+            outcome.blocks().len(),
+            recipe.cost() as usize,
+            "{} consumed a different number of crates",
+            recipe.name
+        );
+        assert!(pad.is_empty(), "{} left crates behind", recipe.name);
     }
 }
