@@ -181,7 +181,13 @@ export class Interaction {
     const box = new THREE.BoxGeometry(1.002, 1.002, 1.002);
     this.highlight = new THREE.LineSegments(
       new THREE.EdgesGeometry(box),
-      new THREE.LineBasicMaterial({ color: 0xffffff }),
+      new THREE.LineBasicMaterial({
+        color: 0x0a0e12,
+        transparent: true,
+        opacity: 0.92,
+        depthTest: false,
+        depthWrite: false,
+      }),
     );
     box.dispose();
     this.highlight.visible = false;

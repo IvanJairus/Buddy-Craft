@@ -10,7 +10,14 @@ interface TestWindow {
   __cbReady?: boolean;
   __cbTest?: {
     info(): { tier: string };
-    input(): { frame: number[]; rawInput: boolean };
+    input(): { frame: number[]; rawInput: boolean; slot: number };
+    viewModel(): {
+      active: boolean;
+      selected: number;
+      pickVisible: boolean;
+      crateVisible: boolean;
+      frames: number;
+    };
   };
 }
 
@@ -50,11 +57,35 @@ test("every_screen_is_reachable", async ({ page }) => {
   await page.locator('[data-screen-action="start-room"]').click();
   expect(await screen(page)).toBe("match");
   expect(await page.locator("#game").isVisible()).toBe(true);
+  await expect(page.locator(".hotbar")).toBeVisible();
+  await expect(page.locator(".hotbar-slot")).toHaveCount(9);
+  await page.locator('[data-slot="4"]').click();
+  expect(await page.locator('[data-slot="4"]').getAttribute("aria-pressed")).toBe("true");
+  expect(await page.evaluate(() => (window as unknown as TestWindow).__cbTest!.input().slot)).toBe(4);
+  const hand = await page.evaluate(() => (window as unknown as TestWindow).__cbTest!.viewModel());
+  expect(hand.active).toBe(true);
+  expect(hand.selected).toBe(4);
+  expect(hand.crateVisible).toBe(true);
+  expect(hand.pickVisible).toBe(false);
+  expect(hand.frames).toBeGreaterThan(0);
+  await page.keyboard.press("2");
+  expect(await page.locator('[data-slot="1"]').getAttribute("aria-pressed")).toBe("true");
+  expect(
+    await page.evaluate(
+      () => (window as unknown as TestWindow).__cbTest!.viewModel().crateVisible,
+    ),
+  ).toBe(true);
 
   await page.locator(".match-menu").click();
   expect(await screen(page)).toBe("pause");
+  await expect(page.locator(".hotbar")).toBeHidden();
   await page.locator('[data-screen-action="pause-leave"]').click();
   expect(await screen(page)).toBe("results");
+  expect(
+    await page.evaluate(
+      () => (window as unknown as TestWindow).__cbTest!.viewModel().active,
+    ),
+  ).toBe(false);
   await page.locator('[data-screen-action="rematch"]').click();
   expect(await screen(page)).toBe("match");
   await page.locator(".match-menu").click();

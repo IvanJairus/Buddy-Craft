@@ -2128,6 +2128,26 @@ it from Main -> SETTINGS or from the in-match MENU -> SETTINGS; Settings
 returns to whichever screen opened it. Remaining feel work is tracked in
 [docs/PLAYABILITY_BACKLOG.md](docs/PLAYABILITY_BACKLOG.md).
 
+## Hand, hotbar and block feedback
+
+The first-person camera also draws a held item: a pickaxe on slot 0 and the
+crate on slots 1-8, with a blue sleeve, idle bob and a 180 ms swing on use. It
+renders in its own scene after the world with `clearDepth()`, so the world's
+near plane and fog cannot clip or tint the hand. The first attempt parented the
+hand to the camera inside the main scene; screenshots showed it clipped by the
+world pass, so `GameRenderer` keeps `info.autoReset = false` and counts the
+world and hand draws in one frame.
+
+The desktop hotbar has nine clickable slots at the bottom centre, mirrors the
+1-9 keys and the wheel, and is hidden for coarse pointers because touch has its
+own strip. The block highlight is a thin dark outline instead of the old white
+1 m wireframe. Place and break now spawn a 10-particle burst at the target cell,
+play `block_place` / `sword_crate`, and swing the hand. `screens.spec` asserts
+the selected slot reaches the view model, and the headed `pointerLock.spec`
+asserts both the right-click place and left-click break increment the swing
+counter and leave the particle mesh drawing. Cracks, crate return and
+per-material sounds stay open in the backlog.
+
 ## Balance: four numbers, ten bot matches
 
 T-060 adds `EconomyTracker` in `apps/web/src/telemetry/economy.ts`. It folds the
@@ -2258,7 +2278,7 @@ T-056's worker and live Sentry ingest, and T-062/T-063/T-064 still need a
 Cloudflare deployment, physical devices, six humans on production and a week
 of telemetry. Those are not marked done.
 
-The current gates are 501 Rust tests, 160 Playwright specs (156 passed, four
+The current gates are 501 Rust tests, 164 Playwright specs (160 passed, four
 perf-gated skipped), clippy/fmt clean, and 20 wasm exports. T-050 is done at
 its AC boundary: 15 named threat tests, the socket guards, chat/creation rate
 limits and the committed 15-attack fixture. The registry's HTTP/DO surface

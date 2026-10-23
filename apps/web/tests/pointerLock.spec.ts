@@ -20,6 +20,9 @@ interface TestWindow {
   __cbReady?: boolean;
   __cbTest?: {
     input(): InputState;
+    offlineStats(): { state: string };
+    viewModel(): { active: boolean; swings: number; frames: number };
+    particles(): { drawCalls: number } | null;
   };
 }
 
@@ -71,4 +74,71 @@ test("pointer lock on click, mouse look and fire button", async ({ page }) => {
   );
   expect(using.frame[0] & USE).toBe(USE);
   await page.mouse.up({ button: "right" });
+});
+
+test("place and break swing the held item and burst block particles", async ({ page }) => {
+  await page.goto("/?quality=low");
+  await page.waitForFunction(() => (window as unknown as TestWindow).__cbReady === true, null, {
+    timeout: 30_000,
+  });
+  await page.getByRole("button", { name: "CONTINUE" }).click();
+  await page.getByRole("button", { name: "OFFLINE" }).click();
+  await page.waitForFunction(
+    () => (window as unknown as TestWindow).__cbTest!.offlineStats().state === "open",
+    null,
+    { timeout: 15_000 },
+  );
+
+  let locked = false;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await page.locator("#game").click({ position: { x: 640, y: 360 } });
+    await page.waitForTimeout(250);
+    locked = await page.evaluate(
+      () => (window as unknown as TestWindow).__cbTest!.input().pointerLocked,
+    );
+    if (locked) break;
+    await page.bringToFront();
+    await page.waitForTimeout(150);
+  }
+  expect(locked).toBe(true);
+
+  // Look down at the ground so the crosshair targets a block within reach.
+  await page.mouse.move(640, 470, { steps: 4 });
+  await page.waitForTimeout(250);
+
+  const before = await page.evaluate(
+    () => (window as unknown as TestWindow).__cbTest!.viewModel().swings,
+  );
+
+  await page.mouse.down({ button: "right" });
+  await page.waitForTimeout(120);
+  await page.mouse.up({ button: "right" });
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(() => (window as unknown as TestWindow).__cbTest!.viewModel().swings),
+      { timeout: 2_000 },
+    )
+    .toBeGreaterThan(before);
+  const placedBurst = await page.evaluate(
+    () => (window as unknown as TestWindow).__cbTest!.particles(),
+  );
+  expect(placedBurst?.drawCalls).toBe(1);
+
+  const afterPlace = await page.evaluate(
+    () => (window as unknown as TestWindow).__cbTest!.viewModel().swings,
+  );
+  await page.mouse.down({ button: "left" });
+  await page.waitForTimeout(120);
+  await page.mouse.up({ button: "left" });
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(() => (window as unknown as TestWindow).__cbTest!.viewModel().swings),
+      { timeout: 2_000 },
+    )
+    .toBeGreaterThan(afterPlace);
+  expect(
+    await page.evaluate(() => (window as unknown as TestWindow).__cbTest!.viewModel().frames),
+  ).toBeGreaterThan(0);
 });

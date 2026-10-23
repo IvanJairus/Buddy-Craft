@@ -8,7 +8,7 @@ Baseline, 2026-10-23:
 
 - Local camera: 31.3 ms from W to motion in headed Opera at 1512x982 DPR 2.
 - Render: 120.3 fps, 71 draw calls, 73k triangles in the same Opera run.
-- Gates: 156 Playwright passed, 4 perf-gated skipped; 501 Rust tests.
+- Gates: 160 Playwright passed, 4 perf-gated skipped; 501 Rust tests.
 - Live client: https://buddy-craft.vercel.app. ONLINE is blocked by T-046.
 
 ## 1. Match feedback and audio
@@ -43,13 +43,16 @@ a small MENU control and a pause screen.
 - [x] Hide a remote body within 1 m of the first-person camera so a shared
       spawn cell cannot fill the view; bodies that overlap at 2 m are still an
       onboarding/bot-separation risk.
-- [ ] Replace the white 1 m wireframe with a thin dark block outline.
-- [ ] Desktop hotbar: nine slots, selected state, number keys and wheel,
+- [x] Replace the white 1 m wireframe with a thin dark block outline.
+- [x] Desktop hotbar: nine slots, selected state, number keys and wheel,
       clickable, hidden for coarse pointers because touch has its own hotbar.
-- [ ] First-person hand and held block: simple model, idle bob, swing on use.
+- [x] First-person hand and held block: pickaxe on slot 0, crate on slots 1-8,
+      own overlay pass with a cleared depth buffer, idle bob and 180 ms swing.
 - [ ] Break progress: cracks that advance while holding the button.
-- [ ] Break feedback: particles, a short sound, and a crate that returns to
-      carry instead of disappearing.
+- [x] Break feedback: 10-particle burst, short `sword_crate` / `block_place`
+      sound and a hand swing; the world edit still needs a crate-return rule.
+- [ ] Crate economy: a broken or placed crate returns to carry instead of
+      disappearing, with a test on the carry counter.
 - [ ] Material-specific break and place sounds.
 - [ ] Keep the frame, draw-call and bundle budgets green.
 
@@ -93,3 +96,9 @@ a small MENU control and a pause screen.
   marker assertion, pause shell, offline pause, settings return and near-camera
   culling are done. The world-marker edge case and the rest of block feel remain
   open.
+- 2026-10-23: thin dark outline, desktop hotbar, first-person pickaxe/crate and
+  break/place swing + particles are done. The hand first rendered inside the
+  camera graph but was clipped by the world pass, so it now draws in a separate
+  scene with `clearDepth()`; `screens.spec` asserts the selected hand slot and
+  `pointerLock.spec` asserts place/break swings and the particle burst. Cracks,
+  crate return and per-material sounds remain.

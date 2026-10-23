@@ -45,6 +45,8 @@ import { OfflineSession } from "./game/offline";
 import { OnlineSession } from "./game/online";
 import { EYE_HEIGHT, eyePose, pitchRadians, yawRadians } from "./game/view";
 import { Hud, type HudStats } from "./ui/hud";
+import { Hotbar } from "./ui/hotbar";
+import { ViewModel, type ViewModelInfo } from "./render/viewModel";
 import { RecipeBookUi, type RecipeBookInfo } from "./ui/recipeBook";
 import { LobbyScreen } from "./ui/lobby";
 import {
@@ -81,6 +83,7 @@ interface GrowResult {
 
 interface TestApi {
   info(): RendererInfo;
+  viewModel(): ViewModelInfo;
   pixel(x: number, y: number): [number, number, number, number];
   resetScale(): void;
   chunks(): ChunkInfo | null;
@@ -101,6 +104,7 @@ interface TestApi {
     hit: RayHit | null;
     visuals: VisualState | null;
   };
+  interactionVisuals(): VisualState | null;
   placeBlock(block: number): number;
   breakBlock(): number;
   pendingEdits(): PendingEdit[];
@@ -350,7 +354,43 @@ async function boot(): Promise<void> {
   const ghost = new GhostOverlay(renderer.scene);
   const hudStore = new Store<HudState>(initialHudState());
   const hud = new Hud(document.body, hudStore);
+  const viewModel = new ViewModel();
+  const burstOrigin = new THREE.Vector3();
+  const burstVelocity = new THREE.Vector3();
   let stanceIndex = 0;
+
+  function blockBurst(
+    cell: [number, number, number] | null,
+    color: number,
+  ): void {
+    if (particles === null || cell === null) return;
+    burstOrigin.set(cell[0] + 0.5, cell[1] + 0.5, cell[2] + 0.5);
+    for (let i = 0; i < 10; i += 1) {
+      const angle = (i / 10) * Math.PI * 2;
+      burstVelocity.set(Math.cos(angle) * 1.3, 1.2 + (i % 3) * 0.35, Math.sin(angle) * 1.3);
+      particles.spawn(burstOrigin, burstVelocity, 0.32, 0.07, color);
+    }
+  }
+
+  function localBreak(): void {
+    if (interaction === null) return;
+    const cell = interaction.visuals().highlight;
+    if (interaction.breakBlock() > 0) {
+      viewModel.swing();
+      blockBurst(cell, 0x8a6b4d);
+      audio.play("sword_crate");
+    }
+  }
+
+  function localPlace(block: number): void {
+    if (interaction === null) return;
+    const cell = interaction.visuals().ghost;
+    if (interaction.place(block) > 0) {
+      viewModel.swing();
+      blockBurst(cell, 0x9ad1ff);
+      audio.play("block_place");
+    }
+  }
   const advanceStance = (): HudStance => {
     stanceIndex = (stanceIndex + 1) % stanceOrder.length;
     const next = stanceOrder[stanceIndex];
@@ -368,17 +408,28 @@ async function boot(): Promise<void> {
     };
     if (interaction !== null) {
       touch.onBreak = () => {
-        interaction?.breakBlock();
+        localBreak();
       };
       touch.onPlace = (block) => {
-        interaction?.place(offlineActive || onlineActive ? 11 : block);
+        localPlace(offlineActive || onlineActive ? 11 : block);
       };
     }
   } else {
     desktop = new DesktopInput({ canvas, keyMap: loadKeyMap(window.localStorage) });
-    desktop.onAction((action) => {
+    const bar = new Hotbar(
+      document.body,
+      (slot) => {
+        desktop?.setSlot(slot);
+        viewModel.setSelected(slot);
+      },
+      desktop.selectedSlot,
+    );
+    desktop.onAction((action, value) => {
       if (action === "stance") {
         advanceStance();
+      } else if (action === "slot") {
+        bar.setSelected(value ?? 0);
+        viewModel.setSelected(value ?? 0);
       } else if (action === "recipes") {
         if (screens?.current() === "match") {
           recipeBook.toggle(elapsedSeconds);
@@ -712,6 +763,7 @@ async function boot(): Promise<void> {
 
   window.__cbTest = {
     info: () => renderer.info(),
+    viewModel: () => viewModel.info(),
     pixel: (x, y) => renderer.readPixel(x, y),
     resetScale: () => renderer.resetScale(),
     chunks: () => chunks?.info() ?? null,
@@ -835,6 +887,7 @@ async function boot(): Promise<void> {
       );
       return { hit, visuals: interaction.visuals() };
     },
+    interactionVisuals: () => interaction?.visuals() ?? null,
     placeBlock: (block) => interaction?.place(block) ?? 0,
     breakBlock: () => interaction?.breakBlock() ?? 0,
     pendingEdits: () => interaction?.pending() ?? [],
@@ -1170,10 +1223,10 @@ async function boot(): Promise<void> {
       if (desktop !== null && desktop.pointerLock) {
         interaction.aimFromCamera(renderer.camera);
         if (desktop.consumePrimary()) {
-          interaction.breakBlock();
+          localBreak();
         }
         if (desktop.consumeSecondary()) {
-          interaction.place(offlineActive || onlineActive ? 11 : 1);
+          localPlace(offlineActive || onlineActive ? 11 : 1);
         }
       } else if (touch !== null) {
         interaction.aimFromCamera(renderer.camera);
@@ -1211,8 +1264,16 @@ async function boot(): Promise<void> {
     if (chunks !== null) {
       chunks.update(renderer.camera.position.x, renderer.camera.position.z, 1);
     }
+    viewModel.setActive(
+      (offlineActive || onlineActive) &&
+        desktop !== null &&
+        screens?.current() === "match",
+    );
+    viewModel.setSelected(desktop?.selectedSlot ?? 0);
+    viewModel.update(now, frame[3] !== 0, renderer.camera.aspect);
     juice.applyCamera();
     renderer.frame(now);
+    viewModel.draw(renderer.renderer);
     juice.restoreCamera();
     window.requestAnimationFrame(loop);
   };

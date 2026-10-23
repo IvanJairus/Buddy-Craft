@@ -75,6 +75,8 @@ export class GameRenderer {
       powerPreference: "high-performance",
     });
     this.renderer.setClearColor(SKY_COLOR, 1);
+    // The hand pass renders after the world; count both in one frame's stats.
+    this.renderer.info.autoReset = false;
 
     this.basePixelRatio = Math.min(window.devicePixelRatio || 1, 2);
     this.renderer.setPixelRatio(this.basePixelRatio);
@@ -157,6 +159,7 @@ export class GameRenderer {
     if (this.adaptive) {
       this.updateScale(sample);
     }
+    this.renderer.info.reset();
     this.renderer.render(this.scene, this.camera);
     this.frames += 1;
   }
