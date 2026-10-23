@@ -6,6 +6,11 @@
 # repository's rust-toolchain.toml pulls 1.87.0 and wasm32-unknown-unknown.
 set -euo pipefail
 
+# Vercel may invoke this from the repository root (monorepo) or from apps/web.
+# The wasm build script resolves the Cargo workspace as ../.. from apps/web.
+APP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$APP_ROOT"
+
 if ! command -v cargo >/dev/null 2>&1; then
   echo "vercel-build: cargo missing, installing rustup"
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
