@@ -158,6 +158,12 @@ all nine character meshes loaded, W moved the body 4.05 m, six crates reached
 the HUD, and the console stayed clean. Choose OFFLINE. ONLINE is not available
 until the Cloudflare host from T-046 exists.
 
+**Production is behind HEAD.** As of 2026-10-23 the alias serves
+`index-BBGpl6v6.js`; the local build of this commit is `index-BNBzZwqn.js`.
+The hand, hotbar, cracks, sprint and sky batches are pushed to GitHub but not
+deployed. Run `npx vercel@latest deploy --prod` from the repository root with
+the account that owns the project.
+
 ## Quick start
 
 Clean clone to a local offline match, four commands:
