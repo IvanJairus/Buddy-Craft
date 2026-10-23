@@ -150,6 +150,14 @@ while `room::play::Match` owns airdrops, edits, combat, crafting, buddies and
 elimination, and takes input frames as a value. The host composes the two, and
 tests use the second without a runtime.
 
+## Live
+
+The offline client is live at **https://buddy-craft.vercel.app**. It was
+verified on 2026-10-23 in Chromium: the first-person camera sat at eye height,
+all nine character meshes loaded, W moved the body 4.05 m, six crates reached
+the HUD, and the console stayed clean. Choose OFFLINE. ONLINE is not available
+until the Cloudflare host from T-046 exists.
+
 ## Quick start
 
 Clean clone to a local offline match, four commands:
@@ -261,8 +269,8 @@ ai     0.046 ms/tick     budget 2.0 ms   (12 buddies + 6 players, all pathfindin
 | T-054 | cross-browser two-client E2E suite | done: 11 specs x 4 browser projects, CI gate <= 6 min |
 | T-055 | perf gates: size, frame p95, wasm tick, first playable, juice, draw calls | done |
 | T-056 | telemetry: JSON host logs, room metrics, crash endpoint, kill switches, runbook | partial: worker/Sentry ingest not configured |
-| T-057 | Vercel/Cloudflare deployment pipelines | not started: live deploy not authorized |
-| T-058 | generated PROTOCOL, architecture, contributing and four-command quick start | partial: clean clone + npm ci + npm run dev verified 2026-10-23; deployed URL pending T-057 |
+| T-057 | Vercel/Cloudflare deployment pipelines | partial: client live at buddy-craft.vercel.app; Cloudflare host blocked by T-046 |
+| T-058 | generated PROTOCOL, architecture, contributing and four-command quick start | done: clean clone and deployed client URL verified 2026-10-23; online host blocked by T-046 |
 | T-059 | CSP, no-innerHTML guard, bundle secret scan | done locally; headers live in T-057 |
 | T-060 | balance instrumentation and report | done: median first buddy 70.1 s in 60-90; 9/10 matches, outliers in BALANCE.md |
 | T-061 | focus, reduced motion, HUD contrast, A11Y doc | done |
@@ -2189,7 +2197,20 @@ match. The generated page is not hand-edited.
 A clean clone of `1c734b3` on 2026-10-23 ran the four quick-start commands:
 `npm ci` installed 30 packages, `npm run dev` built the wasm and served
 `127.0.0.1:5173`, and the offline match booted with all nine character meshes
-and no console errors. The deployed-URL verification remains T-057/T-063 work.
+and no console errors. The deployed client was then verified at the live URL
+above; the online host remains T-046/T-057 work.
+
+## Deployment
+
+The client is deployed from the repository root, not from `apps/web`, because
+`npm run build` needs the Cargo workspace. Root `vercel.json` installs in
+`apps/web`, runs `apps/web/scripts/vercel-build.sh` and publishes
+`apps/web/dist`. The script adds `wasm32-unknown-unknown` before the Vite
+build, so Vercel's Rust image can produce the bridge. Deploy with
+`npx vercel@latest deploy`, check the preview, then add `--prod`. The project
+alias is `buddy-craft.vercel.app`. `.vercel/` and `.env.local` are ignored;
+the local link's OIDC token is not committed. The Cloudflare host is not
+deployed, so ONLINE remains unavailable.
 
 ## Where this batch stops
 
@@ -2198,10 +2219,10 @@ rows. T-049 is verified in Chromium and WebKit with a procedural bank; T-051's
 models and atlas are rendered; T-060 meets the 60-90 s target on the median,
 with its slow seeds listed in `BALANCE.md`. T-047's registry policy and
 Crockford codes are native-tested, but its HTTP/DO surface is blocked behind
-T-046. T-046 and T-057 need a live Cloudflare/Vercel deployment, T-056's worker
-and live Sentry ingest need the same, and T-062/T-063/T-064 need physical
-devices, six humans on production and a week of telemetry. Those are not
-marked done.
+T-046. The Vercel client is live and verified, but T-057's Cloudflare half,
+T-056's worker and live Sentry ingest, and T-062/T-063/T-064 still need a
+Cloudflare deployment, physical devices, six humans on production and a week
+of telemetry. Those are not marked done.
 
 The current gates are 501 Rust tests, 160 Playwright specs (156 passed, four
 perf-gated skipped), clippy/fmt clean, and 20 wasm exports. T-050 is done at
