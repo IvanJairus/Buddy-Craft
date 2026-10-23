@@ -8,7 +8,7 @@ Baseline, 2026-10-23:
 
 - Local camera: 31.3 ms from W to motion in headed Opera at 1512x982 DPR 2.
 - Render: 120.3 fps, 71 draw calls, 73k triangles in the same Opera run.
-- Gates: 162 Playwright passed, 4 perf-gated skipped; 505 Rust tests.
+- Gates: 163 Playwright passed, 4 perf-gated skipped; 505 Rust tests.
 - Live client: https://buddy-craft.vercel.app. ONLINE is blocked by T-046.
 
 ## 1. Match feedback and audio
@@ -67,10 +67,18 @@ a small MENU control and a pause screen.
 ## 4. World art
 
 - [ ] Trees: 1x1 trunks, branches, uneven canopies, more than one silhouette.
-- [ ] Animated water surface and a shoreline that reads as water.
-- [ ] Sky gradient, clouds and a light direction; stronger distance fog.
-- [ ] Keep nearest filtering and the atlas and model byte budgets.
-- [ ] Re-run the browser playtest for readability in a forest.
+      The current worldgen has single 1x1 trunks and corner-nibbled canopies.
+- [ ] Animated water surface and a shoreline that reads as water. The arena
+      map has no water in the visible valley, so this needs a water pass in
+      worldgen before it can be reviewed.
+- [x] Sky gradient, 18 instanced cloud banks and a sun direction. The fog
+      colour now matches the horizon band; fog distances are unchanged to keep
+      the arena readable. `sky.spec` samples three white cloud pixels and the
+      top-to-horizon blue gradient.
+- [x] Keep nearest filtering and the atlas and model byte budgets; `assets.spec`
+      still passes with the extra sky and cloud draws.
+- [ ] Re-run the browser playtest for readability in a forest; the sky pass was
+      checked from above the map, not inside the canopy.
 
 ## 5. Sprint
 
@@ -117,6 +125,11 @@ a small MENU control and a pause screen.
   200 px top and 140 px bottom safe frame so it clears the HUD, RECIPES and
   hotbar; behind-camera projections are flipped instead of hidden. `juice.spec`
   asserts the on-screen and off-screen boxes and the `data-edge` style.
+- 2026-10-23: sky pass. A camera-centred sky dome mixes a horizon and zenith
+  colour, adds a sun glow and draws 18 deterministic instanced cloud banks at
+  y 78-86. The fog colour matches the horizon. `sky.spec` asserts three cloud
+  pixels are white and that the sky pales from the top toward the horizon.
+  Trees and water remain open.
 - 2026-10-23: sprint. Bit 5 through the input frame, 5.6 m/s in the sim only
   while moving forward on land, Shift/RUN controls and a reduced-motion-gated
   70-to-76 FOV kick. Four new sim tests; `input.spec` and `touch.spec` assert

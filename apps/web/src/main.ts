@@ -96,6 +96,7 @@ interface TestApi {
   leakCycle(cycles: number): void;
   wasm(): { viewsAlive: boolean; memoryBytes: number };
   camera(): { x: number; y: number; z: number; yaw: number; pitch: number; fov: number };
+  cameraPose(x: number, y: number, z: number, pitch: number): void;
   characters(): { loaded: boolean; players: number; buddies: number };
   entities(): EntityInfo | null;
   entityBenchmark(frames?: number): (EntityInfo & { averageMs: number }) | null;
@@ -812,6 +813,10 @@ async function boot(): Promise<void> {
       pitch: renderer.camera.rotation.x,
       fov: renderer.camera.fov,
     }),
+    cameraPose: (x, y, z, pitch) => {
+      renderer.camera.position.set(x, y, z);
+      renderer.camera.rotation.x = pitch;
+    },
     characters: () => ({
       loaded: loadedCharacters !== null,
       players: loadedCharacters?.players ?? 0,

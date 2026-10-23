@@ -2169,6 +2169,16 @@ release produces the swing and particle burst. Touch taps still break at once,
 and the crate-return backlog item was closed because the hotbar is an infinite
 creative palette; carried crates are recipe currency, not placed items.
 
+The sky is now a camera-centred dome with a horizon-to-zenith gradient and a
+soft sun glow in the direction `(0.5, 0.7, 0.35)`, plus 18 deterministic
+instanced cloud banks at y 78-86. The fog colour matches the horizon band, so
+distant terrain dissolves into the sky instead of a hard edge; the fog
+distances themselves are unchanged to keep the arena readable. `sky.spec`
+pitches the demo camera above the map and asserts three cloud pixels are white
+and that the sky pales from the top toward the horizon. The sky and clouds add
+two draw calls; the offline low-tier view measured 52. Trees, water and a
+forest-canopy readability pass remain open.
+
 The airdrop telegraph keeps its 3D marker at the drop site. Its `DROP n` label
 used to disappear whenever the site left the camera view; it now clamps into a
 HUD-safe frame (80 px sides, 200 px top, 140 px bottom) so it never sits under
@@ -2306,7 +2316,7 @@ T-056's worker and live Sentry ingest, and T-062/T-063/T-064 still need a
 Cloudflare deployment, physical devices, six humans on production and a week
 of telemetry. Those are not marked done.
 
-The current gates are 505 Rust tests, 166 Playwright specs (162 passed, four
+The current gates are 505 Rust tests, 167 Playwright specs (163 passed, four
 perf-gated skipped), clippy/fmt clean, and 20 wasm exports. T-050 is done at
 its AC boundary: 15 named threat tests, the socket guards, chat/creation rate
 limits and the committed 15-attack fixture. The registry's HTTP/DO surface

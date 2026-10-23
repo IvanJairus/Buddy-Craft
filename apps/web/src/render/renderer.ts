@@ -18,11 +18,68 @@ import * as THREE from "three";
 import { QUALITY, type QualitySettings, type QualityTier } from "./quality";
 
 const TARGET_FRAME_MS = 1000 / 60;
+
+/**
+ * High, flat cloud banks. One instanced draw; deterministic placement so a
+ * screenshot does not change between runs.
+ */
+function buildClouds(): THREE.InstancedMesh<THREE.BoxGeometry, THREE.MeshBasicMaterial> {
+  const count = 18;
+  const mesh = new THREE.InstancedMesh(
+    new THREE.BoxGeometry(1, 1, 1),
+    new THREE.MeshBasicMaterial({ color: 0xf3f7fb }),
+    count,
+  );
+  const dummy = new THREE.Object3D();
+  let seed = 0x5eed_1234;
+  const next = (): number => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 0x1_0000_0000;
+  };
+  for (let i = 0; i < count; i += 1) {
+    dummy.position.set(next() * 210 - 5, 78 + next() * 8, next() * 210 - 5);
+    dummy.scale.set(8 + next() * 10, 1, 5 + next() * 6);
+    dummy.rotation.set(0, next() * 0.6, 0);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(i, dummy.matrix);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.frustumCulled = false;
+  mesh.renderOrder = -10;
+  return mesh;
+}
 const MIN_SCALE = 0.55;
 const MAX_SCALE = 1;
 const SCALE_SMOOTHING = 0.15;
 const FRAME_EMA = 0.1;
 const SKY_COLOR = 0x8fb8d8;
+const HORIZON_COLOR = 0xa9cbe2;
+const ZENITH_COLOR = 0x4f7fae;
+const SUN_COLOR = 0xfff0c8;
+
+const SKY_VERTEX = `
+varying vec3 vDirection;
+void main() {
+  vDirection = normalize(position);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+const SKY_FRAGMENT = `
+uniform vec3 topColor;
+uniform vec3 horizonColor;
+uniform vec3 sunColor;
+uniform vec3 sunDirection;
+varying vec3 vDirection;
+void main() {
+  float up = clamp(vDirection.y, 0.0, 1.0);
+  vec3 color = mix(horizonColor, topColor, pow(up, 0.55));
+  float glow = max(dot(vDirection, normalize(sunDirection)), 0.0);
+  color += sunColor * (pow(glow, 180.0) * 0.8 + pow(glow, 10.0) * 0.08);
+  gl_FragColor = vec4(color, 1.0);
+  #include <colorspace_fragment>
+}
+`;
 
 export interface RendererInfo {
   readonly webgl2: boolean;
@@ -54,6 +111,8 @@ export class GameRenderer {
   readonly pixelRatioAtBoot: number;
 
   private readonly canvas: HTMLCanvasElement;
+  private readonly sky: THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial>;
+  private readonly clouds: THREE.InstancedMesh<THREE.BoxGeometry, THREE.MeshBasicMaterial>;
   private readonly onResize = (): void => this.resize();
   private tier: QualityTier;
   private settings: QualitySettings;
@@ -74,7 +133,7 @@ export class GameRenderer {
       antialias: false,
       powerPreference: "high-performance",
     });
-    this.renderer.setClearColor(SKY_COLOR, 1);
+    this.renderer.setClearColor(HORIZON_COLOR, 1);
     // The hand pass renders after the world; count both in one frame's stats.
     this.renderer.info.autoReset = false;
 
@@ -83,9 +142,35 @@ export class GameRenderer {
     this.pixelRatioAtBoot = this.renderer.getPixelRatio();
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(SKY_COLOR);
+    this.scene.background = new THREE.Color(HORIZON_COLOR);
     this.camera = new THREE.PerspectiveCamera(70, 1, 0.1, this.settings.fogEnd);
     this.camera.position.set(0, 2, 0);
+
+    this.sky = new THREE.Mesh(
+      new THREE.SphereGeometry(48, 24, 12),
+      new THREE.ShaderMaterial({
+        vertexShader: SKY_VERTEX,
+        fragmentShader: SKY_FRAGMENT,
+        uniforms: {
+          topColor: { value: new THREE.Color(ZENITH_COLOR) },
+          horizonColor: { value: new THREE.Color(HORIZON_COLOR) },
+          sunColor: { value: new THREE.Color(SUN_COLOR) },
+          sunDirection: {
+            value: new THREE.Vector3(0.5, 0.7, 0.35).normalize(),
+          },
+        },
+        side: THREE.BackSide,
+        depthTest: false,
+        depthWrite: false,
+        fog: false,
+      }),
+    );
+    this.sky.frustumCulled = false;
+    this.sky.renderOrder = -20;
+    this.scene.add(this.sky);
+
+    this.clouds = buildClouds();
+    this.scene.add(this.clouds);
 
     this.applyQuality();
     this.resize();
@@ -160,6 +245,7 @@ export class GameRenderer {
       this.updateScale(sample);
     }
     this.renderer.info.reset();
+    this.sky.position.copy(this.camera.position);
     this.renderer.render(this.scene, this.camera);
     this.frames += 1;
   }
@@ -228,6 +314,10 @@ export class GameRenderer {
 
   dispose(): void {
     window.removeEventListener("resize", this.onResize);
+    this.sky.geometry.dispose();
+    this.sky.material.dispose();
+    this.clouds.geometry.dispose();
+    this.clouds.material.dispose();
     this.renderer.dispose();
   }
 
@@ -269,7 +359,7 @@ export class GameRenderer {
   }
 
   private applyQuality(): void {
-    this.scene.fog = new THREE.Fog(SKY_COLOR, this.settings.fogStart, this.settings.fogEnd);
+    this.scene.fog = new THREE.Fog(HORIZON_COLOR, this.settings.fogStart, this.settings.fogEnd);
     this.camera.far = this.settings.fogEnd;
     this.camera.updateProjectionMatrix();
     this.applyResolution();
