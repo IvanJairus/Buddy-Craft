@@ -11,7 +11,7 @@
 import "./screens.css";
 import "./a11y.css";
 
-export type ScreenId = "boot" | "main" | "lobby" | "settings" | "match" | "results";
+export type ScreenId = "boot" | "main" | "lobby" | "settings" | "match" | "pause" | "results";
 
 function make<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -34,18 +34,18 @@ function actionButton(action: string, label: string, primary = false): HTMLButto
 
 export class ScreenManager {
   private readonly root: HTMLDivElement;
-  private readonly leave: HTMLButtonElement;
+  private readonly menu: HTMLButtonElement;
   private readonly screens = new Map<ScreenId, HTMLElement>();
   private currentId: ScreenId = "boot";
 
-  constructor(parent: HTMLElement, onLeave: () => void) {
+  constructor(parent: HTMLElement, onMenu: () => void) {
     this.root = make("div", "screen-root");
     parent.append(this.root);
 
-    this.leave = actionButton("leave-match", "LEAVE MATCH");
-    this.leave.classList.add("match-leave");
-    this.leave.addEventListener("click", onLeave);
-    parent.append(this.leave);
+    this.menu = actionButton("pause", "MENU");
+    this.menu.classList.add("match-menu");
+    this.menu.addEventListener("click", onMenu);
+    parent.append(this.menu);
 
     document.body.dataset.screen = "boot";
   }
@@ -75,7 +75,7 @@ export class ScreenManager {
 
   dispose(): void {
     this.root.remove();
-    this.leave.remove();
+    this.menu.remove();
     for (const element of this.screens.values()) {
       element.remove();
     }
@@ -116,6 +116,30 @@ export function buildMainMenu(callbacks: MainMenuCallbacks): HTMLDivElement {
   const settings = actionButton("settings", "SETTINGS");
   settings.addEventListener("click", callbacks.onSettings);
   panel.append(title, subtitle, online, offline, settings);
+  return panel;
+}
+
+export interface PauseCallbacks {
+  onResume: () => void;
+  onSettings: () => void;
+  onLeave: () => void;
+}
+
+export function buildPause(callbacks: PauseCallbacks): HTMLDivElement {
+  const panel = make("div", "screen-panel pause-panel");
+  panel.dataset.screen = "pause";
+  panel.setAttribute("aria-label", "Paused");
+  const title = make("h1", "screen-title");
+  title.textContent = "PAUSED";
+  const subtitle = make("p", "screen-subtitle");
+  subtitle.textContent = "Offline matches wait here. Online matches keep running.";
+  const resume = actionButton("pause-resume", "RESUME", true);
+  resume.addEventListener("click", callbacks.onResume);
+  const settings = actionButton("pause-settings", "SETTINGS");
+  settings.addEventListener("click", callbacks.onSettings);
+  const leave = actionButton("pause-leave", "LEAVE MATCH");
+  leave.addEventListener("click", callbacks.onLeave);
+  panel.append(title, subtitle, resume, settings, leave);
   return panel;
 }
 

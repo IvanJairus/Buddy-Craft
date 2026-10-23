@@ -32,7 +32,11 @@ interface WorkerClose {
   type: "close";
 }
 
-type Incoming = WorkerInit | WorkerMessage | WorkerAdvance | WorkerClose;
+interface WorkerPause {
+  type: "pause" | "resume";
+}
+
+type Incoming = WorkerInit | WorkerMessage | WorkerAdvance | WorkerClose | WorkerPause;
 
 interface Scope {
   postMessage(message: unknown, transfer?: Transferable[]): void;
@@ -58,6 +62,19 @@ scope.onmessage = (event: MessageEvent<Incoming>): void => {
   if (message.type === "close") {
     stop();
     self.close();
+    return;
+  }
+  if (message.type === "pause") {
+    if (timer !== 0) {
+      scope.clearInterval(timer);
+      timer = 0;
+    }
+    return;
+  }
+  if (message.type === "resume") {
+    if (wasm !== null && !ended && timer === 0) {
+      timer = scope.setInterval(tick, 50);
+    }
     return;
   }
   if (wasm === null) {

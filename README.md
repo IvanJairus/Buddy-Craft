@@ -520,9 +520,10 @@ recorded here rather than quietly skipped:
   target gate. Menus scale through `--cb-ui-scale`; the in-match controls keep
   their physical size until the accessibility pass can scale targets and layout
   together.
-- **The match and results are not connected to a real outcome.** LEAVE MATCH is
-  a deliberate route so the Results screen is reachable and the shell has no
-  dead end. Offline now routes S_END to Results; the online host still uses the leave action until T-057.
+- **The match and results are not connected to a real outcome.** MENU opens a
+  pause screen with RESUME, SETTINGS and LEAVE MATCH, so Results is reachable
+  without waiting for a core. Offline routes S_END to Results; the online host
+  still uses the leave action until T-057.
 - **The key map is one code per action, not a chord model.** The ten controls
   each get one keyboard code; modifier combinations would need an array or a
   chord type. The JSON format is versioned by its own key, so a later chord
@@ -1767,17 +1768,19 @@ node --test tools/recipe-editor/test/editor.test.mjs
 
 ## Shell: one manager and no dead ends
 
-Boot to Main to Lobby to Match to Results, with Settings branching from Main. A
-single `ScreenManager` writes `body[data-screen]`; CSS hides the canvas, HUD,
-recipe book and touch surface whenever the attribute is not `match`. Every
-screen has a button that leaves it, and the match carries a LEAVE MATCH button,
-so Results is reachable without waiting for a core.
+Boot to Main to Lobby to Match to Pause or Results, with Settings branching from
+Main and Pause. A single `ScreenManager` writes `body[data-screen]`; CSS hides
+the canvas, HUD, recipe book and touch surface whenever the attribute is not
+`match`. The match carries a small MENU button, and Pause owns LEAVE MATCH, so
+Results is reachable without waiting for a core. Offline rooms stop their worker
+while Pause is open; online rooms keep running and say so on the panel.
 
 | Screen | Exits |
 | --- | --- |
 | Boot | Continue to Main |
 | Main | Online, Offline, Settings |
 | Lobby | Create or Join, Start to Match, Back to Main |
+| Pause | Resume to Match, Settings, Leave to Results |
 | Settings | Back to Main |
 | Match | Leave to Results |
 | Results | Rematch, Main |
@@ -1983,7 +1986,10 @@ bank in the plan's file list is a deliberate deviation. The audio spec runs in
 Chromium and in a dedicated `webkit-audio` project: a real canvas `pointerdown`
 must unlock the suspended context, a left-side `PannerNode` keeps x = -4, the
 24-voice cap holds, a 100 m source is culled and the worklet reports ready. All
-six WebKit tests pass.
+six WebKit tests pass. Match events map protocol kinds to cues (pickup,
+telegraph, low HP, craft blocked), landing audio is positioned relative to the
+camera, and a buddy craft plays the spawn cue. The airdrop E2E also asserts the
+Juice telegraph marker, not only the HUD toast.
 
 ## Host: one task per room at 20 Hz
 
@@ -2118,7 +2124,9 @@ authoritative speed, not just presentation. The Settings screen now has a
 dedicated Mouse section: a sensitivity slider with a live °/100px readout,
 LOW/DEFAULT/HIGH presets, a DPI field and cm/360 calculator, Invert Y, and a
 persisted Raw input toggle. The form scrolls inside a fixed Back footer. Open
-it from Main -> SETTINGS; there is no in-match pause menu yet.
+it from Main -> SETTINGS or from the in-match MENU -> SETTINGS; Settings
+returns to whichever screen opened it. Remaining feel work is tracked in
+[docs/PLAYABILITY_BACKLOG.md](docs/PLAYABILITY_BACKLOG.md).
 
 ## Balance: four numbers, ten bot matches
 

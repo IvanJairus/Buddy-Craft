@@ -92,6 +92,37 @@ test("a left-side cue pans left and the voice cap holds at 24", async ({ page }:
   expect(stats.voices).toBeLessThanOrEqual(24);
 });
 
+test("match event kinds map to the documented cues", async ({ page }: { page: Page }) => {
+  await boot(page);
+  const cues = await page.evaluate(() => {
+    const api = (window as unknown as TestWindow).__cbTest!;
+    const rows: Array<[number, number, number]> = [
+      [0, 0, 6],
+      [4, 10, 10],
+      [5, 0, 20],
+      [6, 0, 3],
+      [7, 10, 41],
+      [8, 0, 0],
+      [9, 0, 25],
+      [10, 0, 4],
+    ];
+    return rows.map(([kind, a, b]) => {
+      api.audioEvent(kind, a, b);
+      return api.audioStats().lastCue;
+    });
+  });
+  expect(cues).toEqual([
+    "recipe_complete",
+    "land",
+    "sword_flesh",
+    "ui_click",
+    "block_place",
+    "catapult_launch",
+    "ui_error",
+    "ui_error",
+  ]);
+});
+
 test("a source beyond forty metres is culled", async ({ page }: { page: Page }) => {
   await boot(page);
   const played = await page.evaluate(() =>

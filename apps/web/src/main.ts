@@ -51,6 +51,7 @@ import {
   ScreenManager,
   buildBoot,
   buildMainMenu,
+  buildPause,
   buildResults,
   type ScreenId,
 } from "./ui/screens";
@@ -178,6 +179,7 @@ interface TestApi {
     x: number;
     y: number;
     z: number;
+    positions: Array<{ id: number; x: number; y: number; z: number }>;
   };
   offlineAdvance(ticks: number, post?: boolean): void;
   offlineInput(frame: number[]): void;
@@ -261,6 +263,7 @@ let interaction: Interaction | null = null;
 let desktop: DesktopInput | null = null;
 let touch: TouchInput | null = null;
 let screens: ScreenManager | null = null;
+let settingsReturn: "main" | "pause" = "main";
 let tickCalls = 0;
 let elapsedSeconds = 0;
 const stanceOrder: HudStance[] = ["follow", "hold", "assault"];
@@ -382,19 +385,36 @@ async function boot(): Promise<void> {
         }
       } else if (action === "menu") {
         recipeBook.close();
-        screens?.show("main");
+        const current = screens?.current();
+        if (current === "match") {
+          openPause();
+        } else if (current === "pause") {
+          resumeMatch();
+        } else if (current === "settings" && settingsReturn === "pause") {
+          screens?.show("pause");
+        } else {
+          screens?.show("main");
+        }
       }
     });
   }
 
-  screens = new ScreenManager(document.body, () => leaveMatch());
+  screens = new ScreenManager(document.body, () => openPause());
   screens.register("boot", buildBoot(() => screens?.show("main")));
   screens.register(
     "main",
     buildMainMenu({
       onOnline: () => screens?.show("lobby"),
       onOffline: () => startOffline(),
-      onSettings: () => screens?.show("settings"),
+      onSettings: () => openSettings("main"),
+    }),
+  );
+  screens.register(
+    "pause",
+    buildPause({
+      onResume: () => resumeMatch(),
+      onSettings: () => openSettings("pause"),
+      onLeave: () => leaveMatch(),
     }),
   );
   const lobby = new LobbyScreen({
@@ -408,7 +428,7 @@ async function boot(): Promise<void> {
     onInvertY: (value) => desktop?.setInvertY(value),
     onRawInput: (value) => desktop?.setRawInput(value),
     onKeyMap: (map) => desktop?.setKeyMap(map),
-    onBack: () => screens?.show("main"),
+    onBack: () => screens?.show(settingsReturn),
   });
   screens.register("settings", settings.element);
   screens.register(
@@ -438,6 +458,24 @@ async function boot(): Promise<void> {
     entities?.hideLocalPlayer(-1);
     cameraSettled = false;
     lastCameraAt = 0;
+  }
+
+  function openSettings(returnTo: "main" | "pause"): void {
+    settingsReturn = returnTo;
+    screens?.show("settings");
+  }
+
+  function openPause(): void {
+    if (screens?.current() !== "match") return;
+    recipeBook.close();
+    offline?.pause();
+    screens.show("pause");
+  }
+
+  function resumeMatch(): void {
+    if (screens?.current() !== "pause") return;
+    offline?.resume();
+    screens.show("match");
   }
 
   function leaveMatch(): void {
@@ -491,6 +529,11 @@ async function boot(): Promise<void> {
       } else if (kind === 0) {
         const recipe = recipes.find((row) => row.id === b);
         hud.toast(`${recipe?.name ?? `Recipe ${b}`} crafted`);
+        // output_kind 8 is a buddy. Play the spawn cue only for the local team;
+        // the global craft toast still reports every team.
+        if (recipe?.output === 8 && a === sessionTeam) {
+          audio.play("buddy_spawn");
+        }
       } else if (kind === 10) {
         const recipe = recipes.find((row) => row.id === b);
         hud.toast(`${recipe?.name ?? `Recipe ${b}`}: buddy cap reached`);
@@ -1015,6 +1058,12 @@ async function boot(): Promise<void> {
         x,
         y,
         z,
+        positions: Array.from({ length: interpolator.playerCount }, (_, i) => ({
+          id: interpolator.playerIds[i],
+          x: interpolator.playerX[i],
+          y: interpolator.playerY[i],
+          z: interpolator.playerZ[i],
+        })),
       };
     },
     offlineAdvance: (ticks, post = false) => offline?.advance(ticks, post),
@@ -1134,12 +1183,20 @@ async function boot(): Promise<void> {
     if (views !== null) {
       const eventCount = views.desc.getUint32(DESC_EVENT_COUNT, true);
       juice.consumeEvents(views.events, eventCount, now);
-      audio.consumeEvents(views.events, eventCount);
+      audio.consumeEvents(views.events, eventCount, {
+        x: renderer.camera.position.x,
+        y: renderer.camera.position.y,
+        z: renderer.camera.position.z,
+      });
     }
     const dt = lastJuiceAt === 0 ? 16 : Math.min(100, Math.max(0, now - lastJuiceAt));
     lastJuiceAt = now;
     juice.update(now, dt);
     audio.update(dt / 1_000);
+    entities?.setViewOrigin(
+      renderer.camera.position.x,
+      renderer.camera.position.z,
+    );
     if ((offlineActive || onlineActive) && (offlineSnapshot || onlineSnapshot)) {
       interpolator.sample(now);
       entities?.updateFromInterp(

@@ -32,6 +32,7 @@ export interface AudioStats {
   pannerModel: "equalpower" | "HRTF" | "none";
   workletReady: boolean;
   rumble: number;
+  lastCue: string | null;
   lastError: string;
 }
 
@@ -105,6 +106,7 @@ export class AudioEngine {
   private workletReady = false;
   private rumbleLevel = 0;
   private lastError = "";
+  private lastCue: string | null = null;
   private playCount = 0;
 
   constructor(tier: AudioTier, factory?: () => AudioContext) {
@@ -171,6 +173,7 @@ export class AudioEngine {
     if (this.context === null || this.sfxBus === null || this.uiBus === null) return 0;
     const spec = CUES[cue];
     if (spec === undefined) return 0;
+    this.lastCue = cue;
     if (position !== undefined) {
       const distance = Math.hypot(position.x, position.y, position.z);
       if (distance > MAX_DISTANCE) return 0;
@@ -229,7 +232,7 @@ export class AudioEngine {
   }
 
   /** Map the same 16-byte event slots the juice layer reads. */
-  consumeEvents(events: DataView, count: number): number {
+  consumeEvents(events: DataView, count: number, listener?: AudioPosition): number {
     const limit = Math.min(count, Math.floor(events.byteLength / 16), 64);
     for (let i = 0; i < limit; i += 1) {
       const at = i * 16;
@@ -237,6 +240,7 @@ export class AudioEngine {
         events.getUint32(at, true),
         events.getInt32(at + 4, true),
         events.getInt32(at + 8, true),
+        listener,
       );
     }
     return limit;
@@ -276,7 +280,7 @@ export class AudioEngine {
     this.rumble(this.rumbleLevel);
   }
 
-  handleEvent(kind: number, a: number, b: number): void {
+  handleEvent(kind: number, a: number, b: number, listener?: AudioPosition): void {
     switch (kind) {
       case 0:
         this.play("recipe_complete");
@@ -292,7 +296,11 @@ export class AudioEngine {
         this.play("core_destroyed");
         break;
       case 4:
-        this.play("land", { x: a, y: 40, z: b });
+        this.play("land", {
+          x: a - (listener?.x ?? 0),
+          y: 40 - (listener?.y ?? 0),
+          z: b - (listener?.z ?? 0),
+        });
         break;
       case 5:
         this.play("sword_flesh");
@@ -304,10 +312,14 @@ export class AudioEngine {
         this.play("block_place");
         break;
       case 8:
-        this.play("jump");
+        // The telegraph must be audible in every camera direction.
+        this.play("catapult_launch");
         break;
       case 9:
-        this.play("heal");
+        this.play("ui_error");
+        break;
+      case 10:
+        this.play("ui_error");
         break;
       default:
         break;
@@ -327,6 +339,7 @@ export class AudioEngine {
       pannerModel: this.pannerModel,
       workletReady: this.worklet !== null,
       rumble: this.rumbleLevel,
+      lastCue: this.lastCue,
       lastError: this.lastError,
     };
   }

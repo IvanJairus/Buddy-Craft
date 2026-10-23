@@ -199,6 +199,8 @@ export class EntityRenderer {
   private playerCount = 0;
   private buddyCount = 0;
   private localId = -1;
+  private viewX = Number.POSITIVE_INFINITY;
+  private viewZ = Number.POSITIVE_INFINITY;
   private lastUpdateMs = 0;
 
   constructor(parent: THREE.Object3D, models: CharacterModels | null = null) {
@@ -329,6 +331,16 @@ export class EntityRenderer {
   /** First-person view: the local body must not cover the reticle. */
   hideLocalPlayer(id: number): void {
     this.localId = id;
+  }
+
+  /** Hide a remote body that is standing inside the first-person camera. */
+  setViewOrigin(x: number, z: number): void {
+    this.viewX = x;
+    this.viewZ = z;
+  }
+
+  private isInsideCamera(x: number, z: number): boolean {
+    return Math.hypot(x - this.viewX, z - this.viewZ) < 1;
   }
 
   /** A one-event hit flash on one network id. Duration is presentation-only. */
@@ -465,7 +477,7 @@ export class EntityRenderer {
       }
       this.slotCounts[poolIndex] = slot + 1;
 
-      const hidden = value.id === this.localId;
+      const hidden = value.id === this.localId || this.isInsideCamera(value.x, value.z);
       const bob = animate ? bobOffset(value.anim) : 0;
       const tilt = tiltAngle(value.pitch);
       const pulse = animate ? (attackScale(value.flags, value.anim) - 1) / ATTACK_PULSE : 0;
@@ -512,7 +524,8 @@ export class EntityRenderer {
     const tilt = tiltAngle(value.pitch);
     const weaponScale = animate ? attackScale(value.flags, value.anim) : 1;
     const alpha = dissolveAlpha(value.flags, value.hp, value.anim);
-    const shown = value.id === this.localId ? 0 : 1;
+    const shown =
+      value.id === this.localId || this.isInsideCamera(value.x, value.z) ? 0 : 1;
     const [body, head, weapon] = parts;
 
     place(body, index, value.x, value.y + BODY_HEIGHT / 2 + bob, value.z, tilt, value.yaw, shown);

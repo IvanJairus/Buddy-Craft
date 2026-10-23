@@ -57,6 +57,7 @@ export interface JuiceStats {
   shakeActive: boolean;
   vignette: number;
   lowHp: boolean;
+  telegraphVisible: boolean;
   timeScale: number;
   presentationSeconds: number;
   lastUpdateMs: number;
@@ -370,6 +371,7 @@ export class Juice {
       shakeActive: this.shake.active(nowMs),
       vignette: this.lastVignette < 0 ? 0 : this.lastVignette,
       lowHp: this.lowHp,
+      telegraphVisible: this.telegraphShadow.visible && nowMs < this.telegraphUntil,
       timeScale: this.timeScale,
       presentationSeconds: this.presentationSeconds,
       lastUpdateMs: this.lastUpdateMs,

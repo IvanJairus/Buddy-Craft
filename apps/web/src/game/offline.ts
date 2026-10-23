@@ -84,6 +84,14 @@ class WorkerTransport implements Transport {
     this.worker?.postMessage({ type: "advance", ticks, post });
   }
 
+  pause(): void {
+    this.worker?.postMessage({ type: "pause" });
+  }
+
+  resume(): void {
+    this.worker?.postMessage({ type: "resume" });
+  }
+
   close(_code = 1000, _reason = ""): void {
     this.state = "closed";
     this.worker?.postMessage({ type: "close" });
@@ -166,6 +174,14 @@ export class OfflineSession {
 
   advance(ticks: number, post = false): void {
     this.transport.advance(ticks, post);
+  }
+
+  pause(): void {
+    if (this.state === "open") this.transport.pause();
+  }
+
+  resume(): void {
+    if (this.state === "open") this.transport.resume();
   }
 
   debugGrant(player: number, crates: number): void {

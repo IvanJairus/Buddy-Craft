@@ -32,6 +32,16 @@ test("telegraph, landing, pickup, deposit and craft all reach the HUD", async ({
   await advance(page, 130);
   await waitForEvent(page, KIND_TELEGRAPH);
   expect((await feed(page)).join(" ")).toContain("Airdrop incoming");
+  await page.waitForFunction(
+    () =>
+      (
+        window as unknown as {
+          __cbTest: { juiceStats(): { telegraphVisible: boolean } };
+        }
+      ).__cbTest.juiceStats().telegraphVisible,
+    null,
+    { timeout: 5_000 },
+  );
 
   await advance(page, 110);
   await waitForEvent(page, KIND_AIRDROP);

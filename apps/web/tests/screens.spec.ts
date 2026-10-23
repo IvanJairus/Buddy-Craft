@@ -51,11 +51,14 @@ test("every_screen_is_reachable", async ({ page }) => {
   expect(await screen(page)).toBe("match");
   expect(await page.locator("#game").isVisible()).toBe(true);
 
-  await page.locator(".match-leave").click();
+  await page.locator(".match-menu").click();
+  expect(await screen(page)).toBe("pause");
+  await page.locator('[data-screen-action="pause-leave"]').click();
   expect(await screen(page)).toBe("results");
   await page.locator('[data-screen-action="rematch"]').click();
   expect(await screen(page)).toBe("match");
-  await page.locator(".match-leave").click();
+  await page.locator(".match-menu").click();
+  await page.locator('[data-screen-action="pause-leave"]').click();
   await page.locator('[data-screen-action="results-main"]').click();
   expect(await screen(page)).toBe("main");
 
@@ -66,7 +69,65 @@ test("every_screen_is_reachable", async ({ page }) => {
 
   await page.locator('[data-screen-action="offline"]').click();
   expect(await screen(page)).toBe("match");
-  await expect(page.locator(".match-leave")).toBeVisible();
+  await expect(page.locator(".match-menu")).toBeVisible();
+  await page.locator(".match-menu").click();
+  await page.locator('[data-screen-action="pause-settings"]').click();
+  expect(await screen(page)).toBe("settings");
+  await page.locator('[data-screen-action="settings-back"]').click();
+  expect(await screen(page)).toBe("pause");
+  await page.locator('[data-screen-action="pause-resume"]').click();
+  expect(await screen(page)).toBe("match");
+});
+
+test("pause freezes the offline match until resume", async ({ page }) => {
+  await boot(page, "/?scene=clear");
+  await page.locator('[data-screen-action="continue"]').click();
+  await page.locator('[data-screen-action="offline"]').click();
+  await page.waitForFunction(
+    () =>
+      (
+        window as unknown as {
+          __cbTest: { offlineStats(): { state: string; tick: number } };
+        }
+      ).__cbTest.offlineStats().state === "open",
+    null,
+    { timeout: 15_000 },
+  );
+
+  await page.keyboard.press("Escape");
+  expect(await screen(page)).toBe("pause");
+  await page.waitForTimeout(150);
+  const paused = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __cbTest: { offlineStats(): { tick: number } };
+        }
+      ).__cbTest.offlineStats().tick,
+  );
+  await page.waitForTimeout(350);
+  const stillPaused = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __cbTest: { offlineStats(): { tick: number } };
+        }
+      ).__cbTest.offlineStats().tick,
+  );
+  expect(Math.abs(stillPaused - paused)).toBeLessThanOrEqual(1);
+
+  await page.locator('[data-screen-action="pause-resume"]').click();
+  expect(await screen(page)).toBe("match");
+  await page.waitForTimeout(350);
+  const resumed = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __cbTest: { offlineStats(): { tick: number } };
+        }
+      ).__cbTest.offlineStats().tick,
+  );
+  expect(resumed).toBeGreaterThan(stillPaused);
 });
 
 test("settings persist and the remap reaches the input frame", async ({ page }) => {

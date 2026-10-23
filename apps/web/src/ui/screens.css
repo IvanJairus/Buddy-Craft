@@ -98,13 +98,15 @@
   margin-top: 16px;
 }
 
-.match-leave {
+.match-menu {
   position: fixed;
   top: calc(env(safe-area-inset-top, 0px) + 86px);
   left: 50%;
   z-index: 45;
   display: none;
-  min-height: 44px;
+  width: auto;
+  min-width: 84px;
+  min-height: 40px;
   padding: 0 14px;
   transform: translateX(-50%);
   border: 1px solid rgba(255, 255, 255, 0.25);
@@ -117,7 +119,7 @@
   touch-action: manipulation;
 }
 
-body[data-screen="match"] .match-leave {
+body[data-screen="match"] .match-menu {
   display: block;
 }
 
