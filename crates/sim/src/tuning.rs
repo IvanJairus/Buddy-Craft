@@ -67,6 +67,7 @@ struct PlayerFile {
     respawn_s: u32,
     spawn_protect_s: u32,
     speed: f32,
+    sprint_speed: f32,
     radius: f32,
     height: f32,
 }
@@ -194,6 +195,8 @@ pub struct PlayerTuning {
     pub spawn_protect_s: u32,
     /// Maximum horizontal speed, metres per second.
     pub speed: Fixed,
+    /// Maximum horizontal speed while sprinting, metres per second.
+    pub sprint_speed: Fixed,
     /// Collision AABB half-width.
     pub radius: Fixed,
     /// Collision AABB height.
@@ -593,6 +596,12 @@ impl Tuning {
                 reason: "must be positive",
             });
         }
+        if f.player.sprint_speed <= f.player.speed {
+            return Err(TuningError {
+                field: "player.sprint_speed",
+                reason: "must be greater than the walk speed",
+            });
+        }
         if f.physics.gravity <= 0.0 {
             return Err(TuningError {
                 field: "physics.gravity",
@@ -723,6 +732,7 @@ impl Tuning {
                 respawn_s: f.player.respawn_s,
                 spawn_protect_s: f.player.spawn_protect_s,
                 speed: Fixed::from_f32(f.player.speed),
+                sprint_speed: Fixed::from_f32(f.player.sprint_speed),
                 radius: Fixed::from_f32(f.player.radius),
                 height: Fixed::from_f32(f.player.height),
             },
@@ -870,6 +880,7 @@ mod tests {
         assert_eq!(t.player.respawn_s, 8);
         assert_eq!(t.player.spawn_protect_s, 2);
         assert!(close(t.player.speed.to_f32(), 4.5));
+        assert!(close(t.player.sprint_speed.to_f32(), 5.6));
         assert_eq!(t.core.hp, 10_000);
         assert!(close(t.core.damage_mult.to_f32(), 0.35));
         assert!(close(t.core.regen.to_f32(), 0.0));

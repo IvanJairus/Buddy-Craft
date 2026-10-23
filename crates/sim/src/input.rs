@@ -30,6 +30,8 @@ pub mod buttons {
     /// Reserved: crouch. Not simulated in v1, but the bit is allocated so the
     /// protocol does not have to change to add it.
     pub const CROUCH: u8 = 1 << 4;
+    /// Hold to sprint: 5.6 m/s on land instead of the walk speed.
+    pub const SPRINT: u8 = 1 << 5;
 }
 
 /// One tick of player intent.
@@ -254,6 +256,18 @@ mod tests {
             "held is not pressed"
         );
         assert!(!f.held(buttons::FIRE));
+    }
+
+    #[test]
+    fn sprint_uses_the_next_free_button_bit() {
+        assert_eq!(buttons::SPRINT, 1 << 5);
+        let f = InputFrame {
+            buttons: buttons::SPRINT,
+            ..Default::default()
+        };
+        assert!(f.held(buttons::SPRINT));
+        assert!(!f.held(buttons::CROUCH));
+        assert!(!f.is_idle());
     }
 
     #[test]

@@ -1617,6 +1617,7 @@ advance by the same amount over 300 ms.
 | Pointer lock | the first canvas click requests it; mouse look and mouse buttons only apply while locked |
 | Blur | every key and button is released; the packed axes and buttons go to zero |
 | Hotbar | 1-9 select a slot, the wheel cycles, both emit a local `slot` action |
+| Sprint | hold Shift; the wire bit only raises speed while moving forward |
 | Actions | Q drop, Tab scoreboard, E recipes, F stance, Esc menu; Tab never moves focus |
 | Settings | sensitivity and invert-Y in localStorage; 0.5/true survives a reload |
 
@@ -1644,6 +1645,7 @@ pickaxe mode and places in block mode. There is no long-press to disambiguate.
 | Break and place | a tap, selected by the hotbar mode |
 | Deposit | holding a block-mode touch repeats placements at 6/s |
 | Jump | 64 px button, held jump bit |
+| Sprint | 64 x 48 px RUN button; hold to sprint, shows its pressed state |
 | Stance | 56 px button; cycles Follow, Hold and Assault and shows the current one |
 | Hotbar | nine 44 px slots, pickaxe plus eight block colours |
 
@@ -2107,6 +2109,15 @@ after W in headed Opera at 1512x982 (DPR 2), and 85.4 / 119.5 / 135.9 ms in
 three Chromium headless runs. The camera was sampling the same two-tick entity
 interpolation used for remote players, and input was sent only every 66 ms.
 
+Sprint adds a button bit (bit 5, next to the reserved crouch bit) and a
+`sprint_speed` tuning row of 5.6 m/s. It applies only while moving forward and
+never in water, so backpedalling and swimming keep their old speeds. In the
+offline worker, three one-second runs measured 4.498 m walking and 5.598 m
+sprinting (median of 3, input held 1.0 s). The camera eases from 70 to 76 FOV
+while sprinting; reduced motion keeps it at 70. Desktop holds Shift, touch holds
+the new RUN button, and `input.spec`/`touch.spec` assert the wire bit while
+`cargo test -p sim` asserts the authoritative speed.
+
 The local camera now follows the newest snapshot instead of the 100 ms
 interpolation, damped with a 20 ms time constant. Input is sent every 25 ms
 offline and every 50 ms online, the online rate staying under the 30/s message
@@ -2295,7 +2306,7 @@ T-056's worker and live Sentry ingest, and T-062/T-063/T-064 still need a
 Cloudflare deployment, physical devices, six humans on production and a week
 of telemetry. Those are not marked done.
 
-The current gates are 501 Rust tests, 165 Playwright specs (161 passed, four
+The current gates are 505 Rust tests, 166 Playwright specs (162 passed, four
 perf-gated skipped), clippy/fmt clean, and 20 wasm exports. T-050 is done at
 its AC boundary: 15 named threat tests, the socket guards, chat/creation rate
 limits and the committed 15-attack fixture. The registry's HTTP/DO surface

@@ -8,7 +8,7 @@ Baseline, 2026-10-23:
 
 - Local camera: 31.3 ms from W to motion in headed Opera at 1512x982 DPR 2.
 - Render: 120.3 fps, 71 draw calls, 73k triangles in the same Opera run.
-- Gates: 161 Playwright passed, 4 perf-gated skipped; 501 Rust tests.
+- Gates: 162 Playwright passed, 4 perf-gated skipped; 505 Rust tests.
 - Live client: https://buddy-craft.vercel.app. ONLINE is blocked by T-046.
 
 ## 1. Match feedback and audio
@@ -74,10 +74,13 @@ a small MENU control and a pause screen.
 
 ## 5. Sprint
 
-- [ ] Add a sprint bit to the input frame and server movement, target 5.6 m/s.
-- [ ] Left Shift on desktop; a touch control for mobile.
-- [ ] FOV kick while sprinting, respecting reduced motion.
-- [ ] Unit tests for the frame bit and authoritative speed; bot inputs unchanged.
+- [x] Add a sprint bit to the input frame and server movement, target 5.6 m/s.
+      Bit 5; the sim uses it only for forward movement on land.
+- [x] Left Shift on desktop; a touch RUN button for mobile.
+- [x] FOV kick from 70 to 76 while sprinting, respecting reduced motion.
+- [x] Tests for the frame bit and authoritative speed; bot inputs unchanged
+      (they never set the bit). Offline measurement: 4.498 m walk vs 5.598 m
+      sprint in one second, median of three runs.
 
 ## 6. Local prediction
 
@@ -114,6 +117,11 @@ a small MENU control and a pause screen.
   200 px top and 140 px bottom safe frame so it clears the HUD, RECIPES and
   hotbar; behind-camera projections are flipped instead of hidden. `juice.spec`
   asserts the on-screen and off-screen boxes and the `data-edge` style.
+- 2026-10-23: sprint. Bit 5 through the input frame, 5.6 m/s in the sim only
+  while moving forward on land, Shift/RUN controls and a reduced-motion-gated
+  70-to-76 FOV kick. Four new sim tests; `input.spec` and `touch.spec` assert
+  the wire bit. Measured 4.498 m walk vs 5.598 m sprint per second in the
+  offline worker (n=3 each).
 - 2026-10-23: hold-to-break cracks. A five-stage canvas decal follows the hit
   face, updates every frame and completes after 400 ms; `pointerLock.spec`
   checks the decal mid-hold, the no-swing-before-completion guard and the burst

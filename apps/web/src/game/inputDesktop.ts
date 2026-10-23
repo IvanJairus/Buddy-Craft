@@ -26,6 +26,7 @@ export const FIRE = 1 << 1;
 export const USE = 1 << 2;
 export const STANCE = 1 << 3;
 export const CROUCH = 1 << 4;
+export const SPRINT = 1 << 5;
 
 export const SENSITIVITY_KEY = "buddycraft.sensitivity";
 export const INVERT_Y_KEY = "buddycraft.invertY";
@@ -119,6 +120,7 @@ export interface PackedState {
   use: boolean;
   stance: boolean;
   crouch: boolean;
+  sprint: boolean;
   yaw: number;
   pitch: number;
 }
@@ -146,6 +148,7 @@ export function packFrame(state: PackedState, out = new Uint8Array(4)): Uint8Arr
   if (state.use) buttons |= USE;
   if (state.stance) buttons |= STANCE;
   if (state.crouch) buttons |= CROUCH;
+  if (state.sprint) buttons |= SPRINT;
   out[0] = buttons;
   out[1] = Math.round(state.yaw) & 0xff;
   out[2] = Math.round(state.pitch) & 0xff;
@@ -167,6 +170,7 @@ export class DesktopInput {
   private pointerLocked = false;
   private left = false;
   private right = false;
+  private sprintHeld = false;
   private secondaryPressed = false;
   private yaw = 0;
   private pitch = 0;
@@ -224,6 +228,10 @@ export class DesktopInput {
     if (event.code === "Tab") {
       event.preventDefault();
     }
+    if (event.code === "ShiftLeft" || event.code === "ShiftRight") {
+      this.sprintHeld = true;
+      return;
+    }
     if (this.isMoveKey(event.code) || event.code === this.keyMap.jump) {
       event.preventDefault();
       this.held.add(event.code);
@@ -255,6 +263,9 @@ export class DesktopInput {
   private readonly onKeyUp = (event: KeyboardEvent): void => {
     if (event.code === "Tab") {
       event.preventDefault();
+    }
+    if (event.code === "ShiftLeft" || event.code === "ShiftRight") {
+      this.sprintHeld = false;
     }
     this.held.delete(event.code);
   };
@@ -344,6 +355,7 @@ export class DesktopInput {
         use: this.right,
         stance: this.held.has(this.keyMap.stance),
         crouch: false,
+        sprint: this.sprintHeld,
         yaw: this.yaw,
         pitch: this.pitch,
       },
@@ -438,6 +450,7 @@ export class DesktopInput {
     this.held.clear();
     this.left = false;
     this.right = false;
+    this.sprintHeld = false;
     this.secondaryPressed = false;
   }
 

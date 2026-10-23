@@ -78,6 +78,8 @@ pub struct MoveConfig {
     pub height: Fixed,
     /// Maximum horizontal speed on land.
     pub speed: Fixed,
+    /// Maximum horizontal speed while sprinting on land.
+    pub sprint_speed: Fixed,
     /// Downward acceleration on land.
     pub gravity: Fixed,
     /// Maximum fall speed.
@@ -101,6 +103,7 @@ impl MoveConfig {
             half_width: t.player.radius,
             height: t.player.height,
             speed: t.player.speed,
+            sprint_speed: t.player.sprint_speed,
             gravity: t.physics.gravity,
             terminal: t.physics.terminal_velocity,
             jump_speed: t.physics.jump_speed(),
@@ -153,6 +156,8 @@ pub struct MoveIntent {
     pub jump: bool,
     /// Jump is being held, which sustains an upward swim.
     pub jump_held: bool,
+    /// Sprint is held; ignored in water.
+    pub sprint: bool,
 }
 
 impl MoveIntent {
@@ -164,6 +169,7 @@ impl MoveIntent {
             yaw: frame.yaw,
             jump: frame.pressed(crate::input::buttons::JUMP, previous_buttons),
             jump_held: frame.held(crate::input::buttons::JUMP),
+            sprint: frame.held(crate::input::buttons::SPRINT),
         }
     }
 }
@@ -215,6 +221,9 @@ pub fn step<W: VoxelQuery + ?Sized>(
     let mut jump_pending = intent.jump;
 
     let dir = clamp_to_unit(wish_direction(intent.move_x, intent.move_z, intent.yaw));
+    // Sprint is a forward gait: holding the bit while backpedalling must not
+    // grant the faster speed.
+    let sprinting = intent.sprint && intent.move_z > 0;
 
     for _ in 0..SUBSTEPS {
         // --- environment ---------------------------------------------------
@@ -230,6 +239,8 @@ pub fn step<W: VoxelQuery + ?Sized>(
         // than fixed-point rounding.
         let speed = if st.in_water {
             cfg.swim_speed
+        } else if sprinting {
+            cfg.sprint_speed
         } else {
             cfg.speed
         };
@@ -489,6 +500,7 @@ fn unstick<W: VoxelQuery + ?Sized>(world: &W, cfg: &MoveConfig, pos: &mut Vec3) 
 mod tests {
     use super::*;
     use crate::fixed::Fixed;
+    use crate::input::{buttons, InputFrame};
     use crate::time::TICK_HZ;
     use crate::world_query::{EmptyWorld, VoxelGrid};
 
@@ -718,6 +730,7 @@ mod tests {
                 yaw: (rng.next() & 0xFF) as u8,
                 jump: rng.next() % 5 == 0,
                 jump_held: rng.next() % 3 == 0,
+                sprint: false,
             };
             step(&w, &c, &mut st, it, tick_dt());
             assert!(
@@ -746,6 +759,7 @@ mod tests {
                 yaw: (rng.next() & 0xFF) as u8,
                 jump: false,
                 jump_held: false,
+                sprint: false,
             };
             let mut st = MoveState::at(Vec3::from_ints(0, 40, 0));
             step(&w, &c, &mut st, it, tick_dt());
@@ -759,6 +773,98 @@ mod tests {
                 it.yaw
             );
         }
+    }
+
+    #[test]
+    fn sprint_raises_the_land_speed_and_is_read_from_the_wire() {
+        let frame = InputFrame {
+            buttons: buttons::SPRINT,
+            ..Default::default()
+        };
+        assert!(MoveIntent::from_frame(&frame, 0).sprint);
+        assert!(!MoveIntent::from_frame(&InputFrame::default(), 0).sprint);
+
+        let w = EmptyWorld;
+        let c = cfg();
+        let mut walk = MoveState::at(Vec3::from_ints(0, 40, 0));
+        let mut sprint = MoveState::at(Vec3::from_ints(0, 40, 0));
+        let intent = |sprint: bool| MoveIntent {
+            move_z: 1,
+            sprint,
+            ..Default::default()
+        };
+        for _ in 0..20 {
+            step(&w, &c, &mut walk, intent(false), tick_dt());
+            step(&w, &c, &mut sprint, intent(true), tick_dt());
+        }
+        let walked = walk.pos.z.to_f64();
+        let sprinted = sprint.pos.z.to_f64();
+        assert!(
+            (sprinted - 5.6).abs() < 0.05,
+            "one second of sprint should be about 5.6 m, got {sprinted:.3}"
+        );
+        assert!(
+            sprinted > walked * 1.2,
+            "sprint {sprinted:.3} m should beat walk {walked:.3} m by 20%"
+        );
+    }
+
+    #[test]
+    fn sprint_requires_forward_input() {
+        let w = EmptyWorld;
+        let c = cfg();
+        let mut back = MoveState::at(Vec3::from_ints(0, 40, 0));
+        let mut forward = MoveState::at(Vec3::from_ints(0, 40, 0));
+        let back_intent = MoveIntent {
+            move_z: -1,
+            sprint: true,
+            ..Default::default()
+        };
+        let forward_intent = MoveIntent {
+            move_z: 1,
+            sprint: true,
+            ..Default::default()
+        };
+        for _ in 0..20 {
+            step(&w, &c, &mut back, back_intent, tick_dt());
+            step(&w, &c, &mut forward, forward_intent, tick_dt());
+        }
+        let back_distance = (back.pos.z - Fixed::from_int(0)).to_f64().abs();
+        let forward_distance = forward.pos.z.to_f64();
+        assert!(
+            back_distance < forward_distance * 0.9,
+            "backpedal {back_distance:.3} m must stay at walk speed, not sprint {forward_distance:.3} m"
+        );
+    }
+
+    #[test]
+    fn sprint_does_not_change_the_swim_speed() {
+        let c = cfg();
+        let mut w = VoxelGrid::new([0, 0, 0], [16, 16, 16]);
+        w.fill_layer(0, true);
+        for y in 1..8 {
+            for z in 0..16 {
+                for x in 0..16 {
+                    w.set_water(x, y, z, true);
+                }
+            }
+        }
+        let mut walk = MoveState::at(Vec3::from_ints(2, 3, 8));
+        let mut sprint = MoveState::at(Vec3::from_ints(2, 3, 8));
+        let intent = |sprint: bool| MoveIntent {
+            move_z: 1,
+            sprint,
+            ..Default::default()
+        };
+        for _ in 0..10 {
+            step(&w, &c, &mut walk, intent(false), tick_dt());
+            step(&w, &c, &mut sprint, intent(true), tick_dt());
+        }
+        assert!(walk.in_water && sprint.in_water);
+        assert_eq!(
+            walk.pos.z, sprint.pos.z,
+            "sprint must not raise the submerged speed"
+        );
     }
 
     #[test]

@@ -34,6 +34,7 @@ import { Interaction, type PendingEdit, type RayHit, type VisualState } from "./
 import {
   DesktopInput,
   FIRE,
+  SPRINT,
   loadKeyMap,
   type InputAction,
 } from "./game/inputDesktop";
@@ -94,7 +95,7 @@ interface TestApi {
   growWasm(pages: number): GrowResult;
   leakCycle(cycles: number): void;
   wasm(): { viewsAlive: boolean; memoryBytes: number };
-  camera(): { x: number; y: number; z: number; yaw: number; pitch: number };
+  camera(): { x: number; y: number; z: number; yaw: number; pitch: number; fov: number };
   characters(): { loaded: boolean; players: number; buddies: number };
   entities(): EntityInfo | null;
   entityBenchmark(frames?: number): (EntityInfo & { averageMs: number }) | null;
@@ -809,6 +810,7 @@ async function boot(): Promise<void> {
       z: renderer.camera.position.z,
       yaw: renderer.camera.rotation.y,
       pitch: renderer.camera.rotation.x,
+      fov: renderer.camera.fov,
     }),
     characters: () => ({
       loaded: loadedCharacters !== null,
@@ -1253,6 +1255,18 @@ async function boot(): Promise<void> {
     }
     const dt = lastJuiceAt === 0 ? 16 : Math.min(100, Math.max(0, now - lastJuiceAt));
     lastJuiceAt = now;
+    const sprinting =
+      screens?.current() === "match" &&
+      (frame[0] & SPRINT) !== 0 &&
+      (frame[3] >> 4) > 0 &&
+      !document.body.classList.contains("cb-reduced-motion");
+    const targetFov = sprinting ? 76 : 70;
+    const nextFov =
+      renderer.camera.fov + (targetFov - renderer.camera.fov) * (1 - Math.exp(-dt / 90));
+    if (Math.abs(nextFov - renderer.camera.fov) > 0.01) {
+      renderer.camera.fov = nextFov;
+      renderer.camera.updateProjectionMatrix();
+    }
     juice.update(now, dt);
     audio.update(dt / 1_000);
     entities?.setViewOrigin(

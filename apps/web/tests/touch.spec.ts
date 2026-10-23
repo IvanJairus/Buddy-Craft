@@ -9,6 +9,7 @@
 
 import { expect, test, type Page } from "@playwright/test";
 import type { TouchState } from "../src/game/inputTouch";
+import { SPRINT } from "../src/game/inputDesktop";
 
 test.use({ viewport: { width: 430, height: 900 }, hasTouch: true, isMobile: true });
 
@@ -136,7 +137,18 @@ test("stance cycles, crosshair and controls meet the size gate", async ({ page }
   await stanceButton.tap();
   expect(await stanceButton.getAttribute("data-stance")).toBe("follow");
 
-  for (const selector of [".cb-touch-jump", ".cb-touch-stance"]) {
+  const sprint = page.locator(".cb-touch-sprint");
+  expect(await sprint.getAttribute("aria-pressed")).toBe("false");
+  await sprint.dispatchEvent("touchstart");
+  await page.waitForTimeout(100);
+  expect((await state(page)).frame[0] & SPRINT).toBe(SPRINT);
+  expect(await sprint.getAttribute("aria-pressed")).toBe("true");
+  await sprint.dispatchEvent("touchend");
+  await page.waitForTimeout(100);
+  expect((await state(page)).frame[0] & SPRINT).toBe(0);
+  expect(await sprint.getAttribute("aria-pressed")).toBe("false");
+
+  for (const selector of [".cb-touch-jump", ".cb-touch-sprint", ".cb-touch-stance"]) {
     const box = await page.locator(selector).boundingBox();
     expect(box).not.toBeNull();
     expect(box!.width).toBeGreaterThanOrEqual(44);

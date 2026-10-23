@@ -92,6 +92,12 @@ const CSS = `
   border-radius: 50%; border: 2px solid rgba(255,255,255,0.45);
   background: rgba(8,12,18,0.55); color: #f3f6f9; font: 600 10px ui-sans-serif, system-ui, sans-serif;
   letter-spacing: 0.06em; z-index: 3; pointer-events: auto; touch-action: none; }
+.cb-touch-sprint { position: absolute; right: calc(env(safe-area-inset-right, 0px) + 20px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 158px); width: 64px; height: 48px;
+  border-radius: 12px; border: 2px solid rgba(255,255,255,0.45);
+  background: rgba(8,12,18,0.55); color: #f3f6f9; font: 600 10px ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.08em; z-index: 3; pointer-events: auto; touch-action: none; }
+.cb-touch-sprint[aria-pressed="true"] { background: rgba(159,224,176,0.3); border-color: #9fe0b0; }
 .cb-touch-stance { position: absolute; right: calc(env(safe-area-inset-right, 0px) + 96px);
   bottom: calc(env(safe-area-inset-bottom, 0px) + 82px); width: 56px; height: 56px;
   border-radius: 12px; border: 2px solid rgba(255,255,255,0.45);
@@ -141,6 +147,7 @@ export class TouchInput {
   private readonly crosshair: HTMLDivElement;
   private readonly hotbar: HTMLDivElement;
   private readonly jumpButton: HTMLButtonElement;
+  private readonly sprintButton: HTMLButtonElement;
   private readonly stanceButton: HTMLButtonElement;
   private readonly stanceLabel: HTMLSpanElement;
   private readonly frame = new Uint8Array(4);
@@ -166,6 +173,7 @@ export class TouchInput {
   private holdFired = false;
   private useHeld = false;
   private jumpHeld = false;
+  private sprintHeld = false;
   private holdTimer: number | null = null;
   private repeatTimer: number | null = null;
   private polls = 0;
@@ -245,6 +253,26 @@ export class TouchInput {
       }, { passive: false });
     }
 
+    this.sprintButton = document.createElement("button");
+    this.sprintButton.type = "button";
+    this.sprintButton.className = "cb-touch-sprint";
+    this.sprintButton.textContent = "RUN";
+    this.sprintButton.setAttribute("aria-label", "Hold to sprint");
+    this.sprintButton.setAttribute("aria-pressed", "false");
+    this.sprintButton.addEventListener("touchstart", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.sprintHeld = true;
+      this.sprintButton.setAttribute("aria-pressed", "true");
+    }, { passive: false });
+    for (const type of ["touchend", "touchcancel"] as const) {
+      this.sprintButton.addEventListener(type, (event) => {
+        event.preventDefault();
+        this.sprintHeld = false;
+        this.sprintButton.setAttribute("aria-pressed", "false");
+      }, { passive: false });
+    }
+
     this.stanceButton = document.createElement("button");
     this.stanceButton.type = "button";
     this.stanceButton.className = "cb-touch-stance";
@@ -286,6 +314,7 @@ export class TouchInput {
       this.crosshair,
       this.hotbar,
       this.jumpButton,
+      this.sprintButton,
       this.stanceButton,
     );
     (options.parent ?? document.body).append(this.root);
@@ -303,6 +332,7 @@ export class TouchInput {
       use: this.useHeld,
       stance: false,
       crouch: false,
+      sprint: this.sprintHeld,
       yaw: this.yaw,
       pitch: this.pitch,
     };

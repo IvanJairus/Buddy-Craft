@@ -20,6 +20,7 @@
     respawn_s: 8,
     spawn_protect_s: 2,
     speed: 4.5,               // m/s
+    sprint_speed: 5.6,        // m/s, hold Shift / RUN
     radius: 0.3,              // AABB half-width
     height: 1.8,
   ),

@@ -10,6 +10,7 @@ import { expect, test, type Page } from "@playwright/test";
 import {
   FIRE,
   JUMP,
+  SPRINT,
   USE,
   packFrame,
   turnYaw,
@@ -33,6 +34,7 @@ interface TestWindow {
   __cbReady?: boolean;
   __cbTest?: {
     input(): InputState;
+    camera(): { fov: number };
     setSensitivity(value: number): void;
     setInvertY(value: boolean): void;
   };
@@ -47,10 +49,11 @@ test("packs the wire frame", () => {
     use: false,
     stance: false,
     crouch: false,
+    sprint: true,
     yaw: 64,
     pitch: 192,
   });
-  expect(frame[0]).toBe(JUMP | FIRE);
+  expect(frame[0]).toBe(JUMP | FIRE | SPRINT);
   expect(frame[1]).toBe(64);
   expect(frame[2]).toBe(192);
   expect(frame[3]).toBe((7 << 4) | 8);
@@ -63,6 +66,7 @@ test("packs the wire frame", () => {
     use: false,
     stance: false,
     crouch: false,
+    sprint: false,
     yaw: 0,
     pitch: 0,
   });
@@ -78,6 +82,7 @@ test("packs the wire frame", () => {
       use: true,
       stance: true,
       crouch: false,
+      sprint: false,
       yaw: 0,
       pitch: 0,
     },
@@ -133,9 +138,50 @@ test("WASD, jump and mouse buttons fill the frame", async ({ page }) => {
   input = await state(page);
   expect(input.frame[0] & JUMP).toBe(JUMP);
 
+  await page.keyboard.down("Shift");
+  await page.waitForTimeout(100);
+  input = await state(page);
+  expect(input.frame[0] & SPRINT).toBe(SPRINT);
+
+  await page.keyboard.up("Shift");
   await page.keyboard.up("Space");
   await page.keyboard.up("d");
   await page.keyboard.up("w");
+  await page.waitForTimeout(100);
+  expect((await state(page)).frame[0]).toBe(0);
+});
+
+test("sprint widens the field of view and reduced motion disables the kick", async ({
+  page,
+}) => {
+  await boot(page);
+  const fov = (): Promise<number> =>
+    page.evaluate(() => (window as unknown as TestWindow).__cbTest!.camera().fov);
+  expect(await fov()).toBeCloseTo(70, 1);
+
+  await page.keyboard.down("Shift");
+  await page.keyboard.down("w");
+  await page.waitForFunction(
+    () => (window as unknown as TestWindow).__cbTest!.camera().fov > 73,
+    null,
+    { timeout: 3_000 },
+  );
+  await page.keyboard.up("w");
+  await page.keyboard.up("Shift");
+  await page.waitForFunction(
+    () => (window as unknown as TestWindow).__cbTest!.camera().fov < 71,
+    null,
+    { timeout: 3_000 },
+  );
+
+  await page.evaluate(() => document.body.classList.add("cb-reduced-motion"));
+  await page.keyboard.down("Shift");
+  await page.keyboard.down("w");
+  await page.waitForTimeout(400);
+  expect(await fov()).toBeLessThan(70.5);
+  await page.keyboard.up("w");
+  await page.keyboard.up("Shift");
+  await page.evaluate(() => document.body.classList.remove("cb-reduced-motion"));
 });
 
 test("no_input_when_unfocused", async ({ page }) => {
