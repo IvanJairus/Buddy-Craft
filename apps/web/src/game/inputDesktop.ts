@@ -167,7 +167,6 @@ export class DesktopInput {
   private pointerLocked = false;
   private left = false;
   private right = false;
-  private primaryPressed = false;
   private secondaryPressed = false;
   private yaw = 0;
   private pitch = 0;
@@ -265,7 +264,6 @@ export class DesktopInput {
     }
     if (event.button === 0) {
       this.left = true;
-      this.primaryPressed = true;
     } else if (event.button === 2) {
       this.right = true;
       this.secondaryPressed = true;
@@ -351,13 +349,6 @@ export class DesktopInput {
       },
       this.frame,
     );
-  }
-
-  /** A left click that the caller has not consumed yet. */
-  consumePrimary(): boolean {
-    const pressed = this.primaryPressed;
-    this.primaryPressed = false;
-    return pressed;
   }
 
   /** A right click that the caller has not consumed yet. */
@@ -447,7 +438,6 @@ export class DesktopInput {
     this.held.clear();
     this.left = false;
     this.right = false;
-    this.primaryPressed = false;
     this.secondaryPressed = false;
   }
 

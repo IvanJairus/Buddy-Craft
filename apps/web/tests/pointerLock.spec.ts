@@ -23,6 +23,7 @@ interface TestWindow {
     offlineStats(): { state: string };
     viewModel(): { active: boolean; swings: number; frames: number };
     particles(): { drawCalls: number } | null;
+    interactionVisuals(): { crackVisible: boolean; crackStage: number } | null;
   };
 }
 
@@ -125,11 +126,23 @@ test("place and break swing the held item and burst block particles", async ({ p
   );
   expect(placedBurst?.drawCalls).toBe(1);
 
+  // Let the post-edit remesh finish so the hold timing is not swallowed by a
+  // long first frame.
+  await page.waitForTimeout(350);
   const afterPlace = await page.evaluate(
     () => (window as unknown as TestWindow).__cbTest!.viewModel().swings,
   );
   await page.mouse.down({ button: "left" });
   await page.waitForTimeout(120);
+  const cracking = await page.evaluate(
+    () => (window as unknown as TestWindow).__cbTest!.interactionVisuals(),
+  );
+  expect(cracking?.crackVisible).toBe(true);
+  expect(cracking?.crackStage).toBeGreaterThanOrEqual(0);
+  expect(
+    await page.evaluate(() => (window as unknown as TestWindow).__cbTest!.viewModel().swings),
+  ).toBe(afterPlace);
+  await page.waitForTimeout(420);
   await page.mouse.up({ button: "left" });
   await expect
     .poll(

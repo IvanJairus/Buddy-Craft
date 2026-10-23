@@ -38,6 +38,53 @@ export const EDIT_BREAK = 0;
 /** `edit_action::PLACE` (§7). */
 export const EDIT_PLACE = 1;
 
+/** Hold time from first contact to a break request. */
+export const MINE_MS = 400;
+
+/** Five deterministic crack stages; later stages include the earlier lines. */
+const CRACK_LINES: ReadonlyArray<
+  ReadonlyArray<readonly [number, number, number, number]>
+> = [
+  [[8, 8, 5, 5], [8, 8, 11, 6], [8, 8, 7, 12]],
+  [[5, 5, 3, 8], [11, 6, 13, 4], [7, 12, 4, 14]],
+  [[8, 8, 2, 3], [8, 8, 14, 10], [4, 14, 7, 15]],
+  [[2, 3, 1, 6], [14, 10, 15, 13], [3, 8, 1, 11], [10, 2, 12, 1]],
+  [[1, 6, 0, 9], [15, 13, 15, 16], [5, 15, 2, 16], [12, 1, 14, 0], [9, 9, 12, 12]],
+];
+
+function makeCrackTexture(stage: number): THREE.CanvasTexture {
+  const canvas = document.createElement("canvas");
+  canvas.width = 16;
+  canvas.height = 16;
+  const ctx = canvas.getContext("2d");
+  if (ctx !== null) {
+    ctx.clearRect(0, 0, 16, 16);
+    for (let s = 0; s <= stage; s += 1) {
+      for (const [x0, y0, x1, y1] of CRACK_LINES[s]) {
+        // Dark halo plus a light core so the crack reads on both the dark
+        // platform and bright sand.
+        ctx.strokeStyle = "rgba(16, 10, 6, 0.78)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x0 + 0.5, y0 + 0.5);
+        ctx.lineTo(x1 + 0.5, y1 + 0.5);
+        ctx.stroke();
+        ctx.strokeStyle = "rgba(245, 238, 222, 0.9)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x0 + 0.5, y0 + 0.5);
+        ctx.lineTo(x1 + 0.5, y1 + 0.5);
+        ctx.stroke();
+      }
+    }
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.needsUpdate = true;
+  return texture;
+}
+
 export interface Vec3Like {
   x: number;
   y: number;
@@ -79,6 +126,8 @@ export interface VisualState {
   ghostVisible: boolean;
   highlight: [number, number, number] | null;
   ghost: [number, number, number] | null;
+  crackVisible: boolean;
+  crackStage: number;
 }
 
 /**
@@ -161,12 +210,21 @@ export function raycastVoxels(
 export class Interaction {
   private readonly highlight: THREE.LineSegments;
   private readonly ghost: THREE.Mesh;
+  private readonly crack: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  private readonly crackTextures: THREE.CanvasTexture[] = [];
   private readonly world: VoxelSource;
   private readonly edit: EditSink;
   private readonly reach: number;
   private readonly pendingEdits = new Map<number, PendingEdit>();
   private lastHit: RayHit | null = null;
   private readonly direction = new THREE.Vector3();
+  private readonly crackForward = new THREE.Vector3(0, 0, 1);
+  private readonly crackNormal = new THREE.Vector3();
+  private crackStage = -1;
+  private mineX = Number.NaN;
+  private mineY = Number.NaN;
+  private mineZ = Number.NaN;
+  private mineStart = 0;
 
   constructor(
     scene: THREE.Scene,
@@ -206,15 +264,31 @@ export class Interaction {
     this.ghost.visible = false;
     this.ghost.renderOrder = 998;
     scene.add(this.ghost);
+
+    this.crack = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.004, 1.004),
+      new THREE.MeshBasicMaterial({
+        transparent: true,
+        opacity: 0.92,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+      }),
+    );
+    this.crack.visible = false;
+    this.crack.renderOrder = 997;
+    scene.add(this.crack);
   }
 
-  /** Cast from an explicit eye and direction and update the two previews. */
+  /** Cast from an explicit eye and direction and update the previews. */
   aim(origin: Vec3Like, direction: Vec3Like): RayHit | null {
     const hit = raycastVoxels(origin, direction, this.reach, this.world);
     this.lastHit = hit;
     if (hit === null) {
       this.highlight.visible = false;
       this.ghost.visible = false;
+      this.hideCrack();
       return null;
     }
     this.highlight.position.set(hit.cell.x + 0.5, hit.cell.y + 0.5, hit.cell.z + 0.5);
@@ -237,6 +311,65 @@ export class Interaction {
     }
     const { x, y, z } = this.lastHit.cell;
     return this.record(this.edit.localEdit(x, y, z, 0, EDIT_BREAK), x, y, z, 0, EDIT_BREAK);
+  }
+
+  /**
+   * Advance the hold-to-break crack overlay and return its 0..1 progress.
+   * `resetMining` must be called after a break request or on release.
+   */
+  mine(held: boolean, nowMs: number): number {
+    if (!held || this.lastHit === null) {
+      this.hideCrack();
+      return 0;
+    }
+    if (this.crackTextures.length === 0) {
+      for (let stage = 0; stage < CRACK_LINES.length; stage += 1) {
+        this.crackTextures.push(makeCrackTexture(stage));
+      }
+    }
+    const cell = this.lastHit.cell;
+    if (cell.x !== this.mineX || cell.y !== this.mineY || cell.z !== this.mineZ) {
+      this.mineX = cell.x;
+      this.mineY = cell.y;
+      this.mineZ = cell.z;
+      this.mineStart = nowMs;
+    }
+    const progress = Math.min(1, Math.max(0, (nowMs - this.mineStart) / MINE_MS));
+    const stage = Math.min(
+      this.crackTextures.length - 1,
+      Math.floor(progress * this.crackTextures.length),
+    );
+    if (stage !== this.crackStage) {
+      this.crack.material.map = this.crackTextures[stage];
+      this.crack.material.needsUpdate = true;
+      this.crackStage = stage;
+    }
+    const normal = this.lastHit.normal;
+    this.crack.position.set(
+      cell.x + 0.5 + normal.x * 0.502,
+      cell.y + 0.5 + normal.y * 0.502,
+      cell.z + 0.5 + normal.z * 0.502,
+    );
+    this.crack.quaternion.setFromUnitVectors(
+      this.crackForward,
+      this.crackNormal.set(normal.x, normal.y, normal.z),
+    );
+    this.crack.visible = true;
+    // The ghost sits on the adjacent cell and would tint the hit face.
+    this.ghost.visible = false;
+    return progress;
+  }
+
+  resetMining(): void {
+    this.hideCrack();
+  }
+
+  private hideCrack(): void {
+    this.crack.visible = false;
+    this.crackStage = -1;
+    this.mineX = Number.NaN;
+    this.mineY = Number.NaN;
+    this.mineZ = Number.NaN;
   }
 
   /** Place into the cell above the highlighted face. */
@@ -275,12 +408,20 @@ export class Interaction {
       ghost: this.ghost.visible
         ? [this.ghost.position.x, this.ghost.position.y, this.ghost.position.z]
         : null,
+      crackVisible: this.crack.visible,
+      crackStage: this.crackStage,
     };
   }
 
   dispose(): void {
     this.highlight.removeFromParent();
     this.ghost.removeFromParent();
+    this.crack.removeFromParent();
+    this.crack.geometry.dispose();
+    this.crack.material.dispose();
+    for (const texture of this.crackTextures) {
+      texture.dispose();
+    }
     (this.highlight.geometry as THREE.BufferGeometry).dispose();
     (this.highlight.material as THREE.Material).dispose();
     (this.ghost.geometry as THREE.BufferGeometry).dispose();

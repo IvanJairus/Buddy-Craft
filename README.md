@@ -2148,6 +2148,16 @@ asserts both the right-click place and left-click break increment the swing
 counter and leave the particle mesh drawing. Cracks, crate return and
 per-material sounds stay open in the backlog.
 
+Holding the left button now mines instead of breaking on the first click: five
+crack stages are drawn on the hit face over 400 ms, the placement ghost hides
+while mining, and the edit is sent only when the hold completes. The cracks are
+a small canvas decal rather than a tinted cube, so they show on the exposed
+face without painting buried faces. The headed pointer-lock spec checks the
+decal mid-hold, that the hand has not swung before completion, and that the
+release produces the swing and particle burst. Touch taps still break at once,
+and the crate-return backlog item was closed because the hotbar is an infinite
+creative palette; carried crates are recipe currency, not placed items.
+
 The airdrop telegraph keeps its 3D marker at the drop site. Its `DROP n` label
 used to disappear whenever the site left the camera view; it now clamps into a
 HUD-safe frame (80 px sides, 200 px top, 140 px bottom) so it never sits under

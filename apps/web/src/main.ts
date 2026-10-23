@@ -33,6 +33,7 @@ import { EconomyTracker, reportEconomy, type EconomySummary } from "./telemetry/
 import { Interaction, type PendingEdit, type RayHit, type VisualState } from "./game/interaction";
 import {
   DesktopInput,
+  FIRE,
   loadKeyMap,
   type InputAction,
 } from "./game/inputDesktop";
@@ -1185,6 +1186,7 @@ async function boot(): Promise<void> {
   window.__cbReady = true;
 
   let lastJuiceAt = 0;
+  let mineBroken = false;
   const loop = (now: number): void => {
     const frame =
       desktop !== null
@@ -1222,14 +1224,21 @@ async function boot(): Promise<void> {
     if (interaction !== null) {
       if (desktop !== null && desktop.pointerLock) {
         interaction.aimFromCamera(renderer.camera);
-        if (desktop.consumePrimary()) {
+        const held = (frame[0] & FIRE) !== 0;
+        if (!held) mineBroken = false;
+        const progress = interaction.mine(held, now);
+        if (held && !mineBroken && progress >= 1) {
           localBreak();
+          mineBroken = true;
+          interaction.resetMining();
         }
         if (desktop.consumeSecondary()) {
           localPlace(offlineActive || onlineActive ? 11 : 1);
         }
-      } else if (touch !== null) {
-        interaction.aimFromCamera(renderer.camera);
+      } else {
+        if (touch !== null) interaction.aimFromCamera(renderer.camera);
+        interaction.resetMining();
+        mineBroken = false;
       }
     }
     const views = client?.renderViews ?? null;

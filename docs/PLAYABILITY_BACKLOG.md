@@ -49,12 +49,19 @@ a small MENU control and a pause screen.
       clickable, hidden for coarse pointers because touch has its own hotbar.
 - [x] First-person hand and held block: pickaxe on slot 0, crate on slots 1-8,
       own overlay pass with a cleared depth buffer, idle bob and 180 ms swing.
-- [ ] Break progress: cracks that advance while holding the button.
+- [x] Break progress: five crack stages over a 400 ms hold. The placement
+      ghost hides while mining so it cannot tint the hit face, and the edit is
+      sent only when the hold completes. Quick clicks no longer break.
 - [x] Break feedback: 10-particle burst, short `sword_crate` / `block_place`
-      sound and a hand swing; the world edit still needs a crate-return rule.
-- [ ] Crate economy: a broken or placed crate returns to carry instead of
-      disappearing, with a test on the carry counter.
-- [ ] Material-specific break and place sounds.
+      sound and a hand swing.
+- [ ] Crate return is not applicable to the current item model: slots are an
+      infinite creative palette and placing a block does not spend a carried
+      crate. Carried crates are the recipe currency, not placeable items.
+      Revisit only if block items get a finite inventory.
+- [ ] Material-specific break and place sounds. Blocked on a block-at query:
+      `VoxelSource` only answers `solid()`, and the wasm bridge has no
+      block-at export, so the client cannot tell grass from stone. Add the
+      query to the bridge first; do not guess the material from height.
 - [ ] Keep the frame, draw-call and bundle budgets green.
 
 ## 4. World art
@@ -107,3 +114,9 @@ a small MENU control and a pause screen.
   200 px top and 140 px bottom safe frame so it clears the HUD, RECIPES and
   hotbar; behind-camera projections are flipped instead of hidden. `juice.spec`
   asserts the on-screen and off-screen boxes and the `data-edge` style.
+- 2026-10-23: hold-to-break cracks. A five-stage canvas decal follows the hit
+  face, updates every frame and completes after 400 ms; `pointerLock.spec`
+  checks the decal mid-hold, the no-swing-before-completion guard and the burst
+  after release. The ghost is hidden while mining. Crate return was closed as
+  not applicable to the creative hotbar; material sounds need a block-at bridge
+  query.
