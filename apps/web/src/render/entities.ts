@@ -199,6 +199,7 @@ export class EntityRenderer {
   private playerCount = 0;
   private buddyCount = 0;
   private localId = -1;
+  private localTeam = -1;
   private viewX = Number.POSITIVE_INFINITY;
   private viewZ = Number.POSITIVE_INFINITY;
   private lastUpdateMs = 0;
@@ -339,8 +340,16 @@ export class EntityRenderer {
     this.viewZ = z;
   }
 
-  private isInsideCamera(x: number, z: number): boolean {
-    return Math.hypot(x - this.viewX, z - this.viewZ) < 1;
+  /** Keep the spawn cell clear of both the local body and crowding teammates. */
+  setLocalTeam(team: number): void {
+    this.localTeam = team;
+  }
+
+  private shouldHide(value: EntityValue): boolean {
+    if (value.id === this.localId) return true;
+    const distance = Math.hypot(value.x - this.viewX, value.z - this.viewZ);
+    if (distance < 1) return true;
+    return value.team === this.localTeam && distance < 2.6;
   }
 
   /** A one-event hit flash on one network id. Duration is presentation-only. */
@@ -477,7 +486,7 @@ export class EntityRenderer {
       }
       this.slotCounts[poolIndex] = slot + 1;
 
-      const hidden = value.id === this.localId || this.isInsideCamera(value.x, value.z);
+      const hidden = this.shouldHide(value);
       const bob = animate ? bobOffset(value.anim) : 0;
       const tilt = tiltAngle(value.pitch);
       const pulse = animate ? (attackScale(value.flags, value.anim) - 1) / ATTACK_PULSE : 0;
@@ -488,7 +497,8 @@ export class EntityRenderer {
         value.y + bob,
         value.z + forwardZ * pulse * 0.14,
       );
-      SCRATCH.rotation.set(tilt, value.yaw, 0);
+      const roll = animate ? Math.sin(value.anim * Math.PI * 2) * 0.06 : 0;
+      SCRATCH.rotation.set(tilt, value.yaw, roll);
       SCRATCH.scale.setScalar(hidden ? 0 : 1);
       SCRATCH.updateMatrix();
       pool.mesh.setMatrixAt(slot, SCRATCH.matrix);
@@ -524,8 +534,7 @@ export class EntityRenderer {
     const tilt = tiltAngle(value.pitch);
     const weaponScale = animate ? attackScale(value.flags, value.anim) : 1;
     const alpha = dissolveAlpha(value.flags, value.hp, value.anim);
-    const shown =
-      value.id === this.localId || this.isInsideCamera(value.x, value.z) ? 0 : 1;
+    const shown = this.shouldHide(value) ? 0 : 1;
     const [body, head, weapon] = parts;
 
     place(body, index, value.x, value.y + BODY_HEIGHT / 2 + bob, value.z, tilt, value.yaw, shown);

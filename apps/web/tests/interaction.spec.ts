@@ -19,6 +19,7 @@ import {
   type VisualState,
   type VoxelSource,
 } from "../src/game/interaction";
+import { BLOCK_CRATE } from "../src/game/blocks";
 
 interface TestWindow {
   __cbReady?: boolean;
@@ -36,9 +37,15 @@ interface TestWindow {
   };
 }
 
-function world(cells: Array<[number, number, number]>): VoxelSource {
+function world(
+  cells: Array<[number, number, number]>,
+  block = BLOCK_CRATE,
+): VoxelSource {
   const set = new Set(cells.map(([x, y, z]) => `${x},${y},${z}`));
-  return { solid: (x, y, z) => set.has(`${x},${y},${z}`) };
+  return {
+    solid: (x, y, z) => set.has(`${x},${y},${z}`),
+    block: () => block,
+  };
 }
 
 function wallX(x: number, yMax = 2, zMax = 2): VoxelSource {
@@ -298,9 +305,15 @@ test("highlight and ghost follow the hit and edit lifecycle", () => {
   expect(visuals.highlight).toEqual([2.5, 0.5, 0.5]);
   expect(visuals.ghost).toEqual([1.5, 0.5, 0.5]);
 
-  const placed = interaction.place(3);
+  const placed = interaction.place(BLOCK_CRATE);
   expect(placed).toBe(1);
-  expect(calls[0]).toEqual({ x: 1, y: 0, z: 0, block: 3, action: EDIT_PLACE });
+  expect(calls[0]).toEqual({
+    x: 1,
+    y: 0,
+    z: 0,
+    block: BLOCK_CRATE,
+    action: EDIT_PLACE,
+  });
   expect(interaction.pending()).toHaveLength(1);
 
   const broken = interaction.breakBlock();
@@ -358,8 +371,9 @@ test("aims at a real terrain column and records a local edit", async ({ page }) 
   expect(aimed.visuals?.highlight).toEqual([128.5, surface - 0.5, 128.5]);
   expect(aimed.visuals?.ghost).toEqual([128.5, surface + 0.5, 128.5]);
 
-  const placed = await page.evaluate(() =>
-    (window as unknown as TestWindow).__cbTest!.placeBlock(3),
+  const placed = await page.evaluate((block) =>
+    (window as unknown as TestWindow).__cbTest!.placeBlock(block),
+    BLOCK_CRATE,
   );
   expect(placed).toBeGreaterThan(0);
   let pending = await page.evaluate(() =>
@@ -370,18 +384,19 @@ test("aims at a real terrain column and records a local edit", async ({ page }) 
     x: 128,
     y: surface,
     z: 128,
-    block: 3,
+    block: BLOCK_CRATE,
     action: EDIT_PLACE,
   });
 
-  const broken = await page.evaluate(() =>
+  // The same terrain cell is still not breakable: only crates are in v1.
+  const refused = await page.evaluate(() =>
     (window as unknown as TestWindow).__cbTest!.breakBlock(),
   );
-  expect(broken).toBeGreaterThan(0);
+  expect(refused).toBe(0);
   pending = await page.evaluate(() =>
     (window as unknown as TestWindow).__cbTest!.pendingEdits(),
   );
-  expect(pending).toHaveLength(2);
+  expect(pending).toHaveLength(1);
 
   expect(
     await page.evaluate(
@@ -389,10 +404,6 @@ test("aims at a real terrain column and records a local edit", async ({ page }) 
       placed,
     ),
   ).toBe(true);
-  await page.evaluate(
-    (seq) => (window as unknown as TestWindow).__cbTest!.ackEdit(seq, false),
-    broken,
-  );
   expect(
     await page.evaluate(() =>
       (window as unknown as TestWindow).__cbTest!.pendingEdits(),

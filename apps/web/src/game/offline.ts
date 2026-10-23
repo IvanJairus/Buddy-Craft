@@ -8,6 +8,7 @@
 
 import { NetClient, encodeEdit, encodeInput, snapshotSeq } from "./net/client";
 import type { Transport, TransportState, CloseInfo } from "./net/transport";
+import type { BaseRow } from "./objectives";
 
 export interface OfflineOptions {
   seed: number;
@@ -16,11 +17,12 @@ export interface OfflineOptions {
   onFrame: (bytes: Uint8Array) => void;
   onEnd: (bytes: Uint8Array) => void;
   onWelcome?: () => void;
+  onBases?: (bases: BaseRow[]) => void;
   onAdvanced?: (ended: boolean, hash: number) => void;
 }
 
 type WorkerEvent =
-  | { type: "open" }
+  | { type: "open"; bases: BaseRow[] }
   | { type: "frame"; bytes: ArrayBuffer }
   | { type: "error"; detail: string }
   | { type: "advanced"; ended: boolean; hash: number; final: number };
@@ -32,6 +34,7 @@ class WorkerTransport implements Transport {
   onClose: ((info: CloseInfo) => void) | null = null;
   onError: ((event: Event) => void) | null = null;
   onAdvanced: ((ended: boolean, hash: number) => void) | null = null;
+  onBases: ((bases: BaseRow[]) => void) | null = null;
 
   private worker: Worker | null = null;
   private readonly seed: number;
@@ -55,6 +58,7 @@ class WorkerTransport implements Transport {
       const message = event.data;
       if (message.type === "open") {
         this.state = "open";
+        this.onBases?.(message.bases);
         this.onOpen?.();
         return;
       }
@@ -117,6 +121,7 @@ export class OfflineSession {
       this.lastHash = hash;
       options.onAdvanced?.(ended, hash);
     };
+    this.transport.onBases = (bases) => options.onBases?.(bases);
     this.client = new NetClient({
       url: "offline://room",
       roomCode: "OFFLINE",

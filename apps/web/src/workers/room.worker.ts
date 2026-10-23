@@ -9,6 +9,7 @@
 
 import wasmUrl from "../wasm/client_wasm.wasm?url";
 import { loadClientWasm, type ClientWasmExports } from "../wasm/loader";
+import { parseBaseTable, type BaseRow } from "../game/objectives";
 
 interface WorkerInit {
   type: "init";
@@ -123,7 +124,7 @@ async function init(message: WorkerInit): Promise<void> {
       scope.postMessage({ type: "error", detail: "offline wasm init failed" });
       return;
     }
-    scope.postMessage({ type: "open" });
+    scope.postMessage({ type: "open", bases: readBases(wasm) });
     pump(true);
     timer = scope.setInterval(tick, 50);
   } catch (error) {
@@ -132,6 +133,15 @@ async function init(message: WorkerInit): Promise<void> {
       detail: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+function readBases(source: ClientWasmExports): BaseRow[] {
+  const capacity = 2 + 6 * 10;
+  const ptr = source.cb_mem_alloc(capacity);
+  if (ptr === 0) return [];
+  const length = source.cb_bases(ptr, capacity) >>> 0;
+  if (length === 0) return [];
+  return parseBaseTable(new DataView(source.memory.buffer, ptr, length));
 }
 
 function tick(): void {

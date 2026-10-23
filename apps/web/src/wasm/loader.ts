@@ -27,6 +27,8 @@ export const EVENT_SLOT_BYTES = 16;
 
 export const MAX_PLAYERS = 18;
 export const MAX_BUDDIES = 64;
+import { parseBaseTable, type BaseRow } from "../game/objectives";
+
 export const MAX_PROJECTILES = 128;
 export const MAX_PARTICLES = 512;
 export const MAX_EVENTS = 64;
@@ -129,6 +131,8 @@ export async function loadClientWasm(url: string): Promise<ClientWasmExports> {
     cb_mem_alloc: lookup("cb_mem_alloc"),
     cb_recipes: lookup("cb_recipes"),
     cb_near_miss: lookup("cb_near_miss"),
+    cb_bases: lookup("cb_bases"),
+    cb_block_at: lookup("cb_block_at"),
     cb_offline_init: lookup("cb_offline_init"),
     cb_offline_message: lookup("cb_offline_message"),
     cb_offline_tick: lookup("cb_offline_tick"),
@@ -201,6 +205,8 @@ export interface ClientWasmExports {
   cb_mem_alloc(size: number): number;
   cb_recipes(outPtr: number, outCap: number): number;
   cb_near_miss(ptr: number, count: number, elapsedSeconds: number): number;
+  cb_bases(outPtr: number, outCap: number): number;
+  cb_block_at(x: number, y: number, z: number): number;
   cb_offline_init(seed: number, mode: number, teams: number): number;
   cb_offline_message(ptr: number, len: number): number;
   cb_offline_tick(): number;
@@ -449,6 +455,27 @@ export class ClientWasm {
     // here is safe and keeps the next frame's dev assert honest.
     this.rebuildViews();
     return copy;
+  }
+
+  /** Worldgen bases for the current offline room. Empty until it starts. */
+  bases(): BaseRow[] {
+    const capacity = 2 + 6 * 10;
+    const ptr = this.alloc(capacity);
+    const length = this.wasm.cb_bases(ptr, capacity) >>> 0;
+    if (length === 0) {
+      this.rebuildViews();
+      return [];
+    }
+    const view = new DataView(this.wasm.memory.buffer, ptr, length);
+    const rows = parseBaseTable(view);
+    this.rebuildViews();
+    return rows;
+  }
+
+  /** Block id at a world cell, or -1 when the wasm cache cannot answer. */
+  blockAt(x: number, y: number, z: number): number {
+    const id = this.wasm.cb_block_at(x, y, z) >>> 0;
+    return id === 0xffff_ffff ? -1 : id;
   }
 
   /** Queue one local edit; returns its sequence number. */

@@ -29,6 +29,7 @@
  */
 
 import * as THREE from "three";
+import { BLOCK_CRATE, isBreakable } from "./blocks";
 
 /** The 6 m reach, shared with the server's edit pipeline. */
 export const REACH = 6;
@@ -91,9 +92,11 @@ export interface Vec3Like {
   z: number;
 }
 
-/** Anything that can answer "is this cell solid?". */
+/** Anything that can answer "is this cell solid?" and optionally its block id. */
 export interface VoxelSource {
   solid(x: number, y: number, z: number): boolean;
+  /** Block id at a cell, or -1 when the source cannot tell. */
+  block?(x: number, y: number, z: number): number;
 }
 
 export interface RayHit {
@@ -105,6 +108,8 @@ export interface RayHit {
   place: Vec3Like;
   /** Distance from the origin to the face, in metres. */
   distance: number;
+  /** Block id at the hit cell, or -1 when the source cannot tell. */
+  block: number;
 }
 
 /** The boundary to `cb_local_edit`. */
@@ -126,6 +131,8 @@ export interface VisualState {
   ghostVisible: boolean;
   highlight: [number, number, number] | null;
   ghost: [number, number, number] | null;
+  breakable: boolean;
+  placeable: boolean;
   crackVisible: boolean;
   crackStage: number;
 }
@@ -202,6 +209,7 @@ export function raycastVoxels(
         normal,
         place: { x: x + normal.x, y: y + normal.y, z: z + normal.z },
         distance,
+        block: world.block?.(x, y, z) ?? -1,
       };
     }
   }
@@ -221,6 +229,8 @@ export class Interaction {
   private readonly crackForward = new THREE.Vector3(0, 0, 1);
   private readonly crackNormal = new THREE.Vector3();
   private crackStage = -1;
+  private canPlace: ((x: number, y: number, z: number) => boolean) | null = null;
+  private placeable = false;
   private mineX = Number.NaN;
   private mineY = Number.NaN;
   private mineZ = Number.NaN;
@@ -281,6 +291,15 @@ export class Interaction {
     scene.add(this.crack);
   }
 
+  /**
+   * Restrict placement to the player's own pad. The callback is read at aim
+   * time, so a rule installed before a match starts still sees the later base
+   * data.
+   */
+  setPlacementRule(rule: ((x: number, y: number, z: number) => boolean) | null): void {
+    this.canPlace = rule;
+  }
+
   /** Cast from an explicit eye and direction and update the previews. */
   aim(origin: Vec3Like, direction: Vec3Like): RayHit | null {
     const hit = raycastVoxels(origin, direction, this.reach, this.world);
@@ -288,11 +307,17 @@ export class Interaction {
     if (hit === null) {
       this.highlight.visible = false;
       this.ghost.visible = false;
+      this.placeable = false;
       this.hideCrack();
       return null;
     }
     this.highlight.position.set(hit.cell.x + 0.5, hit.cell.y + 0.5, hit.cell.z + 0.5);
     this.highlight.visible = true;
+    this.placeable =
+      this.canPlace === null || this.canPlace(hit.place.x, hit.place.y, hit.place.z);
+    (this.ghost.material as THREE.MeshBasicMaterial).color.setHex(
+      this.placeable ? 0x66ccff : 0xff6a5e,
+    );
     this.ghost.position.set(hit.place.x + 0.5, hit.place.y + 0.5, hit.place.z + 0.5);
     this.ghost.visible = true;
     return hit;
@@ -306,7 +331,7 @@ export class Interaction {
 
   /** Break the highlighted cell. Returns the local edit sequence, or 0. */
   breakBlock(): number {
-    if (this.lastHit === null) {
+    if (this.lastHit === null || !isBreakable(this.lastHit.block)) {
       return 0;
     }
     const { x, y, z } = this.lastHit.cell;
@@ -318,7 +343,7 @@ export class Interaction {
    * `resetMining` must be called after a break request or on release.
    */
   mine(held: boolean, nowMs: number): number {
-    if (!held || this.lastHit === null) {
+    if (!held || this.lastHit === null || !isBreakable(this.lastHit.block)) {
       this.hideCrack();
       return 0;
     }
@@ -374,7 +399,7 @@ export class Interaction {
 
   /** Place into the cell above the highlighted face. */
   place(block: number): number {
-    if (this.lastHit === null) {
+    if (this.lastHit === null || block !== BLOCK_CRATE || !this.placeable) {
       return 0;
     }
     const { x, y, z } = this.lastHit.place;
@@ -408,6 +433,8 @@ export class Interaction {
       ghost: this.ghost.visible
         ? [this.ghost.position.x, this.ghost.position.y, this.ghost.position.z]
         : null,
+      breakable: this.lastHit !== null && isBreakable(this.lastHit.block),
+      placeable: this.ghost.visible && this.placeable,
       crackVisible: this.crack.visible,
       crackStage: this.crackStage,
     };

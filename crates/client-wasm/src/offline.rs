@@ -65,6 +65,16 @@ impl OfflineSession {
         self.seed
     }
 
+    /// Number of bases in this layout (six in FFA).
+    pub fn teams(&self) -> u8 {
+        self.teams
+    }
+
+    /// The worldgen bases for this seed and team count.
+    pub fn bases(&self) -> Vec<world::gen::Base> {
+        world::gen::bases_for(self.seed, self.teams)
+    }
+
     /// Decode one C2S frame. Bad frames are ignored by the offline host; the
     /// browser already validated its own input.
     pub fn message(&mut self, bytes: &[u8]) {

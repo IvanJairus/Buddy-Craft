@@ -38,7 +38,7 @@ use sim::vec::Vec3;
 use sim::world_query::VoxelQuery;
 use wasm_bindgen::prelude::*;
 use world::chunk::{Column, CHUNK_Y, VOLUME};
-use world::gen::{WorldGen, MAP_COLS};
+use world::gen::{WorldGen, MAP_COLS, WORLD_X, WORLD_Z};
 use world::mesh::mesh_with_neighbours;
 
 pub mod offline;
@@ -705,6 +705,72 @@ pub fn cb_offline_state_hash() -> u32 {
     with_offline(|session| session.state_hash() as u32).unwrap_or(0)
 }
 
+/// Pack the offline base layout for the map.
+///
+/// Layout: `u16 count`, then per base five `i16` values:
+/// `base_x, base_z, pad_x, pad_z, ground_y`. The core sits at the pad centre.
+fn base_table(seed: u64, teams: u8) -> Vec<u8> {
+    let bases = world::gen::bases_for(seed, teams);
+    let mut out = Vec::with_capacity(2 + bases.len() * 10);
+    out.extend_from_slice(&(bases.len() as u16).to_le_bytes());
+    for base in bases {
+        for value in [base.x, base.z, base.pad_x, base.pad_z, base.y] {
+            out.extend_from_slice(&(value as i16).to_le_bytes());
+        }
+    }
+    out
+}
+
+/// Write the base layout into JS-owned staging memory. Returns its byte length.
+#[wasm_bindgen]
+pub fn cb_bases(out_ptr: u32, out_cap: u32) -> u32 {
+    if out_ptr == 0 || out_cap == 0 {
+        return 0;
+    }
+    let Some((seed, teams)) = with_offline(|session| (session.seed(), session.teams())) else {
+        return 0;
+    };
+    let bytes = base_table(seed, teams);
+    if bytes.len() > out_cap as usize {
+        return 0;
+    }
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr as *mut u8, bytes.len());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Native callers use `base_table` directly; a 64-bit pointer does not
+        // fit the u32 ABI.
+        let _ = out_ptr;
+    }
+    bytes.len() as u32
+}
+
+/// Block id at a world cell, or `u32::MAX` when outside the map or cache.
+///
+/// The interaction layer uses this to distinguish the only breakable block
+/// (the crate) from indestructible terrain.
+#[wasm_bindgen]
+pub fn cb_block_at(x: i32, y: i32, z: i32) -> u32 {
+    if !(0..WORLD_X).contains(&x) || !(0..WORLD_Z).contains(&z) || !(0..CHUNK_Y as i32).contains(&y)
+    {
+        return u32::MAX;
+    }
+    with_bridge(|bridge| {
+        let cx = x.div_euclid(world::chunk::CHUNK_X as i32);
+        let cz = z.div_euclid(world::chunk::CHUNK_Z as i32);
+        bridge.ensure_column(cx, cz);
+        let Some(column) = bridge.columns.get(&(cx, cz)) else {
+            return u32::MAX;
+        };
+        let lx = x.rem_euclid(world::chunk::CHUNK_X as i32) as usize;
+        let lz = z.rem_euclid(world::chunk::CHUNK_Z as i32) as usize;
+        u32::from(column.get(lx, y as usize, lz).0)
+    })
+    .unwrap_or(u32::MAX)
+}
+
 /// Pointer to the render header.
 #[wasm_bindgen]
 pub fn cb_render_desc() -> u32 {
@@ -860,6 +926,62 @@ mod tests {
         assert_eq!(cb_set_quality(2), OK);
         let _ = cb_state_hash();
         let _ = cb_mem_alloc(64);
+        assert_ne!(cb_block_at(128, 20, 128), u32::MAX);
+        assert_eq!(cb_block_at(-1, 20, 128), u32::MAX);
+        assert_ne!(cb_block_at(0, 0, 0), u32::MAX);
+        assert_eq!(cb_bases(0, 0), 0);
+    }
+
+    #[test]
+    fn base_table_covers_every_team() {
+        let seed = 7u64;
+        let teams = 3u8;
+        let bytes = base_table(seed, teams);
+        assert_eq!(bytes.len(), 2 + teams as usize * 10);
+        let count = u16::from_le_bytes([bytes[0], bytes[1]]);
+        assert_eq!(count, u32::from(teams) as u16);
+
+        let expected = world::gen::bases_for(seed, teams);
+        for (index, base) in expected.iter().enumerate() {
+            let at = 2 + index * 10;
+            let read = |offset: usize| {
+                i16::from_le_bytes([bytes[at + offset], bytes[at + offset + 1]]) as i32
+            };
+            assert_eq!(read(0), base.x);
+            assert_eq!(read(2), base.z);
+            assert_eq!(read(4), base.pad_x);
+            assert_eq!(read(6), base.pad_z);
+            assert_eq!(read(8), base.y);
+        }
+    }
+
+    #[test]
+    fn offline_bases_and_crate_lookup_reach_the_map() {
+        assert_eq!(cb_offline_init(7, 1, 2), OK);
+        assert_eq!(cb_bases(0, 0), 0, "a zero cap is refused");
+        assert_eq!(
+            cb_bases(0x1000, 256),
+            2 + 2 * 10,
+            "native mode still reports the packed length"
+        );
+
+        // A crate diff must be visible to the interaction's block lookup.
+        assert_eq!(cb_init(0xC0FFEE, 0, 0, 0), OK);
+        assert_ne!(cb_block_at(136, 95, 136), u32::MAX);
+        let patch = protocol::ChunkDiff {
+            cx: 8,
+            cz: 8,
+            version: 2,
+            keyframe: false,
+            entries: vec![protocol::DiffEntry {
+                index: Column::index(8, 95, 8) as u16,
+                block: world::CRATE.0,
+            }],
+            runs: Vec::new(),
+        };
+        let frame = protocol::encode_s2c(&protocol::S2c::ChunkDiff(patch));
+        assert!(with_bridge(|bridge| bridge.on_server_message(&frame)).expect("initialised"));
+        assert_eq!(cb_block_at(136, 95, 136), u32::from(world::CRATE.0));
     }
 
     #[test]

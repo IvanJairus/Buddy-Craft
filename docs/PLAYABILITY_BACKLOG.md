@@ -8,7 +8,7 @@ Baseline, 2026-10-23:
 
 - Local camera: 31.3 ms from W to motion in headed Opera at 1512x982 DPR 2.
 - Render: 120.3 fps, 71 draw calls, 73k triangles in the same Opera run.
-- Gates: 163 Playwright passed, 4 perf-gated skipped; 505 Rust tests.
+- Gates: 166 Playwright passed, 4 perf-gated skipped; 507 Rust tests.
 - Live client: https://buddy-craft.vercel.app. ONLINE is blocked by T-046.
 
 ## 1. Match feedback and audio
@@ -99,6 +99,29 @@ a small MENU control and a pause screen.
 - [ ] Keep the offline camera path snapshot-based unless prediction is proven
       better there too.
 
+## 7. Navigation and onboarding
+
+- [x] M / MAP button opens a north-up map with bases, pads, the drop and a
+      rotating player arrow.
+- [x] Objective strip with PAD, ENEMY and DROP distance plus a rotated arrow.
+      The hint changes between "follow the DROP marker" and "place on your pad".
+- [x] Cyan own-base, red enemy-base and gold drop beacons. Beams/rings near the
+      eye are hidden; the own pad ring appears only after stepping away.
+- [x] Base data through `cb_bases`; block ids through `cb_block_at`. `map.spec`
+      and the Rust client-wasm tests cover both.
+- [x] Terrain is indestructible in the client too: only crates crack and break,
+      and the rejection reason is surfaced.
+- [x] Place only on your own pad; a rejected or zero-crate placement gives a
+      specific hint instead of a silent no-op.
+- [x] A teammate model crowding the first-person camera caused the unexplained
+      blue box; teammates within 2.6 m are hidden.
+- [x] Enemy and enemy-core target chips; LMB within 2.2 m swings and attacks,
+      and mining is suppressed while a target is in front.
+- [x] Whole-body walk roll plus a reduced-motion-gated camera bob.
+- [ ] Rigid limb animation. The shipped GLBs are one merged mesh with no
+      skeleton or clips; add a split-mesh rig or rigged assets first.
+- [ ] First-run tutorial overlay beyond the compact objective hint.
+
 ## Order
 
 1. Match feedback and audio.
@@ -107,6 +130,7 @@ a small MENU control and a pause screen.
 4. World art.
 5. Sprint.
 6. Local prediction.
+7. Navigation and onboarding.
 
 ## Execution log
 
@@ -121,6 +145,14 @@ a small MENU control and a pause screen.
   scene with `clearDepth()`; `screens.spec` asserts the selected hand slot and
   `pointerLock.spec` asserts place/break swings and the particle burst. Cracks,
   crate return and per-material sounds remain.
+- 2026-10-23: navigation and onboarding. Worldgen bases reach the worker and
+  the client (`cb_bases`), block ids come from `cb_block_at`, the map/strip and
+  three beacon colours were added, and the crate loop is explicit: terrain is
+  indestructible, placing spends a carried crate, zero crates points at the
+  drop, and rejection reasons are shown. Teammates within 2.6 m no longer fill
+  the first-person camera. The header block that looked like a blue box in the
+  first playtest was a teammate model at the spawn. Gates: 166 Playwright
+  passed, 507 Rust tests.
 - 2026-10-23: off-screen airdrop telegraph. The label clamps to an 80 px side,
   200 px top and 140 px bottom safe frame so it clears the HUD, RECIPES and
   hotbar; behind-camera projections are flipped instead of hidden. `juice.spec`

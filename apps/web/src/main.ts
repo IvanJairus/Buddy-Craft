@@ -48,6 +48,17 @@ import { OnlineSession } from "./game/online";
 import { EYE_HEIGHT, eyePose, pitchRadians, yawRadians } from "./game/view";
 import { Hud, type HudStats } from "./ui/hud";
 import { Hotbar } from "./ui/hotbar";
+import { MapOverlay } from "./ui/map";
+import { CombatOverlay, ObjectiveHud, type ObjectiveRowData } from "./ui/objectives";
+import { BeaconField } from "./render/beacons";
+import {
+  bearingTo,
+  padContains,
+  padHeightAllows,
+  type BaseRow,
+  type DropMark,
+} from "./game/objectives";
+import { BLOCK_CRATE } from "./game/blocks";
 import { ViewModel, type ViewModelInfo } from "./render/viewModel";
 import { RecipeBookUi, type RecipeBookInfo } from "./ui/recipeBook";
 import { LobbyScreen } from "./ui/lobby";
@@ -86,6 +97,23 @@ interface GrowResult {
 interface TestApi {
   info(): RendererInfo;
   viewModel(): ViewModelInfo;
+  map(): {
+    open: boolean;
+    bases: number;
+    yourTeam: number;
+    player: [number, number];
+    drop: [number, number] | null;
+  };
+  objectives(): Array<{ key: string; label: string; distance: number; angle: number }>;
+  combat(): { visible: boolean; hp: number; hits: number };
+  bases(): BaseRow[];
+  beacons(): Array<{ x: number; z: number; visible: boolean }>;
+  interactionMine(
+    held: boolean,
+    nowMs: number,
+  ): { progress: number; visuals: VisualState | null };
+  lastEditAck(): { seq: number; accepted: boolean; reason: number } | null;
+  blockAt(x: number, y: number, z: number): number;
   pixel(x: number, y: number): [number, number, number, number];
   resetScale(): void;
   chunks(): ChunkInfo | null;
@@ -260,6 +288,19 @@ let sessionTeam = 0;
 let localCarried = 0;
 let sessionEvents: Array<{ kind: number; a: number; b: number; c: number; tick: number }> = [];
 let lastAdvanced = { ended: false, hash: 0 };
+let bases: BaseRow[] = [];
+let dropMark: (DropMark & { expiresAt: number }) | null = null;
+let lastFire = false;
+let lastHintAt = Number.NEGATIVE_INFINITY;
+let lastEditAck: { seq: number; accepted: boolean; reason: number } | null = null;
+const EDIT_REJECT_LABELS: Record<number, string> = {
+  1: "Outside the world",
+  2: "Too far away",
+  3: "Cell occupied",
+  4: "Protected area",
+  5: "No crates or editing too fast",
+  6: "Unknown block",
+};
 const ZERO_FRAME = new Uint8Array(4);
 const telemetryEndpoint = (import.meta.env.VITE_TELEMETRY_URL as string | undefined) ?? null;
 let economy = new EconomyTracker(6);
@@ -342,13 +383,28 @@ async function boot(): Promise<void> {
     { once: true },
   );
   if (chunks !== null) {
-    interaction = new Interaction(renderer.scene, chunks.voxelSource(), {
-      localEdit: (x, y, z, block, action) =>
-        offlineActive && offline !== null
-          ? offline.sendEdit(x, y, z, block, action)
-          : onlineActive && online !== null
-            ? online.sendEdit(x, y, z, block, action)
-            : wasmClient.localEdit(x, y, z, block, action),
+    const voxel = chunks.voxelSource();
+    interaction = new Interaction(
+      renderer.scene,
+      {
+        solid: (x, y, z) => voxel.solid(x, y, z),
+        block: (x, y, z) => client?.blockAt(x, y, z) ?? -1,
+      },
+      {
+        localEdit: (x, y, z, block, action) =>
+          offlineActive && offline !== null
+            ? offline.sendEdit(x, y, z, block, action)
+            : onlineActive && online !== null
+              ? online.sendEdit(x, y, z, block, action)
+              : wasmClient.localEdit(x, y, z, block, action),
+      },
+    );
+    interaction.setPlacementRule((x, y, z) => {
+      if (!offlineActive && !onlineActive) return true;
+      const base = bases[sessionTeam];
+      return base === undefined
+        ? true
+        : padContains(base, x, z) && padHeightAllows(base, y);
     });
   }
 
@@ -358,9 +414,30 @@ async function boot(): Promise<void> {
   const hudStore = new Store<HudState>(initialHudState());
   const hud = new Hud(document.body, hudStore);
   const viewModel = new ViewModel();
+  const map = new MapOverlay(document.body);
+  const objectives = new ObjectiveHud(document.body);
+  const combatOverlay = new CombatOverlay(document.body);
+  const beacons = new BeaconField(renderer.scene);
   const burstOrigin = new THREE.Vector3();
   const burstVelocity = new THREE.Vector3();
+  const cameraForward = new THREE.Vector3();
+  const cameraRight = new THREE.Vector3();
   let stanceIndex = 0;
+  let lastObjectiveAt = 0;
+  let lastHintCarried = -1;
+
+  function setDrop(next: (DropMark & { expiresAt: number }) | null): void {
+    dropMark = next;
+    map.setDrop(next === null ? null : { x: next.x, z: next.z });
+    beacons.setDrop(next === null ? null : { x: next.x, y: next.y, z: next.z });
+  }
+
+  function hint(text: string): void {
+    const now = performance.now();
+    if (now - lastHintAt < 1_500) return;
+    lastHintAt = now;
+    hud.toast(text);
+  }
 
   function blockBurst(
     cell: [number, number, number] | null,
@@ -377,20 +454,36 @@ async function boot(): Promise<void> {
 
   function localBreak(): void {
     if (interaction === null) return;
-    const cell = interaction.visuals().highlight;
+    const state = interaction.visuals();
+    if (!state.breakable) {
+      hint("Terrain is indestructible · only crates can be mined");
+      return;
+    }
     if (interaction.breakBlock() > 0) {
       viewModel.swing();
-      blockBurst(cell, 0x8a6b4d);
+      blockBurst(state.highlight, 0x8a6b4d);
       audio.play("sword_crate");
     }
   }
 
   function localPlace(block: number): void {
     if (interaction === null) return;
-    const cell = interaction.visuals().ghost;
+    if ((offlineActive || onlineActive) && localCarried <= 0) {
+      hint("No crates yet · follow the DROP marker and pick up crates");
+      return;
+    }
+    const state = interaction.visuals();
+    if (!state.placeable) {
+      hint("Place crates on your own pad");
+      return;
+    }
     if (interaction.place(block) > 0) {
+      if (offlineActive || onlineActive) {
+        localCarried = Math.max(0, localCarried - 1);
+        hudStore.set({ crates: localCarried });
+      }
       viewModel.swing();
-      blockBurst(cell, 0x9ad1ff);
+      blockBurst(state.ghost, 0x9ad1ff);
       audio.play("block_place");
     }
   }
@@ -498,6 +591,32 @@ async function boot(): Promise<void> {
   const initialScreen: ScreenId = query.get("screen") === "match" ? "match" : "boot";
   screens.show(initialScreen);
 
+  const mapButton = document.createElement("button");
+  mapButton.type = "button";
+  mapButton.className = "match-map";
+  mapButton.textContent = "MAP [M]";
+  mapButton.setAttribute("aria-label", "Open map");
+  mapButton.addEventListener("click", () => {
+    if (screens?.current() === "match") map.toggle();
+  });
+  document.body.append(mapButton);
+  window.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.code === "KeyM" && screens?.current() === "match") {
+        map.toggle();
+        event.preventDefault();
+        return;
+      }
+      if (event.code === "Escape" && map.isOpen) {
+        map.hide();
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    },
+    { capture: true },
+  );
+
   function stopSessions(): void {
     offline?.stop();
     offline = null;
@@ -512,6 +631,14 @@ async function boot(): Promise<void> {
     entities?.hideLocalPlayer(-1);
     cameraSettled = false;
     lastCameraAt = 0;
+    bases = [];
+    setDrop(null);
+    map.hide();
+    map.setBases([], 0);
+    beacons.setBases([], 0);
+    beacons.setVisible(false);
+    objectives.hide();
+    combatOverlay.setTarget(null);
   }
 
   function openSettings(returnTo: "main" | "pause"): void {
@@ -522,6 +649,7 @@ async function boot(): Promise<void> {
   function openPause(): void {
     if (screens?.current() !== "match") return;
     recipeBook.close();
+    map.hide();
     offline?.pause();
     screens.show("pause");
   }
@@ -593,10 +721,36 @@ async function boot(): Promise<void> {
         hud.toast(`${recipe?.name ?? `Recipe ${b}`}: buddy cap reached`);
       } else if (kind === 8) {
         hud.toast("Airdrop incoming");
+        setDrop({
+          x: a,
+          y: b,
+          z: c,
+          telegraph: true,
+          expiresAt: performance.now() + 15_000,
+        });
       } else if (kind === 4) {
         hud.toast(`Airdrop landed: ${c} crates`);
-      } else if (kind === 3 && a === sessionTeam) {
-        hud.toast("Your core is down");
+        setDrop({
+          x: a,
+          y: (dropMark?.y ?? (chunks?.surfaceAt(a, b) ?? 40)) + 1,
+          z: b,
+          telegraph: false,
+          expiresAt: performance.now() + 30_000,
+        });
+      } else if (kind === 2) {
+        const hp = Math.max(0, b);
+        if (a === sessionTeam) {
+          hudStore.set({ coreHp: hp });
+        } else {
+          hudStore.set({ enemyCoreHp: hp });
+        }
+      } else if (kind === 5 && c === localId) {
+        combatOverlay.hit();
+      } else if (kind === 1 && b === localId) {
+        combatOverlay.hit();
+        hud.toast("Eliminated an enemy");
+      } else if (kind === 3) {
+        hud.toast(a === sessionTeam ? "Your core is down" : "Enemy core destroyed");
       }
     }
   }
@@ -628,6 +782,12 @@ async function boot(): Promise<void> {
     economy = new EconomyTracker(6);
     lastEconomy = null;
     lastAdvanced = { ended: false, hash: 0 };
+    bases = [];
+    setDrop(null);
+    map.setBases([], 0);
+    beacons.setBases([], 0);
+    objectives.hide();
+    combatOverlay.setTarget(null);
     offline = new OfflineSession({
       seed: DEMO_SEED,
       mode,
@@ -635,6 +795,11 @@ async function boot(): Promise<void> {
       onWelcome: () => {
         sessionTeam = 0;
         hudStore.set({ hp: 100, maxHp: 100, crates: 0, carryCap: 12 });
+      },
+      onBases: (rows) => {
+        bases = rows;
+        map.setBases(rows, sessionTeam);
+        beacons.setBases(rows, sessionTeam);
       },
       onFrame: (bytes) => {
         if (client === null) return;
@@ -657,7 +822,13 @@ async function boot(): Promise<void> {
           }
         } else if (bytes[0] === 0x85) {
           const ack = editAck(bytes);
-          if (ack !== null) interaction?.ack(ack.seq, ack.accepted);
+          if (ack !== null) {
+            lastEditAck = ack;
+            interaction?.ack(ack.seq, ack.accepted);
+            if (!ack.accepted) {
+              hint(EDIT_REJECT_LABELS[ack.reason] ?? "Edit refused");
+            }
+          }
         }
       },
       onEnd: (bytes) => {
@@ -741,7 +912,13 @@ async function boot(): Promise<void> {
           }
         } else if (bytes[0] === 0x85) {
           const ack = editAck(bytes);
-          if (ack !== null) interaction?.ack(ack.seq, ack.accepted);
+          if (ack !== null) {
+            lastEditAck = ack;
+            interaction?.ack(ack.seq, ack.accepted);
+            if (!ack.accepted) {
+              hint(EDIT_REJECT_LABELS[ack.reason] ?? "Edit refused");
+            }
+          }
         }
       },
       onEnd: (bytes) => {
@@ -767,6 +944,17 @@ async function boot(): Promise<void> {
   window.__cbTest = {
     info: () => renderer.info(),
     viewModel: () => viewModel.info(),
+    map: () => map.info(),
+    objectives: () => objectives.info(),
+    combat: () => combatOverlay.info(),
+    bases: () => bases.map((base) => ({ ...base })),
+    beacons: () => beacons.info(),
+    interactionMine: (held, nowMs) => ({
+      progress: interaction?.mine(held, nowMs) ?? 0,
+      visuals: interaction?.visuals() ?? null,
+    }),
+    lastEditAck: () => lastEditAck,
+    blockAt: (x, y, z) => client?.blockAt(x, y, z) ?? -1,
     pixel: (x, y) => renderer.readPixel(x, y),
     resetScale: () => renderer.resetScale(),
     chunks: () => chunks?.info() ?? null,
@@ -1192,6 +1380,130 @@ async function boot(): Promise<void> {
   };
   window.__cbReady = true;
 
+  const aimDirection = new THREE.Vector3();
+  function findCombatTarget(): { hp: number; max: number; label: string } | null {
+    if (!(offlineActive || onlineActive)) return null;
+    renderer.camera.getWorldDirection(aimDirection);
+    const eye = renderer.camera.position;
+    const localId = offlineActive ? 0 : onlinePlayerId;
+    let best: { hp: number; distance: number } | null = null;
+    for (let i = 0; i < interpolator.playerCount; i += 1) {
+      const id = interpolator.playerIds[i];
+      const hp = interpolator.playerHp[i];
+      if (id === localId || hp <= 0 || interpolator.playerTeam[i] === sessionTeam) continue;
+      const dx = interpolator.playerX[i] - eye.x;
+      const dy = interpolator.playerY[i] + 0.9 - eye.y;
+      const dz = interpolator.playerZ[i] - eye.z;
+      const distance = Math.hypot(dx, dy, dz);
+      if (distance < 0.01 || distance > 2.2) continue;
+      const dot =
+        (dx * aimDirection.x + dy * aimDirection.y + dz * aimDirection.z) / distance;
+      if (dot < 0.8) continue;
+      if (best === null || distance < best.distance) best = { hp, distance };
+    }
+    if (best !== null) return { hp: best.hp, max: 100, label: "ENEMY" };
+
+    // The win condition is the enemy core. Show it when the player is at the
+    // enemy pad and facing it; the sim's core reach is 2.2 m from a core cell.
+    let core: BaseRow | null = null;
+    let coreDistance = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < bases.length; i += 1) {
+      if (i === sessionTeam) continue;
+      const base = bases[i];
+      const distance = Math.hypot(base.padX + 0.5 - eye.x, base.padZ + 0.5 - eye.z);
+      if (distance < coreDistance) {
+        coreDistance = distance;
+        core = base;
+      }
+    }
+    if (core !== null && coreDistance < 3.5) {
+      const dx = core.padX + 0.5 - eye.x;
+      const dz = core.padZ + 0.5 - eye.z;
+      const horizontal = Math.max(0.01, Math.hypot(dx, dz));
+      const facing = (dx * aimDirection.x + dz * aimDirection.z) / horizontal;
+      if (facing > 0.25) {
+        const hud = hudStore.get();
+        return { hp: hud.enemyCoreHp, max: hud.enemyCoreMax, label: "ENEMY CORE" };
+      }
+    }
+    return null;
+  }
+
+  function updateObjectives(now: number): void {
+    if (!(offlineActive || onlineActive) || screens?.current() !== "match") {
+      objectives.hide();
+      return;
+    }
+    if (now - lastObjectiveAt < 200) return;
+    lastObjectiveAt = now;
+    renderer.camera.getWorldDirection(cameraForward);
+    cameraRight.setFromMatrixColumn(renderer.camera.matrixWorld, 0);
+    const px = renderer.camera.position.x;
+    const pz = renderer.camera.position.z;
+    const rows: ObjectiveRowData[] = [];
+    const own = bases[sessionTeam];
+    if (own !== undefined) {
+      rows.push({
+        key: "pad",
+        label: "PAD",
+        bearing: bearingTo(
+          px,
+          pz,
+          cameraForward.x,
+          cameraForward.z,
+          cameraRight.x,
+          cameraRight.z,
+          own.padX + 0.5,
+          own.padZ + 0.5,
+        ),
+      });
+    }
+    let enemy: BaseRow | null = null;
+    let enemyDistance = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < bases.length; i += 1) {
+      if (i === sessionTeam) continue;
+      const base = bases[i];
+      const distance = Math.hypot(base.padX + 0.5 - px, base.padZ + 0.5 - pz);
+      if (distance < enemyDistance) {
+        enemyDistance = distance;
+        enemy = base;
+      }
+    }
+    if (enemy !== null) {
+      rows.push({
+        key: "enemy",
+        label: "ENEMY",
+        bearing: bearingTo(
+          px,
+          pz,
+          cameraForward.x,
+          cameraForward.z,
+          cameraRight.x,
+          cameraRight.z,
+          enemy.padX + 0.5,
+          enemy.padZ + 0.5,
+        ),
+      });
+    }
+    if (dropMark !== null) {
+      rows.push({
+        key: "drop",
+        label: dropMark.telegraph ? "DROP SOON" : "LOOT",
+        bearing: bearingTo(
+          px,
+          pz,
+          cameraForward.x,
+          cameraForward.z,
+          cameraRight.x,
+          cameraRight.z,
+          dropMark.x,
+          dropMark.z,
+        ),
+      });
+    }
+    objectives.update(rows);
+  }
+
   let lastJuiceAt = 0;
   let mineBroken = false;
   const loop = (now: number): void => {
@@ -1201,6 +1513,9 @@ async function boot(): Promise<void> {
         : touch !== null
           ? touch.poll()
           : new Uint8Array(4);
+    const fireHeld = (frame[0] & FIRE) !== 0;
+    const fireEdge = fireHeld && !lastFire;
+    lastFire = fireHeld;
     // Offline has no socket budget, so sample faster than the 50 ms tick and
     // let each tick see fresh input. Online stays at 20/s, under the 30/s
     // server message budget.
@@ -1231,19 +1546,36 @@ async function boot(): Promise<void> {
     if (interaction !== null) {
       if (desktop !== null && desktop.pointerLock) {
         interaction.aimFromCamera(renderer.camera);
-        const held = (frame[0] & FIRE) !== 0;
-        if (!held) mineBroken = false;
-        const progress = interaction.mine(held, now);
-        if (held && !mineBroken && progress >= 1) {
-          localBreak();
-          mineBroken = true;
+        const target = findCombatTarget();
+        combatOverlay.setTarget(
+          target === null ? null : target.hp,
+          target?.max ?? 100,
+          now,
+          target?.label ?? "ENEMY",
+        );
+        const held = fireHeld;
+        if (target !== null) {
           interaction.resetMining();
+          mineBroken = false;
+          if (fireEdge) viewModel.swing();
+        } else {
+          if (!held) mineBroken = false;
+          const progress = interaction.mine(held, now);
+          if (held && fireEdge && !interaction.visuals().breakable) {
+            hint("Terrain is indestructible · only crates can be mined");
+          }
+          if (held && !mineBroken && progress >= 1) {
+            localBreak();
+            mineBroken = true;
+            interaction.resetMining();
+          }
         }
         if (desktop.consumeSecondary()) {
-          localPlace(offlineActive || onlineActive ? 11 : 1);
+          localPlace(offlineActive || onlineActive ? BLOCK_CRATE : 1);
         }
       } else {
         if (touch !== null) interaction.aimFromCamera(renderer.camera);
+        combatOverlay.setTarget(null);
         interaction.resetMining();
         mineBroken = false;
       }
@@ -1278,13 +1610,14 @@ async function boot(): Promise<void> {
       renderer.camera.position.x,
       renderer.camera.position.z,
     );
+    entities?.setLocalTeam(sessionTeam);
     if ((offlineActive || onlineActive) && (offlineSnapshot || onlineSnapshot)) {
       interpolator.sample(now);
       entities?.updateFromInterp(
         interpolator,
         renderer.quality.entityAnimation && juice.timeScale > 0,
       );
-      followSessionCamera(offlineActive ? 0 : onlinePlayerId, now);
+      followSessionCamera(offlineActive ? 0 : onlinePlayerId, now, frame[3] !== 0);
     } else if (views !== null) {
       entities?.update(views, renderer.quality.entityAnimation && juice.timeScale > 0);
     }
@@ -1292,11 +1625,32 @@ async function boot(): Promise<void> {
     if (chunks !== null) {
       chunks.update(renderer.camera.position.x, renderer.camera.position.z, 1);
     }
-    viewModel.setActive(
-      (offlineActive || onlineActive) &&
-        desktop !== null &&
-        screens?.current() === "match",
-    );
+    const matchActive =
+      (offlineActive || onlineActive) && screens?.current() === "match";
+    beacons.setVisible(matchActive);
+    beacons.setCamera(renderer.camera.position.x, renderer.camera.position.z);
+    if (matchActive) {
+      renderer.camera.getWorldDirection(cameraForward);
+      map.updatePlayer(
+        renderer.camera.position.x,
+        renderer.camera.position.z,
+        cameraForward.x,
+        cameraForward.z,
+        now,
+      );
+    }
+    updateObjectives(now);
+    if (localCarried !== lastHintCarried) {
+      lastHintCarried = localCarried;
+      objectives.setHint(
+        localCarried > 0
+          ? "Place crates on your pad\nLMB attack · hold LMB on crate\nM map"
+          : "No crates · follow the DROP marker\nPick up crates, then place them\nM map",
+      );
+    }
+    combatOverlay.tick(now);
+    if (dropMark !== null && now >= dropMark.expiresAt) setDrop(null);
+    viewModel.setActive(matchActive && desktop !== null);
     viewModel.setSelected(desktop?.selectedSlot ?? 0);
     viewModel.update(now, frame[3] !== 0, renderer.camera.aspect);
     juice.applyCamera();
@@ -1306,7 +1660,7 @@ async function boot(): Promise<void> {
     window.requestAnimationFrame(loop);
   };
 
-  function followSessionCamera(playerId: number, now: number): void {
+  function followSessionCamera(playerId: number, now: number, moving: boolean): void {
     // The local player must not wait for the two-tick entity interpolation.
     // Follow the newest snapshot and damp the visual position across the
     // 50 ms tick; remote bodies keep the 100 ms interpolation in `entities`.
@@ -1344,6 +1698,9 @@ async function boot(): Promise<void> {
       }
       lastCameraAt = now;
       renderer.camera.rotation.set(pitchRadians(pitch), yawRadians(yaw) + Math.PI, 0);
+      if (moving && !document.body.classList.contains("cb-reduced-motion")) {
+        renderer.camera.position.y += Math.sin(now * 0.012) * 0.04;
+      }
       hudStore.set({ hp: latest.playerHp[latestIndex], maxHp: 100 });
       return;
     }
@@ -1362,6 +1719,9 @@ async function boot(): Promise<void> {
       );
       renderer.camera.position.set(pose.x, pose.y, pose.z);
       renderer.camera.rotation.set(pose.rotationX, pose.rotationY, 0);
+      if (moving && !document.body.classList.contains("cb-reduced-motion")) {
+        renderer.camera.position.y += Math.sin(now * 0.012) * 0.04;
+      }
       hudStore.set({ hp: interpolator.playerHp[i], maxHp: 100 });
       return;
     }
@@ -1371,7 +1731,9 @@ async function boot(): Promise<void> {
 
 void boot();
 
-function editAck(bytes: Uint8Array): { seq: number; accepted: boolean } | null {
+function editAck(
+  bytes: Uint8Array,
+): { seq: number; accepted: boolean; reason: number } | null {
   let at = 1;
   let seq = 0;
   let shift = 0;
@@ -1384,5 +1746,9 @@ function editAck(bytes: Uint8Array): { seq: number; accepted: boolean } | null {
     shift += 7;
   }
   if (at >= bytes.length) return null;
-  return { seq: seq >>> 0, accepted: bytes[at] === 1 };
+  return {
+    seq: seq >>> 0,
+    accepted: bytes[at] === 1,
+    reason: at + 1 < bytes.length ? bytes[at + 1] : 0,
+  };
 }

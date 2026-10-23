@@ -21,9 +21,18 @@ interface TestWindow {
   __cbTest?: {
     input(): InputState;
     offlineStats(): { state: string };
+    offlineGrant(player: number, crates: number): void;
+    hudState(): { crates: number };
     viewModel(): { active: boolean; swings: number; frames: number };
     particles(): { drawCalls: number } | null;
-    interactionVisuals(): { crackVisible: boolean; crackStage: number } | null;
+    interactionVisuals(): {
+      crackVisible: boolean;
+      crackStage: number;
+      breakable: boolean;
+      placeable: boolean;
+      ghost: [number, number, number] | null;
+    } | null;
+    blockAt(x: number, y: number, z: number): number;
   };
 }
 
@@ -77,7 +86,7 @@ test("pointer lock on click, mouse look and fire button", async ({ page }) => {
   await page.mouse.up({ button: "right" });
 });
 
-test("place and break swing the held item and burst block particles", async ({ page }) => {
+test("terrain refuses mining and placing a crate spends one", async ({ page }) => {
   await page.goto("/?quality=low");
   await page.waitForFunction(() => (window as unknown as TestWindow).__cbReady === true, null, {
     timeout: 30_000,
@@ -88,6 +97,14 @@ test("place and break swing the held item and burst block particles", async ({ p
     () => (window as unknown as TestWindow).__cbTest!.offlineStats().state === "open",
     null,
     { timeout: 15_000 },
+  );
+  await page.evaluate(() =>
+    (window as unknown as TestWindow).__cbTest!.offlineGrant(0, 6),
+  );
+  await page.waitForFunction(
+    () => (window as unknown as TestWindow).__cbTest!.hudState().crates >= 6,
+    null,
+    { timeout: 5_000 },
   );
 
   let locked = false;
@@ -110,47 +127,61 @@ test("place and break swing the held item and burst block particles", async ({ p
   const before = await page.evaluate(
     () => (window as unknown as TestWindow).__cbTest!.viewModel().swings,
   );
+  // Terrain is indestructible: a full hold must not swing or crack.
+  await page.mouse.down({ button: "left" });
+  await page.waitForTimeout(500);
+  await page.mouse.up({ button: "left" });
+  expect(
+    await page.evaluate(() => (window as unknown as TestWindow).__cbTest!.viewModel().swings),
+  ).toBe(before);
 
-  await page.mouse.down({ button: "right" });
-  await page.waitForTimeout(120);
-  await page.mouse.up({ button: "right" });
-  await expect
-    .poll(
-      async () =>
-        page.evaluate(() => (window as unknown as TestWindow).__cbTest!.viewModel().swings),
-      { timeout: 2_000 },
-    )
-    .toBeGreaterThan(before);
+  let ghost: [number, number, number] | null = null;
+  let placed = false;
+  for (let attempt = 0; attempt < 3 && !placed; attempt += 1) {
+    if (
+      !(await page.evaluate(
+        () => (window as unknown as TestWindow).__cbTest!.input().pointerLocked,
+      ))
+    ) {
+      await page.bringToFront();
+      await page.locator("#game").click({ position: { x: 640, y: 360 } });
+      await page.waitForTimeout(250);
+    }
+    const sight = await page.evaluate(
+      () => (window as unknown as TestWindow).__cbTest!.interactionVisuals(),
+    );
+    expect(sight?.breakable).toBe(false);
+    if (sight?.placeable === true && sight.ghost !== null) {
+      ghost = sight.ghost;
+    }
+    await page.mouse.down({ button: "right" });
+    await page.waitForTimeout(150);
+    await page.mouse.up({ button: "right" });
+    await page.waitForTimeout(600);
+    placed =
+      (await page.evaluate(
+        () => (window as unknown as TestWindow).__cbTest!.viewModel().swings,
+      )) > before;
+    if (!placed) {
+      await page.mouse.move(640, 450 + attempt * 15, { steps: 3 });
+      await page.waitForTimeout(150);
+    }
+  }
+  expect(placed).toBe(true);
+  expect(ghost).not.toBeNull();
   const placedBurst = await page.evaluate(
     () => (window as unknown as TestWindow).__cbTest!.particles(),
   );
   expect(placedBurst?.drawCalls).toBe(1);
-
-  // Let the post-edit remesh finish so the hold timing is not swallowed by a
-  // long first frame.
-  await page.waitForTimeout(350);
-  const afterPlace = await page.evaluate(
-    () => (window as unknown as TestWindow).__cbTest!.viewModel().swings,
+  await page.waitForFunction(
+    ([x, y, z]) =>
+      (window as unknown as TestWindow).__cbTest!.blockAt(x, y, z) === 11,
+    [Math.floor(ghost![0]), Math.floor(ghost![1]), Math.floor(ghost![2])],
+    { timeout: 5_000 },
   );
-  await page.mouse.down({ button: "left" });
-  await page.waitForTimeout(120);
-  const cracking = await page.evaluate(
-    () => (window as unknown as TestWindow).__cbTest!.interactionVisuals(),
-  );
-  expect(cracking?.crackVisible).toBe(true);
-  expect(cracking?.crackStage).toBeGreaterThanOrEqual(0);
   expect(
-    await page.evaluate(() => (window as unknown as TestWindow).__cbTest!.viewModel().swings),
-  ).toBe(afterPlace);
-  await page.waitForTimeout(420);
-  await page.mouse.up({ button: "left" });
-  await expect
-    .poll(
-      async () =>
-        page.evaluate(() => (window as unknown as TestWindow).__cbTest!.viewModel().swings),
-      { timeout: 2_000 },
-    )
-    .toBeGreaterThan(afterPlace);
+    await page.evaluate(() => (window as unknown as TestWindow).__cbTest!.hudState().crates),
+  ).toBe(5);
   expect(
     await page.evaluate(() => (window as unknown as TestWindow).__cbTest!.viewModel().frames),
   ).toBeGreaterThan(0);

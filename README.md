@@ -158,11 +158,11 @@ all nine character meshes loaded, W moved the body 4.05 m, six crates reached
 the HUD, and the console stayed clean. Choose OFFLINE. ONLINE is not available
 until the Cloudflare host from T-046 exists.
 
-**Production is behind HEAD.** As of 2026-10-23 the alias serves
-`index-BBGpl6v6.js`; the local build of this commit is `index-BNBzZwqn.js`.
-The hand, hotbar, cracks, sprint and sky batches are pushed to GitHub but not
-deployed. Run `npx vercel@latest deploy --prod` from the repository root with
-the account that owns the project.
+**Production can trail HEAD.** The alias is deployed manually from this repo,
+not from a Git hook. Compare the alias's `assets/index-*.js` hash with
+`apps/web/dist` after a batch; if they differ, run
+`npx vercel@latest deploy --prod` from the repository root with the account that
+owns the project.
 
 ## Quick start
 
@@ -1624,6 +1624,7 @@ advance by the same amount over 300 ms.
 | Blur | every key and button is released; the packed axes and buttons go to zero |
 | Hotbar | 1-9 select a slot, the wheel cycles, both emit a local `slot` action |
 | Sprint | hold Shift; the wire bit only raises speed while moving forward |
+| Map | M or the MAP button; north-up world map with bases, pads, the drop and the player arrow |
 | Actions | Q drop, Tab scoreboard, E recipes, F stance, Esc menu; Tab never moves focus |
 | Settings | sensitivity and invert-Y in localStorage; 0.5/true survives a reload |
 
@@ -1652,6 +1653,7 @@ pickaxe mode and places in block mode. There is no long-press to disambiguate.
 | Deposit | holding a block-mode touch repeats placements at 6/s |
 | Jump | 64 px button, held jump bit |
 | Sprint | 64 x 48 px RUN button; hold to sprint, shows its pressed state |
+| Map | MAP button under MENU; the same north-up overlay |
 | Stance | 56 px button; cycles Follow, Hold and Assault and shows the current one |
 | Hotbar | nine 44 px slots, pickaxe plus eight block colours |
 
@@ -2145,6 +2147,40 @@ it from Main -> SETTINGS or from the in-match MENU -> SETTINGS; Settings
 returns to whichever screen opened it. Remaining feel work is tracked in
 [docs/PLAYABILITY_BACKLOG.md](docs/PLAYABILITY_BACKLOG.md).
 
+## Map, objectives and the crate loop
+
+`M` or the **MAP** button opens a north-up map. It draws every worldgen base,
+the 8 x 8 stack pads, team cores, the active airdrop and a rotating player
+arrow. The objective strip under CRATES always shows the distance and a rotated
+arrow for **PAD**, **ENEMY** and **DROP**; its hint changes with the carry
+count: no crates means "follow the DROP marker", crates means "place them on
+your pad". The base layout comes from `cb_bases` through the offline worker;
+`cb_block_at` exposes the authoritative block id so the client can tell a crate
+from indestructible terrain. The map and strip are covered by `map.spec`.
+
+World-space beacons mark your base (cyan), enemy bases (red) and the active drop
+(gold). A beam or pad ring within a few metres of the eye is hidden so it cannot
+wash out the camera, and the own pad ring only appears once you step away. The
+airdrop telegraph also keeps its clamped label from the earlier batch, so the
+drop stays readable even when it is behind you.
+
+The mechanics are now explicit in the client:
+
+| Action | Rule |
+| --- | --- |
+| Mine / break | only crates; terrain, pads and cores are indestructible |
+| Place | only crates, only on your own 8 x 8 pad |
+| Place cost | one carried crate per placed crate; zero crates prompts the drop route |
+| Attack | look at an enemy within 2.2 m and press LMB; a target chip names the enemy and a core chip appears at an enemy core |
+| Rejection | the server's reason is shown as a short hint instead of a silent no-op |
+
+A teammate standing in the first-person camera was the unexplained blue box in
+the first playtest. Teammates within 2.6 m are now hidden, while enemies stay
+visible at 1 m. The player model is still one textured mesh with no skeleton,
+so this batch adds a whole-body walk roll and camera bob rather than true limb
+swings. Minecraft-like limb animation needs a rigged asset or a split-mesh rig
+and remains open.
+
 ## Hand, hotbar and block feedback
 
 The first-person camera also draws a held item: a pickaxe on slot 0 and the
@@ -2322,8 +2358,8 @@ T-056's worker and live Sentry ingest, and T-062/T-063/T-064 still need a
 Cloudflare deployment, physical devices, six humans on production and a week
 of telemetry. Those are not marked done.
 
-The current gates are 505 Rust tests, 167 Playwright specs (163 passed, four
-perf-gated skipped), clippy/fmt clean, and 20 wasm exports. T-050 is done at
+The current gates are 507 Rust tests, 170 Playwright specs (166 passed, four
+perf-gated skipped), clippy/fmt clean, and 22 wasm exports. T-050 is done at
 its AC boundary: 15 named threat tests, the socket guards, chat/creation rate
 limits and the committed 15-attack fixture. The registry's HTTP/DO surface
 remains T-046/T-047. The last full-browser run covers Chromium, Firefox,
