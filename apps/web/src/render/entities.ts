@@ -123,7 +123,9 @@ interface Part {
   alpha: THREE.InstancedBufferAttribute;
 }
 
-type ModelPool = Part;
+interface ModelPool extends Part {
+  anim: THREE.InstancedBufferAttribute;
+}
 
 function makePart(
   material: THREE.MeshBasicMaterial,
@@ -149,24 +151,63 @@ function makeModelPool(
   const geometry = source.clone();
   const alpha = new THREE.InstancedBufferAttribute(new Float32Array(max).fill(1), 1);
   geometry.setAttribute("instanceAlpha", alpha);
+  const anim = new THREE.InstancedBufferAttribute(new Float32Array(max), 1);
+  anim.setUsage(THREE.DynamicDrawUsage);
+  geometry.setAttribute("instanceAnim", anim);
   const mesh = new THREE.InstancedMesh(geometry, material, max);
   mesh.count = 0;
   mesh.visible = false;
   mesh.frustumCulled = false;
   mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  return { mesh, alpha };
+  return { mesh, alpha, anim };
 }
 
 function createMaterial(vertexColors: boolean, key: string): THREE.MeshBasicMaterial {
   const material = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, vertexColors });
+  const rigged = vertexColors;
   material.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader.replace(
       "#include <common>",
-      "#include <common>\nattribute float instanceAlpha;\nvarying float vInstanceAlpha;",
+      rigged
+        ? "#include <common>\nattribute float instanceAlpha;\nattribute float instanceAnim;\nattribute float rig;\nvarying float vInstanceAlpha;"
+        : "#include <common>\nattribute float instanceAlpha;\nvarying float vInstanceAlpha;",
     );
     shader.vertexShader = shader.vertexShader.replace(
       "#include <begin_vertex>",
-      "#include <begin_vertex>\nvInstanceAlpha = instanceAlpha;",
+      rigged
+        ? `#include <begin_vertex>
+vInstanceAlpha = instanceAlpha;
+float swingPhase = instanceAnim * 6.28318530718;
+float limbSwing = sin(swingPhase);
+vec3 limbPivot = vec3(0.0);
+float limbAngle = 0.0;
+if (rig > 4.5) {
+  limbPivot = vec3(0.0, 0.95, 0.0);
+  limbAngle = sin(swingPhase * 2.0) * 0.04;
+} else if (rig > 3.5) {
+  limbPivot = vec3(0.31, 0.98, 0.0);
+  limbAngle = limbSwing * 0.38;
+} else if (rig > 2.5) {
+  limbPivot = vec3(-0.31, 0.98, 0.0);
+  limbAngle = -limbSwing * 0.38;
+} else if (rig > 1.5) {
+  limbPivot = vec3(0.12, 0.45, 0.0);
+  limbAngle = -limbSwing * 0.5;
+} else if (rig > 0.5) {
+  limbPivot = vec3(-0.12, 0.45, 0.0);
+  limbAngle = limbSwing * 0.5;
+}
+if (rig > 0.5) {
+  vec3 limbRel = transformed - limbPivot;
+  float limbCos = cos(limbAngle);
+  float limbSin = sin(limbAngle);
+  transformed = limbPivot + vec3(
+    limbRel.x,
+    limbRel.y * limbCos - limbRel.z * limbSin,
+    limbRel.y * limbSin + limbRel.z * limbCos
+  );
+}`
+        : "#include <begin_vertex>\nvInstanceAlpha = instanceAlpha;",
     );
     shader.fragmentShader = shader.fragmentShader.replace(
       "#include <common>",
@@ -504,6 +545,7 @@ export class EntityRenderer {
       pool.mesh.setMatrixAt(slot, SCRATCH.matrix);
 
       pool.alpha.setX(slot, dissolveAlpha(value.flags, value.hp, value.anim));
+      pool.anim.setX(slot, animate ? value.anim : 0);
       const flash = (this.flashUntil.get(value.id) ?? 0) > now;
       this.color.setHex(flash ? 0xffc7b8 : 0xffffff);
       pool.mesh.setColorAt(slot, this.color);
@@ -517,6 +559,7 @@ export class EntityRenderer {
       if (used > 0) {
         pool.mesh.instanceMatrix.needsUpdate = true;
         pool.alpha.needsUpdate = true;
+        pool.anim.needsUpdate = true;
         if (pool.mesh.instanceColor !== null) {
           pool.mesh.instanceColor.needsUpdate = true;
         }

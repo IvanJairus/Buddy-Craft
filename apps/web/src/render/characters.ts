@@ -132,8 +132,63 @@ export function parseGlb(buffer: ArrayBuffer): THREE.BufferGeometry {
   if (primitive.indices !== undefined) {
     geometry.setIndex(readAccessor(gltf, bin, primitive.indices));
   }
+  assignRig(geometry);
   geometry.computeBoundingSphere();
   return geometry;
+}
+
+/**
+ * Tag each generated box with a limb id for the instanced vertex rig.
+ *
+ * `generate-models.mjs` emits exactly eight vertices per box, so the centroid
+ * of every eight-vertex run is the authored box centre. Classifying the whole
+ * box avoids tearing a box across two limbs, which a per-vertex threshold would
+ * do at the head and hips.
+ */
+function assignRig(geometry: THREE.BufferGeometry): void {
+  const position = geometry.getAttribute("position");
+  const rig = new Float32Array(position.count);
+  const classify = (x: number, y: number, z: number): number => {
+    if (Math.abs(x) > 0.23) return x < 0 ? 3 : 4;
+    if (y > 1.0 && Math.abs(x) < 0.2 && Math.abs(z) < 0.18) return 5;
+    if (y > 0.7 && y < 1.1 && z > 0.15) return 4;
+    if (y < 0.45 && Math.abs(x) > 0.03) return x < 0 ? 1 : 2;
+    return 0;
+  };
+
+  if (position.count % 8 === 0) {
+    for (let base = 0; base < position.count; base += 8) {
+      let x = 0;
+      let y = 0;
+      let z = 0;
+      for (let i = 0; i < 8; i += 1) {
+        x += position.getX(base + i);
+        y += position.getY(base + i);
+        z += position.getZ(base + i);
+      }
+      const id = classify(x / 8, y / 8, z / 8);
+      for (let i = 0; i < 8; i += 1) rig[base + i] = id;
+    }
+  } else {
+    const index = geometry.getIndex();
+    const triangles = index === null ? position.count / 3 : index.count / 3;
+    for (let t = 0; t < triangles; t += 1) {
+      const ia = index === null ? t * 3 : index.getX(t * 3);
+      const ib = index === null ? t * 3 + 1 : index.getX(t * 3 + 1);
+      const ic = index === null ? t * 3 + 2 : index.getX(t * 3 + 2);
+      const id = classify(
+        (position.getX(ia) + position.getX(ib) + position.getX(ic)) / 3,
+        (position.getY(ia) + position.getY(ib) + position.getY(ic)) / 3,
+        (position.getZ(ia) + position.getZ(ib) + position.getZ(ic)) / 3,
+      );
+      rig[ia] = id;
+      rig[ib] = id;
+      rig[ic] = id;
+    }
+  }
+  const attribute = new THREE.BufferAttribute(rig, 1);
+  attribute.setUsage(THREE.StaticDrawUsage);
+  geometry.setAttribute("rig", attribute);
 }
 
 async function fetchModel(file: string): Promise<THREE.BufferGeometry> {

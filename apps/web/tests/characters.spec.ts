@@ -53,6 +53,18 @@ test("every shipped GLB parses with positions, colours and fewer than 400 triang
     const geometry = glb(name);
     expect(geometry.getAttribute("position"), name).toBeDefined();
     expect(geometry.getAttribute("color"), name).toBeDefined();
+    const position = geometry.getAttribute("position");
+    const rig = geometry.getAttribute("rig");
+    expect(rig, name).toBeDefined();
+    expect(rig.count, name).toBe(position.count);
+    const limbs = new Set<number>();
+    for (let i = 0; i < rig.count; i += 1) {
+      const id = rig.getX(i);
+      expect(id, name).toBeGreaterThanOrEqual(0);
+      expect(id, name).toBeLessThanOrEqual(5);
+      limbs.add(id);
+    }
+    expect([...limbs].sort(), name).toEqual([0, 1, 2, 3, 4, 5]);
     const triangles =
       (geometry.getIndex()?.count ?? geometry.getAttribute("position").count) / 3;
     expect(triangles, name).toBeLessThan(400);

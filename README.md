@@ -2176,10 +2176,12 @@ The mechanics are now explicit in the client:
 
 A teammate standing in the first-person camera was the unexplained blue box in
 the first playtest. Teammates within 2.6 m are now hidden, while enemies stay
-visible at 1 m. The player model is still one textured mesh with no skeleton,
-so this batch adds a whole-body walk roll and camera bob rather than true limb
-swings. Minecraft-like limb animation needs a rigged asset or a split-mesh rig
-and remains open.
+visible at 1 m. The merged character mesh now carries a per-vertex limb id
+(torso, head, two arms, two legs), and the entity shader rotates each box around
+its shoulder, hip or neck pivot from the server's walk phase. Walking bots swing
+their arms and legs, idle bots stand still, and the camera adds a small
+reduced-motion-gated bob. Crafted buddy records have no walk phase yet, so their
+limbs stay neutral until the protocol grows that field.
 
 ## Hand, hotbar and block feedback
 

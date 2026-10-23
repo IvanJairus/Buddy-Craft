@@ -118,8 +118,11 @@ a small MENU control and a pause screen.
 - [x] Enemy and enemy-core target chips; LMB within 2.2 m swings and attacks,
       and mining is suppressed while a target is in front.
 - [x] Whole-body walk roll plus a reduced-motion-gated camera bob.
-- [ ] Rigid limb animation. The shipped GLBs are one merged mesh with no
-      skeleton or clips; add a split-mesh rig or rigged assets first.
+- [x] Limb rig without new assets: every box in the merged GLB is tagged with a
+      limb id and the model shader rotates arms, legs and head around their
+      pivots from the server's walk phase. Idle bodies stay still.
+- [ ] Buddy walk phase. The snapshot has no anim byte for buddies, so crafted
+      buddies keep neutral limbs while moving.
 - [ ] First-run tutorial overlay beyond the compact objective hint.
 
 ## Order
