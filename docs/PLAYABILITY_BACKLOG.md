@@ -8,7 +8,7 @@ Baseline, 2026-10-23:
 
 - Local camera: 31.3 ms from W to motion in headed Opera at 1512x982 DPR 2.
 - Render: 120.3 fps, 71 draw calls, 73k triangles in the same Opera run.
-- Gates: 160 Playwright passed, 4 perf-gated skipped; 501 Rust tests.
+- Gates: 161 Playwright passed, 4 perf-gated skipped; 501 Rust tests.
 - Live client: https://buddy-craft.vercel.app. ONLINE is blocked by T-046.
 
 ## 1. Match feedback and audio
@@ -23,8 +23,9 @@ Juice and needs an explicit match-path test.
 - [x] Add `lastCue` or an equivalent test hook and assert the mapping.
 - [x] Assert a snapshot `AIRDROP_TELEGRAPH` makes the Juice marker visible in
       an offline match.
-- [ ] Confirm the HUD marker is readable when the drop is off screen; add an
-      edge marker if the world marker is not enough.
+- [x] Confirm the HUD marker is readable when the drop is off screen; the
+      label now clamps into a HUD-safe edge frame and flips when the drop is
+      behind the camera. `juice.spec` covers both cases.
 
 ## 2. Pause shell and LEAVE MATCH
 
@@ -102,3 +103,7 @@ a small MENU control and a pause screen.
   scene with `clearDepth()`; `screens.spec` asserts the selected hand slot and
   `pointerLock.spec` asserts place/break swings and the particle burst. Cracks,
   crate return and per-material sounds remain.
+- 2026-10-23: off-screen airdrop telegraph. The label clamps to an 80 px side,
+  200 px top and 140 px bottom safe frame so it clears the HUD, RECIPES and
+  hotbar; behind-camera projections are flipped instead of hidden. `juice.spec`
+  asserts the on-screen and off-screen boxes and the `data-edge` style.

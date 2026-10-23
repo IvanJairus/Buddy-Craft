@@ -142,6 +142,54 @@ test("reduced motion disables shake, vignette and slow motion only", async ({
   expect(normal.vignette).toBeGreaterThan(0);
 });
 
+test("an off-screen airdrop telegraph clamps to a readable edge marker", async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  await boot(page);
+  const marker = page.locator(".cb-juice-telegraph");
+
+  await page.evaluate(() => {
+    (window as unknown as TestWindow).__cbTest!.juiceEvent(8, 128, 60, 100);
+  });
+  await page.waitForTimeout(120);
+  const onScreen = await page.evaluate(
+    () => (window as unknown as TestWindow).__cbTest!.juiceStats().telegraphEdge,
+  );
+  expect(onScreen).toBe(false);
+  expect(await marker.getAttribute("data-edge")).toBe("false");
+  const inside = await marker.boundingBox();
+  expect(inside).not.toBeNull();
+  expect(inside!.x).toBeGreaterThanOrEqual(0);
+  expect(inside!.x + inside!.width).toBeLessThanOrEqual(1280);
+  expect(inside!.y).toBeGreaterThanOrEqual(0);
+  expect(inside!.y + inside!.height).toBeLessThanOrEqual(720);
+
+  await page.evaluate(() => {
+    (window as unknown as TestWindow).__cbTest!.juiceEvent(8, 128, 40, 200);
+  });
+  await page.waitForTimeout(120);
+  const offScreen = await page.evaluate(
+    () => (window as unknown as TestWindow).__cbTest!.juiceStats().telegraphEdge,
+  );
+  expect(offScreen).toBe(true);
+  expect(await marker.getAttribute("data-edge")).toBe("true");
+  expect(await marker.textContent()).toMatch(/^DROP \d$/);
+  const edge = await marker.boundingBox();
+  expect(edge).not.toBeNull();
+  expect(edge!.x).toBeGreaterThanOrEqual(0);
+  expect(edge!.x + edge!.width).toBeLessThanOrEqual(1280);
+  expect(edge!.y).toBeGreaterThanOrEqual(0);
+  expect(edge!.y + edge!.height).toBeLessThanOrEqual(720);
+  expect(
+    edge!.x < 120 ||
+      edge!.x + edge!.width > 1160 ||
+      edge!.y < 230 ||
+      edge!.y + edge!.height > 550,
+  ).toBe(true);
+});
+
 test("the juice update costs at most 1.5 ms at 18 entities", async ({ page }: { page: Page }) => {
   await boot(page);
   const result = await page.evaluate(() =>

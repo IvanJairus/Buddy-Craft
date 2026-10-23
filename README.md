@@ -2148,6 +2148,13 @@ asserts both the right-click place and left-click break increment the swing
 counter and leave the particle mesh drawing. Cracks, crate return and
 per-material sounds stay open in the backlog.
 
+The airdrop telegraph keeps its 3D marker at the drop site. Its `DROP n` label
+used to disappear whenever the site left the camera view; it now clamps into a
+HUD-safe frame (80 px sides, 200 px top, 140 px bottom) so it never sits under
+the hotbar or RECIPES button, flips the projected direction when the site is
+behind the camera, and switches to a filled gold-bordered edge style.
+`juice.spec` checks both the on-screen and off-screen boxes.
+
 ## Balance: four numbers, ten bot matches
 
 T-060 adds `EconomyTracker` in `apps/web/src/telemetry/economy.ts`. It folds the
@@ -2278,7 +2285,7 @@ T-056's worker and live Sentry ingest, and T-062/T-063/T-064 still need a
 Cloudflare deployment, physical devices, six humans on production and a week
 of telemetry. Those are not marked done.
 
-The current gates are 501 Rust tests, 164 Playwright specs (160 passed, four
+The current gates are 501 Rust tests, 165 Playwright specs (161 passed, four
 perf-gated skipped), clippy/fmt clean, and 20 wasm exports. T-050 is done at
 its AC boundary: 15 named threat tests, the socket guards, chat/creation rate
 limits and the committed 15-attack fixture. The registry's HTTP/DO surface

@@ -58,6 +58,7 @@ export interface JuiceStats {
   vignette: number;
   lowHp: boolean;
   telegraphVisible: boolean;
+  telegraphEdge: boolean;
   timeScale: number;
   presentationSeconds: number;
   lastUpdateMs: number;
@@ -86,6 +87,12 @@ const STYLE = `
   color: #ffe38a; font: 700 13px ui-monospace, monospace; letter-spacing: 0.12em;
   text-shadow: 0 1px 4px #000, 0 0 12px #c47c19;
   border: 1px solid rgba(255, 213, 112, 0.7); padding: 3px 7px; white-space: nowrap;
+}
+.cb-juice-telegraph[data-edge="true"] {
+  background: rgba(8, 12, 18, 0.82);
+  border-color: #ffd166;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.65), 0 0 18px rgba(255, 209, 102, 0.3);
+  letter-spacing: 0.16em;
 }
 `;
 
@@ -131,6 +138,7 @@ export class Juice {
   private edgeStrength = 0;
   private telegraphUntil = 0;
   private telegraphStart = 0;
+  private telegraphEdge = false;
   private telegraphX = 0;
   private telegraphY = 0;
   private telegraphZ = 0;
@@ -167,6 +175,7 @@ export class Juice {
     this.telegraph = document.createElement("div");
     this.telegraph.className = "cb-juice-telegraph";
     this.telegraph.textContent = "DROP";
+    this.telegraph.dataset.edge = "false";
     this.root.append(this.canvas, this.vignette, this.edge, this.telegraph);
     document.body.append(this.root);
     this.resize();
@@ -372,6 +381,7 @@ export class Juice {
       vignette: this.lastVignette < 0 ? 0 : this.lastVignette,
       lowHp: this.lowHp,
       telegraphVisible: this.telegraphShadow.visible && nowMs < this.telegraphUntil,
+      telegraphEdge: this.telegraphEdge && nowMs < this.telegraphUntil,
       timeScale: this.timeScale,
       presentationSeconds: this.presentationSeconds,
       lastUpdateMs: this.lastUpdateMs,
@@ -491,6 +501,8 @@ export class Juice {
       if (this.telegraph.style.display !== "none") {
         this.telegraph.style.display = "none";
       }
+      this.telegraphEdge = false;
+      this.telegraph.dataset.edge = "false";
       this.telegraphShadow.visible = false;
       return;
     }
@@ -508,13 +520,28 @@ export class Juice {
     this.telegraphShadow.material.opacity = 0.08 + progress * 0.3;
     this.scratch.set(this.telegraphX, this.telegraphY + 2, this.telegraphZ);
     this.scratch.project(this.camera);
-    if (this.scratch.z > 1) {
-      this.telegraph.style.display = "none";
-      return;
-    }
-    const x = (this.scratch.x * 0.5 + 0.5) * window.innerWidth;
-    const y = (-this.scratch.y * 0.5 + 0.5) * window.innerHeight;
+    // Behind the camera the projection mirrors; flip it back so the clamped
+    // marker points toward the real drop instead of the opposite edge.
+    const behind = this.scratch.z > 1;
+    const ndcX = behind ? -this.scratch.x : this.scratch.x;
+    const ndcY = behind ? -this.scratch.y : this.scratch.y;
+    const halfW = Math.max(1, window.innerWidth * 0.5);
+    const halfH = Math.max(1, window.innerHeight * 0.5);
+    // Safe frame: clear of the top HUD stack, the RECIPES button and hotbar.
+    const limitX = 1 - 80 / halfW;
+    const maxY = 1 - 200 / halfH;
+    const minY = -1 + 140 / halfH;
+    const onScreen =
+      !behind &&
+      Math.abs(this.scratch.x) <= limitX &&
+      this.scratch.y <= maxY &&
+      this.scratch.y >= minY;
+    this.telegraphEdge = !onScreen;
+    const x = (Math.max(-limitX, Math.min(limitX, ndcX)) * 0.5 + 0.5) * window.innerWidth;
+    const y =
+      (Math.max(minY, Math.min(maxY, ndcY)) * -0.5 + 0.5) * window.innerHeight;
     this.telegraph.style.display = "block";
+    this.telegraph.dataset.edge = onScreen ? "false" : "true";
     this.telegraph.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px)`;
     const second = Math.ceil((this.telegraphUntil - nowMs) / 1_000);
     if (second !== this.lastTelegraphSecond) {
