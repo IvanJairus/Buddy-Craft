@@ -10,7 +10,7 @@ interface TestWindow {
   __cbReady?: boolean;
   __cbTest?: {
     info(): { tier: string };
-    input(): { frame: number[] };
+    input(): { frame: number[]; rawInput: boolean };
   };
 }
 
@@ -76,12 +76,19 @@ test("settings persist and the remap reaches the input frame", async ({ page }) 
   await openSettings(page);
 
   await page.locator('[data-setting="quality"]').selectOption("LOW");
-  await page.locator('[data-setting="sensitivity"]').evaluate((element) => {
+  await page.locator('[data-sensitivity-preset="high"]').click();
+  expect(await page.locator('[data-setting="sensitivity"]').inputValue()).toBe("0.5");
+  expect(await page.locator('[data-setting="sensitivity"] + output').textContent()).toBe(
+    "70.3°/100px",
+  );
+  await page.locator('[data-setting="dpi"]').evaluate((element) => {
     const input = element as HTMLInputElement;
-    input.value = "0.5";
+    input.value = "1600";
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
+  expect(await page.locator('[data-setting="cm360"]').textContent()).toBe("0.8 cm/360");
   await page.locator('[data-setting="invert"]').check();
+  await page.locator('[data-setting="raw-input"]').uncheck();
   await page.locator('[data-setting="ui-scale"]').evaluate((element) => {
     const input = element as HTMLInputElement;
     input.value = "120";
@@ -98,6 +105,9 @@ test("settings persist and the remap reaches the input frame", async ({ page }) 
       quality: localStorage.getItem("buddycraft.quality"),
       sensitivity: localStorage.getItem("buddycraft.sensitivity"),
       invert: localStorage.getItem("buddycraft.invertY"),
+      rawInput: localStorage.getItem("buddycraft.rawInput"),
+      dpi: localStorage.getItem("buddycraft.mouseDpi"),
+      inputRaw: test.input().rawInput,
       scale: localStorage.getItem("buddycraft.uiScale"),
       motion: localStorage.getItem("buddycraft.reducedMotion"),
       keys: JSON.parse(localStorage.getItem("buddycraft.keys") ?? "{}") as Record<string, string>,
@@ -109,6 +119,9 @@ test("settings persist and the remap reaches the input frame", async ({ page }) 
   expect(stored.quality).toBe("LOW");
   expect(stored.sensitivity).toBe("0.5");
   expect(stored.invert).toBe("true");
+  expect(stored.rawInput).toBe("false");
+  expect(stored.dpi).toBe("1600");
+  expect(stored.inputRaw).toBe(false);
   expect(stored.scale).toBe("120");
   expect(stored.motion).toBe("true");
   expect(stored.keys.forward).toBe("KeyI");
@@ -136,7 +149,14 @@ test("settings persist and the remap reaches the input frame", async ({ page }) 
   await openSettings(page);
   expect(await page.locator('[data-setting="quality"]').inputValue()).toBe("LOW");
   expect(await page.locator('[data-setting="sensitivity"]').inputValue()).toBe("0.5");
+  expect(await page.locator('[data-setting="sensitivity"] + output').textContent()).toBe(
+    "70.3°/100px",
+  );
+  expect(await page.locator('[data-setting="dpi"]').inputValue()).toBe("1600");
+  expect(await page.locator('[data-setting="cm360"]').textContent()).toBe("0.8 cm/360");
   expect(await page.locator('[data-setting="invert"]').isChecked()).toBe(true);
+  expect(await page.locator('[data-setting="raw-input"]').isChecked()).toBe(false);
+  expect(await page.evaluate(() => (window as unknown as TestWindow).__cbTest!.input().rawInput)).toBe(false);
   expect(await page.locator('[data-setting="ui-scale"]').inputValue()).toBe("120");
   expect(await page.locator('[data-setting="reduced-motion"]').isChecked()).toBe(true);
   expect(await page.locator('[data-remap="forward"]').textContent()).toBe("I");

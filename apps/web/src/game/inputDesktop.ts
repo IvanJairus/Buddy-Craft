@@ -29,6 +29,7 @@ export const CROUCH = 1 << 4;
 
 export const SENSITIVITY_KEY = "buddycraft.sensitivity";
 export const INVERT_Y_KEY = "buddycraft.invertY";
+export const RAW_INPUT_KEY = "buddycraft.rawInput";
 export const KEY_MAP_STORAGE = "buddycraft.keys";
 export const DEFAULT_SENSITIVITY = 0.25;
 export const MIN_SENSITIVITY = 0.02;
@@ -172,6 +173,7 @@ export class DesktopInput {
   private pitch = 0;
   private sensitivity = DEFAULT_SENSITIVITY;
   private invertY = false;
+  private rawInput = true;
   private keyMap: KeyMap = { ...DEFAULT_KEY_MAP };
   private slot = 0;
   private pollCount = 0;
@@ -198,13 +200,18 @@ export class DesktopInput {
         });
       }
     };
-    // Unadjusted movement bypasses OS pointer acceleration, which is the
-    // browser equivalent of Minecraft's Raw Input. Older browsers reject the
-    // option; retry without it in the same user gesture.
-    const pending = request({ unadjustedMovement: true });
+    // Unadjusted movement bypasses OS pointer acceleration. Older browsers
+    // reject the option; retry without it in the same user gesture.
+    const pending = request(
+      this.rawInput ? { unadjustedMovement: true } : undefined,
+    );
     if (pending instanceof Promise) {
-      void pending.catch(fallback);
-    } else if (pending === null) {
+      void pending.catch(() => {
+        if (this.rawInput) {
+          fallback();
+        }
+      });
+    } else if (pending === null && this.rawInput) {
       fallback();
     }
   };
@@ -306,6 +313,7 @@ export class DesktopInput {
       this.sensitivity = clamp(storedSensitivity, MIN_SENSITIVITY, MAX_SENSITIVITY);
     }
     this.invertY = this.storage.getItem(INVERT_Y_KEY) === "true";
+    this.rawInput = this.storage.getItem(RAW_INPUT_KEY) !== "false";
     this.keyMap = options.keyMap ?? loadKeyMap(this.storage);
 
     this.canvas.addEventListener("click", this.onCanvasClick);
@@ -374,6 +382,11 @@ export class DesktopInput {
     this.storage.setItem(INVERT_Y_KEY, value ? "true" : "false");
   }
 
+  setRawInput(value: boolean): void {
+    this.rawInput = value;
+    this.storage.setItem(RAW_INPUT_KEY, value ? "true" : "false");
+  }
+
   /** Set the hotbar slot, 0-based. */
   setSlot(index: number): void {
     this.slot = clamp(Math.floor(index), 0, 8);
@@ -410,6 +423,10 @@ export class DesktopInput {
 
   get invertYValue(): boolean {
     return this.invertY;
+  }
+
+  get rawInputValue(): boolean {
+    return this.rawInput;
   }
 
   get keyMapValue(): KeyMap {

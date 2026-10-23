@@ -2114,7 +2114,11 @@ and Opera still holds 120.3 fps. Remote bodies keep the 100 ms interpolation,
 so only the local player is ahead. This is snapshot-following with damping, not
 full client prediction: online jitter may still need T-041's rollback path.
 Sprint was not added in this pass because it changes the wire buttons and the
-authoritative speed, not just presentation.
+authoritative speed, not just presentation. The Settings screen now has a
+dedicated Mouse section: a sensitivity slider with a live °/100px readout,
+LOW/DEFAULT/HIGH presets, a DPI field and cm/360 calculator, Invert Y, and a
+persisted Raw input toggle. The form scrolls inside a fixed Back footer. Open
+it from Main -> SETTINGS; there is no in-match pause menu yet.
 
 ## Balance: four numbers, ten bot matches
 

@@ -8,9 +8,11 @@
  */
 
 import {
+  DEFAULT_SENSITIVITY,
   INVERT_Y_KEY,
   MAX_SENSITIVITY,
   MIN_SENSITIVITY,
+  RAW_INPUT_KEY,
   SENSITIVITY_KEY,
   loadKeyMap,
   saveKeyMap,
@@ -25,10 +27,14 @@ import {
 
 export const UI_SCALE_KEY = "buddycraft.uiScale";
 export const REDUCED_MOTION_KEY = "buddycraft.reducedMotion";
+export const DPI_KEY = "buddycraft.mouseDpi";
+export const DEFAULT_DPI = 800;
+const MIN_DPI = 100;
+const MAX_DPI = 32_000;
 
 const KEY_LABELS: Record<keyof KeyMap, string> = {
   forward: "Forward",
-  back: "Back",
+  back: "Backward",
   left: "Left",
   right: "Right",
   jump: "Jump",
@@ -54,6 +60,15 @@ function sensitivityDegrees(value: number): string {
   return `${((value * 360 * 100) / 256).toFixed(1)}°/100px`;
 }
 
+function clampDpi(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_DPI;
+  return Math.round(Math.max(MIN_DPI, Math.min(MAX_DPI, value)));
+}
+
+function cmPer360(sensitivity: number, dpi: number): number {
+  return 650.24 / (Math.max(MIN_SENSITIVITY, sensitivity) * Math.max(1, dpi));
+}
+
 function keyLabel(code: string): string {
   if (code.startsWith("Key")) return code.slice(3);
   if (code.startsWith("Digit")) return code.slice(5);
@@ -67,6 +82,7 @@ export interface SettingsCallbacks {
   onQuality?: (tier: QualityTier) => void;
   onSensitivity?: (value: number) => void;
   onInvertY?: (value: boolean) => void;
+  onRawInput?: (value: boolean) => void;
   onKeyMap?: (map: KeyMap) => void;
   onBack: () => void;
 }
@@ -113,9 +129,12 @@ export class SettingsScreen {
     });
     quality.append(qualityLabel, qualitySelect);
 
+    const mouseSection = make("div", "settings-section");
+    mouseSection.textContent = "Mouse";
+
     const sensitivity = make("label", "settings-row");
     const sensitivityLabel = make("span", "settings-label");
-    sensitivityLabel.textContent = "Sensitivity";
+    sensitivityLabel.textContent = "Look sensitivity";
     const sensitivityInput = make("input", "settings-control");
     sensitivityInput.type = "range";
     sensitivityInput.min = String(MIN_SENSITIVITY);
@@ -126,23 +145,35 @@ export class SettingsScreen {
     sensitivityInput.value = String(
       Number.isFinite(storedSensitivity)
         ? Math.max(MIN_SENSITIVITY, Math.min(MAX_SENSITIVITY, storedSensitivity))
-        : 0.25,
+        : DEFAULT_SENSITIVITY,
     );
     this.sensitivityValue = make("output", "settings-value");
-    this.sensitivityValue.value = sensitivityInput.value;
-    this.sensitivityValue.textContent = sensitivityDegrees(
-      Number.parseFloat(sensitivityInput.value),
-    );
     this.sensitivityValue.title =
       "Degrees of camera rotation per 100 pixels of mouse movement";
-    sensitivityInput.addEventListener("input", () => {
-      const value = Number.parseFloat(sensitivityInput.value);
-      this.sensitivityValue.value = String(value);
-      this.sensitivityValue.textContent = sensitivityDegrees(value);
-      this.storage.setItem(SENSITIVITY_KEY, String(value));
-      this.callbacks.onSensitivity?.(value);
-    });
     sensitivity.append(sensitivityLabel, sensitivityInput, this.sensitivityValue);
+
+    const presets = make("div", "settings-row");
+    const presetsLabel = make("span", "settings-label");
+    presetsLabel.textContent = "Presets";
+    const presetBox = make("div", "settings-presets");
+    presets.append(presetsLabel, presetBox);
+
+    const dpi = make("label", "settings-row");
+    const dpiLabel = make("span", "settings-label");
+    dpiLabel.textContent = "Mouse DPI";
+    const dpiInput = make("input", "settings-control settings-number");
+    dpiInput.type = "number";
+    dpiInput.min = String(MIN_DPI);
+    dpiInput.max = String(MAX_DPI);
+    dpiInput.step = "50";
+    dpiInput.inputMode = "numeric";
+    dpiInput.dataset.setting = "dpi";
+    const storedDpi = Number.parseInt(storage.getItem(DPI_KEY) ?? "", 10);
+    dpiInput.value = String(Number.isFinite(storedDpi) ? clampDpi(storedDpi) : DEFAULT_DPI);
+    const cmValue = make("output", "settings-value");
+    cmValue.dataset.setting = "cm360";
+    cmValue.title = "Centimetres of mouse movement for a full 360 degree turn";
+    dpi.append(dpiLabel, dpiInput, cmValue);
 
     const invert = make("label", "settings-row");
     const invertLabel = make("span", "settings-label");
@@ -156,6 +187,67 @@ export class SettingsScreen {
       this.callbacks.onInvertY?.(invertInput.checked);
     });
     invert.append(invertLabel, invertInput);
+
+    const raw = make("label", "settings-row");
+    const rawLabel = make("span", "settings-label");
+    rawLabel.textContent = "Raw input";
+    const rawInput = make("input", "settings-control");
+    rawInput.type = "checkbox";
+    rawInput.dataset.setting = "raw-input";
+    rawInput.checked = storage.getItem(RAW_INPUT_KEY) !== "false";
+    rawInput.addEventListener("change", () => {
+      this.storage.setItem(RAW_INPUT_KEY, rawInput.checked ? "true" : "false");
+      this.callbacks.onRawInput?.(rawInput.checked);
+    });
+    raw.append(rawLabel, rawInput);
+
+    const mouseHint = make("div", "settings-hint");
+    mouseHint.textContent =
+      "Raw input applies on the next pointer-lock click. DPI only feeds the cm/360 calculator; the browser cannot read it.";
+
+    const updateMouseOutputs = (): void => {
+      const value = Number.parseFloat(sensitivityInput.value);
+      this.sensitivityValue.value = String(value);
+      this.sensitivityValue.textContent = sensitivityDegrees(value);
+      const dpiValue = clampDpi(Number.parseFloat(dpiInput.value));
+      const cm = cmPer360(value, dpiValue);
+      cmValue.value = `${cm.toFixed(1)} cm/360`;
+      cmValue.textContent = cmValue.value;
+    };
+    const applySensitivity = (value: number): void => {
+      const clamped = Math.max(MIN_SENSITIVITY, Math.min(MAX_SENSITIVITY, value));
+      sensitivityInput.value = String(clamped);
+      this.storage.setItem(SENSITIVITY_KEY, String(clamped));
+      this.callbacks.onSensitivity?.(clamped);
+      updateMouseOutputs();
+    };
+    for (const [label, value] of [
+      ["LOW", 0.1],
+      ["DEFAULT", DEFAULT_SENSITIVITY],
+      ["HIGH", 0.5],
+    ] as const) {
+      const button = make("button", "settings-preset");
+      button.type = "button";
+      button.dataset.sensitivityPreset = label.toLowerCase();
+      button.textContent = label;
+      button.title = sensitivityDegrees(value);
+      button.addEventListener("click", () => applySensitivity(value));
+      presetBox.append(button);
+    }
+    sensitivityInput.addEventListener("input", () => {
+      applySensitivity(Number.parseFloat(sensitivityInput.value));
+    });
+    dpiInput.addEventListener("input", () => {
+      const parsed = Number.parseFloat(dpiInput.value);
+      if (Number.isFinite(parsed)) {
+        this.storage.setItem(DPI_KEY, String(clampDpi(parsed)));
+      }
+      updateMouseOutputs();
+    });
+    updateMouseOutputs();
+
+    const displaySection = make("div", "settings-section");
+    displaySection.textContent = "Display";
 
     const scale = make("label", "settings-row");
     const scaleLabel = make("span", "settings-label");
@@ -217,8 +309,22 @@ export class SettingsScreen {
     back.dataset.screenAction = "settings-back";
     back.textContent = "BACK";
     back.addEventListener("click", () => this.callbacks.onBack());
-    form.append(quality, sensitivity, invert, scale, motion, controlsLabel, controls, back);
-    this.element.append(title, form);
+    form.append(
+      mouseSection,
+      sensitivity,
+      presets,
+      dpi,
+      invert,
+      raw,
+      mouseHint,
+      displaySection,
+      quality,
+      scale,
+      motion,
+      controlsLabel,
+      controls,
+    );
+    this.element.append(title, form, back);
     this.applyUiScale(Number.parseInt(scaleInput.value, 10));
     this.applyReducedMotion(motionInput.checked);
     window.addEventListener("keydown", this.onCaptureKey, true);

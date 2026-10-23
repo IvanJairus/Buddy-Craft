@@ -260,6 +260,75 @@ input[type="checkbox"].settings-control {
   color: #e0b36f;
 }
 
+.settings-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.settings-panel .settings-form {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+.settings-panel .settings-form::-webkit-scrollbar {
+  width: 6px;
+}
+
+.settings-panel .settings-form::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.settings-panel .screen-back {
+  flex: 0 0 auto;
+  margin-top: 12px;
+}
+
+.settings-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.settings-preset {
+  min-width: 64px;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f2f6fa;
+  font: 600 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+
+.settings-preset:hover,
+.settings-preset:focus-visible {
+  border-color: #e0b36f;
+  color: #e0b36f;
+}
+
+.settings-number {
+  width: 88px;
+  min-height: 36px;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+}
+
+.settings-hint {
+  margin: 2px 0 10px;
+  color: #8fa1b4;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
 .results-panel .screen-subtitle {
   margin-bottom: 20px;
 }

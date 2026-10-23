@@ -114,6 +114,7 @@ interface TestApi {
     pointerLocked: boolean;
     sensitivity: number;
     invertY: boolean;
+    rawInput: boolean;
     lastAction: InputAction | null;
   };
   setSensitivity(value: number): void;
@@ -405,6 +406,7 @@ async function boot(): Promise<void> {
     onQuality: (tier) => renderer.setTier(tier),
     onSensitivity: (value) => desktop?.setSensitivity(value),
     onInvertY: (value) => desktop?.setInvertY(value),
+    onRawInput: (value) => desktop?.setRawInput(value),
     onKeyMap: (map) => desktop?.setKeyMap(map),
     onBack: () => screens?.show("main"),
   });
@@ -810,6 +812,7 @@ async function boot(): Promise<void> {
           pointerLocked: desktop.pointerLock,
           sensitivity: desktop.sensitivityValue,
           invertY: desktop.invertYValue,
+          rawInput: desktop.rawInputValue,
           lastAction: desktop.lastActionValue,
         };
       }
@@ -824,6 +827,7 @@ async function boot(): Promise<void> {
         pointerLocked: false,
         sensitivity: 0,
         invertY: false,
+        rawInput: false,
         lastAction: null,
       };
     },
