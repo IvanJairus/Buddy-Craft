@@ -43,7 +43,7 @@ import { SnapshotDecoder } from "./game/net/snapshot";
 import { Interpolator } from "./game/interp";
 import { OfflineSession } from "./game/offline";
 import { OnlineSession } from "./game/online";
-import { eyePose } from "./game/view";
+import { EYE_HEIGHT, eyePose, pitchRadians, yawRadians } from "./game/view";
 import { Hud, type HudStats } from "./ui/hud";
 import { RecipeBookUi, type RecipeBookInfo } from "./ui/recipeBook";
 import { LobbyScreen } from "./ui/lobby";
@@ -237,6 +237,8 @@ let offline: OfflineSession | null = null;
 let offlineActive = false;
 let offlineSnapshot = false;
 let lastOfflineInput = 0;
+let lastCameraAt = 0;
+let cameraSettled = false;
 let online: OnlineSession | null = null;
 let onlineActive = false;
 let onlineSnapshot = false;
@@ -432,6 +434,8 @@ async function boot(): Promise<void> {
     onlineEnded = false;
     onlineOverride = null;
     entities?.hideLocalPlayer(-1);
+    cameraSettled = false;
+    lastCameraAt = 0;
   }
 
   function leaveMatch(): void {
@@ -517,6 +521,8 @@ async function boot(): Promise<void> {
     offlineSnapshot = false;
     entities?.hideLocalPlayer(0);
     lastOfflineInput = 0;
+    cameraSettled = false;
+    lastCameraAt = 0;
     sessionTeam = 0;
     localCarried = 0;
     sessionEvents = [];
@@ -595,6 +601,8 @@ async function boot(): Promise<void> {
     onlineEnded = false;
     onlineOverride = null;
     lastOnlineInput = 0;
+    cameraSettled = false;
+    lastCameraAt = 0;
     sessionTeam = 0;
     localCarried = 0;
     sessionEvents = [];
@@ -1078,11 +1086,14 @@ async function boot(): Promise<void> {
         : touch !== null
           ? touch.poll()
           : new Uint8Array(4);
-    if (offlineActive && offline !== null && now - lastOfflineInput >= 66) {
+    // Offline has no socket budget, so sample faster than the 50 ms tick and
+    // let each tick see fresh input. Online stays at 20/s, under the 30/s
+    // server message budget.
+    if (offlineActive && offline !== null && now - lastOfflineInput >= 25) {
       offline.sendInput(frame);
       lastOfflineInput = now;
     }
-    if (onlineActive && online !== null && now - lastOnlineInput >= 66) {
+    if (onlineActive && online !== null && now - lastOnlineInput >= 50) {
       online.sendInput(onlineOverride ?? frame);
       lastOnlineInput = now;
     }
@@ -1131,7 +1142,7 @@ async function boot(): Promise<void> {
         interpolator,
         renderer.quality.entityAnimation && juice.timeScale > 0,
       );
-      followSessionCamera(offlineActive ? 0 : onlinePlayerId);
+      followSessionCamera(offlineActive ? 0 : onlinePlayerId, now);
     } else if (views !== null) {
       entities?.update(views, renderer.quality.entityAnimation && juice.timeScale > 0);
     }
@@ -1145,7 +1156,48 @@ async function boot(): Promise<void> {
     window.requestAnimationFrame(loop);
   };
 
-  function followSessionCamera(playerId: number): void {
+  function followSessionCamera(playerId: number, now: number): void {
+    // The local player must not wait for the two-tick entity interpolation.
+    // Follow the newest snapshot and damp the visual position across the
+    // 50 ms tick; remote bodies keep the 100 ms interpolation in `entities`.
+    const latest = snapshotDecoder.latestFrame;
+    let latestIndex = -1;
+    if (latest !== null) {
+      for (let i = 0; i < latest.playerCount; i += 1) {
+        if (latest.playerIds[i] === playerId) {
+          latestIndex = i;
+          break;
+        }
+      }
+    }
+    if (latest !== null && latestIndex >= 0) {
+      const targetX = latest.playerX[latestIndex] / 65_536;
+      const targetY = latest.playerY[latestIndex] / 65_536 + EYE_HEIGHT;
+      const targetZ = latest.playerZ[latestIndex] / 65_536;
+      const yaw = desktop?.yawValue ?? touch?.yawValue ?? latest.playerYaw[latestIndex];
+      const pitch = desktop?.pitchValue ?? touch?.pitchValue ?? 0;
+      if (
+        !cameraSettled ||
+        Math.hypot(
+          renderer.camera.position.x - targetX,
+          renderer.camera.position.z - targetZ,
+        ) > 8
+      ) {
+        renderer.camera.position.set(targetX, targetY, targetZ);
+        cameraSettled = true;
+      } else {
+        const dt = lastCameraAt > 0 ? Math.min(50, Math.max(1, now - lastCameraAt)) : 16;
+        const alpha = 1 - Math.exp(-dt / 20);
+        renderer.camera.position.x += (targetX - renderer.camera.position.x) * alpha;
+        renderer.camera.position.y += (targetY - renderer.camera.position.y) * alpha;
+        renderer.camera.position.z += (targetZ - renderer.camera.position.z) * alpha;
+      }
+      lastCameraAt = now;
+      renderer.camera.rotation.set(pitchRadians(pitch), yawRadians(yaw) + Math.PI, 0);
+      hudStore.set({ hp: latest.playerHp[latestIndex], maxHp: 100 });
+      return;
+    }
+
     for (let i = 0; i < interpolator.playerCount; i += 1) {
       if (interpolator.playerIds[i] !== playerId) continue;
       const snapshotYaw = (interpolator.playerYaw[i] * 256) / (Math.PI * 2);

@@ -50,6 +50,10 @@ function make<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+function sensitivityDegrees(value: number): string {
+  return `${((value * 360 * 100) / 256).toFixed(1)}°/100px`;
+}
+
 function keyLabel(code: string): string {
   if (code.startsWith("Key")) return code.slice(3);
   if (code.startsWith("Digit")) return code.slice(5);
@@ -126,11 +130,15 @@ export class SettingsScreen {
     );
     this.sensitivityValue = make("output", "settings-value");
     this.sensitivityValue.value = sensitivityInput.value;
-    this.sensitivityValue.textContent = sensitivityInput.value;
+    this.sensitivityValue.textContent = sensitivityDegrees(
+      Number.parseFloat(sensitivityInput.value),
+    );
+    this.sensitivityValue.title =
+      "Degrees of camera rotation per 100 pixels of mouse movement";
     sensitivityInput.addEventListener("input", () => {
       const value = Number.parseFloat(sensitivityInput.value);
       this.sensitivityValue.value = String(value);
-      this.sensitivityValue.textContent = String(value);
+      this.sensitivityValue.textContent = sensitivityDegrees(value);
       this.storage.setItem(SENSITIVITY_KEY, String(value));
       this.callbacks.onSensitivity?.(value);
     });

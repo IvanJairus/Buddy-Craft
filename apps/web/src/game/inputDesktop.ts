@@ -179,14 +179,33 @@ export class DesktopInput {
   private onActionCallback: ((action: InputAction, value?: number) => void) | null = null;
 
   private readonly onCanvasClick = (): void => {
-    if (!this.pointerLocked) {
-      const request = this.canvas.requestPointerLock() as unknown;
-      if (request instanceof Promise) {
-        void request.catch(() => {
+    if (this.pointerLocked) return;
+    const request = (options?: PointerLockOptions): unknown => {
+      try {
+        return options === undefined
+          ? this.canvas.requestPointerLock()
+          : this.canvas.requestPointerLock(options);
+      } catch {
+        return null;
+      }
+    };
+    const fallback = (): void => {
+      const retry = request();
+      if (retry instanceof Promise) {
+        void retry.catch(() => {
           // A browser without pointer lock still gets keyboard and edit input;
           // failing to lock must not become an unhandled rejection.
         });
       }
+    };
+    // Unadjusted movement bypasses OS pointer acceleration, which is the
+    // browser equivalent of Minecraft's Raw Input. Older browsers reject the
+    // option; retry without it in the same user gesture.
+    const pending = request({ unadjustedMovement: true });
+    if (pending instanceof Promise) {
+      void pending.catch(fallback);
+    } else if (pending === null) {
+      fallback();
     }
   };
   private readonly onPointerLockChange = (): void => {

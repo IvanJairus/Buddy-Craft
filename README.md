@@ -2094,6 +2094,28 @@ the hidden local id and the reticle centre. Presentation only: simulation,
 protocol and snapshots did not change. The separate T-060 economy pass is
 described below.
 
+## Movement feel: latest local snapshot
+
+The first browser measurement showed the local camera starting **137.6 ms**
+after W in headed Opera at 1512x982 (DPR 2), and 85.4 / 119.5 / 135.9 ms in
+three Chromium headless runs. The camera was sampling the same two-tick entity
+interpolation used for remote players, and input was sent only every 66 ms.
+
+The local camera now follows the newest snapshot instead of the 100 ms
+interpolation, damped with a 20 ms time constant. Input is sent every 25 ms
+offline and every 50 ms online, the online rate staying under the 30/s message
+budget. Pointer lock requests `unadjustedMovement` and falls back to a normal
+lock on browsers that reject the option. Settings shows the look sensitivity in
+degrees per 100 px, so 0.25 units reads 35.2°/100px.
+
+After: the same Opera run starts camera motion in **31.3 ms**, the Chromium
+headless trials are 116.6 / 68.9 / 66.6 ms, mouse-event-to-camera is 5.9 ms,
+and Opera still holds 120.3 fps. Remote bodies keep the 100 ms interpolation,
+so only the local player is ahead. This is snapshot-following with damping, not
+full client prediction: online jitter may still need T-041's rollback path.
+Sprint was not added in this pass because it changes the wire buttons and the
+authoritative speed, not just presentation.
+
 ## Balance: four numbers, ten bot matches
 
 T-060 adds `EconomyTracker` in `apps/web/src/telemetry/economy.ts`. It folds the
